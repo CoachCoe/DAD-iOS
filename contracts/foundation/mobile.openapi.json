@@ -1,0 +1,4084 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DAD donor mobile API",
+    "version": "r1",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "description": "The DAD (Dynamic Aid Delivery) donor API, serving the web app, the donor iOS/Android app, and the staff back office.\n\n## Clients and authentication\n- **Browsers** authenticate with HttpOnly cookies. Every mutation must carry the exact configured `Origin`; this is the CSRF defense. The API sends no CORS headers.\n- **The donor app** sends `X-DAD-Client: native` on every request, never sends `Origin` or cookies, and authenticates with `Authorization: Bearer <access token>`. A request with Origin or cookies is a browser request whatever else it carries. Sign in by calling POST /donor/login, opening the emailed `/account/claim#token=…` link in the app, and sending the fragment's token to POST /donor/claim as a native request, which returns a 15-minute access token and a rotating refresh token. Exchange the refresh token at POST /donor/refresh when the access token expires or a request answers 401; send one refresh at a time and keep only the newest tokens. Routes that admit the app list `native` in `x-clients`, and POST /donor/refresh and the push-device routes admit nothing else; giving, referral capture, partner signup, and every staff route are web-only.\n- Staff routes are browser-only and never accept bearer tokens. The back office runs on its own host (`DONOR_STAFF_ORIGIN`): staff mutations require that exact `Origin`, and donor and public mutations require the public one, so neither site can act on the other.\n\n## Rate limits\nMutations are rate limited per client address and class (`x-rate-limit`): auth 10/min, visitor 60/min, account 30/min, staff 60/min, with bursts up to the same size. Exceeding one answers 429 with `Retry-After`. Reads are not rate limited by the API.\n\n## Conventions\n- Errors are always `application/json` `{\"detail\": \"…\"}` with the status below; the detail is safe to display. A 503 for a feature the deployment has not configured adds a stable `code` and should not be retried. Unknown routes and malformed record IDs answer 404, wrong methods 405 with `Allow`.\n- Request bodies are one JSON object with exactly the documented fields (unknown fields, trailing data, NUL characters, and `null` for a defaulted field are 422), at most 256 KiB unless stated (larger is 413).\n- Money is integer USD cents in fields ending `_minor`; the API shows the same numbers on every client.\n- Timestamps are RFC 3339 strings, UTC, possibly with fractional seconds (`2026-10-06T14:03:00Z`, `…+00:00` in gift records). Dates are `YYYY-MM-DD`.\n- Lists page by `offset`, 50 rows per page; a response's `next_offset` (or `next_<list>_offset`) is the next page's offset, or null on the last page.\n- Commands that reach the payment processor or deliver email require an `Idempotency-Key`; retry with the same key after a timeout or 503.\n- Every response is `Cache-Control: no-store` except published content.\n"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "The API host, which the donor app calls directly."
+    }
+  ],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "live",
+        "summary": "Liveness",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "alive"
+                    },
+                    "commit": {
+                      "type": "string",
+                      "description": "The running build's VCS revision, or \"unknown\"."
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "commit"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/donor/login": {
+      "post": {
+        "operationId": "login",
+        "summary": "Email a sign-in link",
+        "description": "503 `EMAIL_UNCONFIGURED` when the deployment has no email. Never reveals whether the address exists. The link (`/account/claim#token=…`) is single-use and expires after 15 minutes; the app should handle it as a universal/app link and call POST /donor/claim.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "maxLength": 320
+                  },
+                  "next": {
+                    "type": "string",
+                    "description": "Page the emailed link returns to after sign-in. Optional; null or any other value is 422.",
+                    "enum": [
+                      "/account/payment-method",
+                      "/account/dashboard"
+                    ]
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted, whether or not the address has an account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/claim": {
+      "post": {
+        "operationId": "claim",
+        "summary": "Exchange an emailed sign-in proof for a session",
+        "description": "A browser request receives an HttpOnly cookie and `{\"claimed\":true}`. A native request (`X-DAD-Client: native`, no Origin, no cookies) receives NativeSession, a new access and refresh token, and no cookie; it may describe its device so the donor can recognize the session later. Any session presented with the request (cookie or bearer) is revoked. 401 means the link is invalid, used, or expired.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "description": "Proof from the emailed link fragment.",
+                    "minLength": 32,
+                    "maxLength": 128
+                  },
+                  "device_name": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "Native requests only, optional: the device's user-visible name, shown to the donor in their session list. Control and formatting characters are removed. Ignored for browser requests."
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "IOS",
+                      "ANDROID"
+                    ],
+                    "description": "Native requests only, optional. Ignored for browser requests."
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "description": "Browser request: the session is set only as the `dad_donor_session` cookie.",
+                      "properties": {
+                        "claimed": {
+                          "type": "boolean",
+                          "const": true
+                        }
+                      },
+                      "required": [
+                        "claimed"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeSession",
+                      "description": "Native request."
+                    }
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "Set-Cookie": {
+                "description": "Browser requests only.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/refresh": {
+      "post": {
+        "operationId": "refresh",
+        "summary": "Exchange the app's refresh token for new tokens",
+        "description": "Native requests only; a browser request is 403 even from the public origin. Returns a new access token and a new refresh token, and the previous access token stops working at once. Each refresh token works once. Presenting one the session has already exchanged revokes the whole session (every token issued since that sign-in) and records a security event, because the app or someone who copied the token is using a stale one. The one exception covers a lost response: the refresh token exchanged most recently is accepted again for one minute after that exchange, and answered with yet another pair that supersedes the first. Concurrent refreshes with one token are therefore answered in turn, and only the tokens answered last keep working, so send one refresh at a time and keep only the newest tokens. 401 means the session has ended: sign in again by email.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "refresh_token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "refresh_token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeSession"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/email-change/confirm": {
+      "post": {
+        "operationId": "confirmEmailChange",
+        "summary": "Confirm an email change step",
+        "description": "Needs only the emailed proof. Completion revokes every session, including the app's, and removes every passkey; it never issues a session, so sign in again afterwards.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stage": {
+                      "type": "string",
+                      "description": "NEW: the current address is verified and a link went to the new address. COMPLETED: the email changed and every session was revoked.",
+                      "enum": [
+                        "NEW",
+                        "COMPLETED"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "stage"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/logout": {
+      "post": {
+        "operationId": "logout",
+        "summary": "Sign out this session",
+        "description": "Succeeds even when the session is already invalid (no 401), so a client can always discard its credential. Ends the whole session: for the app, its refresh token stops working too. Browser responses expire the cookie.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "signed_out": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "signed_out"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/logout-all": {
+      "post": {
+        "operationId": "logoutAll",
+        "summary": "Sign out every session",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "signed_out": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "signed_out"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Ends every session of the donor, this one included. Passkeys are kept; remove them with POST /donor/me/passkeys/{passkey_id}/delete."
+      }
+    },
+    "/donor/me/sessions": {
+      "get": {
+        "operationId": "sessions",
+        "summary": "Where the donor is signed in",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/sessions/{session_id}/revoke": {
+      "post": {
+        "operationId": "revokeSession",
+        "summary": "Sign out another session",
+        "description": "Ends one of the donor's other sessions at once: its cookie, access token, and refresh token stop working immediately. A session that has already ended succeeds again. 404 when the ID is not one of the donor's sessions. 409 for the session making the request; use POST /donor/logout for that.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A malformed ID is 404, like an unknown one."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The donor's sessions after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/sessions/revoke-others": {
+      "post": {
+        "operationId": "revokeOtherSessions",
+        "summary": "Sign out every other session",
+        "description": "Ends every session of the donor except the one making the request, at once.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "The donor's sessions after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/email-change": {
+      "post": {
+        "operationId": "requestEmailChange",
+        "summary": "Start an email change",
+        "description": "Sends a confirmation to the current address first, then to the new one. 503 `EMAIL_UNCONFIGURED` when the deployment has no email.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "maxLength": 320
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stage": {
+                      "type": "string",
+                      "const": "CURRENT"
+                    }
+                  },
+                  "required": [
+                    "stage"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/dashboard": {
+      "get": {
+        "operationId": "dashboard",
+        "summary": "Dashboard: referrals, streak, founding badge",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DonorDashboard"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/profile": {
+      "get": {
+        "operationId": "profile",
+        "summary": "Profile and notification preferences",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/preferences": {
+      "post": {
+        "operationId": "savePreferences",
+        "summary": "Save notification preferences",
+        "description": "Replaces every notification choice at once. 409 when `version` is stale: re-read the profile and retry.",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "format": "int32",
+                    "description": "The profile `version` being replaced.",
+                    "minimum": 0
+                  },
+                  "referral_emails": {
+                    "type": "boolean"
+                  },
+                  "marketing_emails": {
+                    "type": "boolean"
+                  },
+                  "push_referral_converted": {
+                    "type": "boolean"
+                  },
+                  "push_streak_at_risk": {
+                    "type": "boolean"
+                  },
+                  "push_streak_milestone": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "version",
+                  "referral_emails",
+                  "marketing_emails",
+                  "push_referral_converted",
+                  "push_streak_at_risk",
+                  "push_streak_milestone"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/push-device": {
+      "post": {
+        "operationId": "registerPushDevice",
+        "summary": "Register this installation for app notifications",
+        "description": "Native requests only. Records the push token of the app installation behind the calling session, replacing any token the session held. Register at every launch, since platforms rotate tokens. A token another session holds, the donor's or anyone's, moves to this session: it names one installation. The token is removed when the session is signed out, revoked, or ends, so sign-in again means registering again. Notifications carry generic text, a `category` (`REFERRAL_CONVERTED`, `STREAK_AT_RISK`, or `STREAK_MILESTONE`) and an app `path` to open, never names or amounts; fetch details through the API. 503 with `PUSH_UNCONFIGURED` when this deployment does not deliver to the platform. 401 for a browser session's credential.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "IOS",
+                      "ANDROID"
+                    ]
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 1024,
+                    "description": "For iOS, the APNs device token as hex (either case); for Android, the FCM registration token."
+                  },
+                  "environment": {
+                    "type": "string",
+                    "enum": [
+                      "SANDBOX",
+                      "PRODUCTION"
+                    ],
+                    "default": "PRODUCTION",
+                    "description": "iOS only: the APNs environment that issued the token (SANDBOX for development builds). Omit for Android."
+                  }
+                },
+                "required": [
+                  "platform",
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The session's registration after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushRegistration"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/push-device/unregister": {
+      "post": {
+        "operationId": "unregisterPushDevice",
+        "summary": "Stop app notifications to this installation",
+        "description": "Native requests only. Removes the calling session's push token, if any; the session stays signed in.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "The session's registration after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushRegistration"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/conversions": {
+      "get": {
+        "operationId": "conversions",
+        "summary": "Recent referral conversions",
+        "description": "Referrals that converted: when each referred donor's first gift was paid, and its channel, newest first, at most 20. A referral whose gifts were all refunded no longer appears, matching the dashboard's counts. Nothing identifies the referred donor. Pass the newest `converted_at` already shown as `since` to fetch only newer ones, for example after a notification.",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Only conversions strictly after this RFC 3339 time.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/sharing": {
+      "get": {
+        "operationId": "sharing",
+        "summary": "Public name and referral links",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Sharing"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "saveSharing",
+        "summary": "Choose a public name, optionally replacing the referral code",
+        "description": "Replacing the code invalidates the old one for new visits.",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "public_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "replace_code": {
+                    "type": "boolean",
+                    "description": "Defaults to false; null is invalid."
+                  }
+                },
+                "required": [
+                  "public_name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Sharing"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/referral-code.svg": {
+      "get": {
+        "operationId": "referralCode",
+        "summary": "In-person referral QR code",
+        "description": "409 until a public name is chosen.",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/gifts": {
+      "get": {
+        "operationId": "gifts",
+        "summary": "Giving history",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Offset"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GiftsPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/receipts/{gift_id}": {
+      "get": {
+        "operationId": "receipt",
+        "summary": "Gift record (sandbox, not a tax receipt)",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "gift_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A malformed ID is 404, like an unknown one."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Receipt"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/annual-summary/{year}": {
+      "get": {
+        "operationId": "annualSummary",
+        "summary": "Calendar-year giving summary",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "year",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 2000,
+              "maximum": 9999
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnualSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/wallet": {
+      "get": {
+        "operationId": "walletProviders",
+        "summary": "Which Wallet passes this deployment can issue",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "apple": {
+                      "type": "boolean"
+                    },
+                    "google": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "apple",
+                    "google"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/wallet/apple": {
+      "post": {
+        "operationId": "applePass",
+        "summary": "Apple Wallet pass for the referral code",
+        "description": "409 until a public name is chosen.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/vnd.apple.pkpass": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/wallet/google": {
+      "post": {
+        "operationId": "googlePass",
+        "summary": "Google Wallet save link for the referral code",
+        "description": "409 until a public name is chosen.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/recurring": {
+      "get": {
+        "operationId": "recurring",
+        "summary": "Monthly gift status",
+        "description": "Served from the subscription as last synced from Stripe by verified webhooks and recurring commands; it never calls Stripe. `observed_at` is when that sync happened.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecurringDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/recurring/amount": {
+      "get": {
+        "operationId": "amountOptions",
+        "summary": "Amount change offer",
+        "description": "Served from the subscription as last synced from Stripe by verified webhooks and recurring commands; it never calls Stripe. The matching POST checks current Stripe state and answers 409 when the offer no longer matches it.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AmountOptions"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "changeAmount",
+        "summary": "Change the monthly amount from the next renewal",
+        "description": "Idempotent. Echo the values the matching GET returned; 409 when they no longer match current billing. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subscription_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "amount_minor": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 100,
+                    "maximum": 99999999
+                  },
+                  "previous_minor": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 100,
+                    "maximum": 99999999
+                  },
+                  "effective_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "subscription_id",
+                  "amount_minor",
+                  "previous_minor",
+                  "effective_at"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AmountChange"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/recurring/pause": {
+      "get": {
+        "operationId": "pauseOptions",
+        "summary": "Pause offer: 1, 2, or 3 skipped renewals with exact dates",
+        "description": "Served from the subscription as last synced from Stripe by verified webhooks and recurring commands; it never calls Stripe. The matching POST checks current Stripe state and answers 409 when the offer no longer matches it. 409 here when the stored billing dates are inconsistent.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseOptions"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "pauseRecurring",
+        "summary": "Pause renewals",
+        "description": "Idempotent. Echo the values the matching GET returned; 409 when they no longer match current billing. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subscription_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "months": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 1,
+                    "maximum": 3
+                  },
+                  "starts_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "resumes_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "subscription_id",
+                  "months",
+                  "starts_at",
+                  "resumes_at"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/recurring/resume": {
+      "get": {
+        "operationId": "resumeOptions",
+        "summary": "Resume offer",
+        "description": "Served from the subscription as last synced from Stripe by verified webhooks and recurring commands; it never calls Stripe. The matching POST checks current Stripe state and answers 409 when the offer no longer matches it.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResumeOptions"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "resumeRecurring",
+        "summary": "Resume a pause early",
+        "description": "Idempotent. Echo the values the matching GET returned; 409 when they no longer match current billing. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pause_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "next_renewal": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "pause_id",
+                  "next_renewal"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resumption"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/payment-method": {
+      "get": {
+        "operationId": "paymentMethod",
+        "summary": "Card update status",
+        "description": "Served from stored card update records; it never calls Stripe.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentMethodStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/recurring/cancel": {
+      "post": {
+        "operationId": "cancelRecurring",
+        "summary": "Stop future renewals",
+        "description": "Idempotent. Echo the values the matching GET returned; 409 when they no longer match current billing. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subscription_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "period_end": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "subscription_id",
+                  "period_end"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecurringDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/payment-method/setup": {
+      "post": {
+        "operationId": "beginPaymentUpdate",
+        "summary": "Start a Stripe-hosted card update",
+        "description": "No body. Open `url` in the system browser; poll GET /donor/me/payment-method afterwards.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentUpdate"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/passkeys/sign-in/options": {
+      "post": {
+        "operationId": "beginDonorPasskeySignIn",
+        "summary": "Begin a passkey sign-in",
+        "description": "Issues a usernameless WebAuthn challenge that any of the donor's passkeys for the public origin may answer, in a browser or, through its associated domain, the app. Pass `options` to `PublicKeyCredential.parseRequestOptionsFromJSON` and `navigator.credentials.get`, then answer within five minutes. No body.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ceremony"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/passkeys/sign-in": {
+      "post": {
+        "operationId": "finishDonorPasskeySignIn",
+        "summary": "Finish a passkey sign-in",
+        "description": "Verifies the assertion (challenge, origin, relying party, user verification, and signature) and signs the donor in, as a claim does. Each ceremony is answered once. 401 covers an unknown passkey, a disabled account, a signature counter that went backwards, and an unknown, expired, or used ceremony alike.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ceremony": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128,
+                    "description": "The `ceremony` from the matching options response."
+                  },
+                  "credential": {
+                    "type": "object",
+                    "description": "The browser's `PublicKeyCredential` as JSON (`credential.toJSON()`), with base64url binary fields; at most 64 KiB."
+                  },
+                  "device_name": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "Native requests only, optional: the device's user-visible name, shown to the donor in their session list. Control and formatting characters are removed. Ignored for browser requests."
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "IOS",
+                      "ANDROID"
+                    ],
+                    "description": "Native requests only, optional. Ignored for browser requests."
+                  }
+                },
+                "required": [
+                  "ceremony",
+                  "credential"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "description": "Browser request: the session is set only as the `dad_donor_session` cookie.",
+                      "properties": {
+                        "signed_in": {
+                          "type": "boolean",
+                          "const": true
+                        }
+                      },
+                      "required": [
+                        "signed_in"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeSession",
+                      "description": "Native request."
+                    }
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "Set-Cookie": {
+                "description": "Browser requests only.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/passkeys": {
+      "get": {
+        "operationId": "donorPasskeys",
+        "summary": "The donor's passkeys",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/passkeys/register/options": {
+      "post": {
+        "operationId": "beginDonorPasskeyRegister",
+        "summary": "Begin adding a passkey",
+        "description": "Issues WebAuthn creation options requiring a discoverable, user-verifying passkey, excluding those the donor already holds. Pass `options` to `PublicKeyCredential.parseCreationOptionsFromJSON` and `navigator.credentials.create`, then answer within five minutes. No body.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreationCeremony"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/passkeys/register": {
+      "post": {
+        "operationId": "finishDonorPasskeyRegister",
+        "summary": "Finish adding a passkey",
+        "description": "Verifies the attestation, stores the passkey, and emails the donor an essential notice naming it. 401 covers a rejected attestation, a passkey already registered to any account, a ceremony begun by another donor, and an unknown, expired, or used ceremony alike, as well as a missing session.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ceremony": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128,
+                    "description": "The `ceremony` from the matching options response."
+                  },
+                  "credential": {
+                    "type": "object",
+                    "description": "The browser's `PublicKeyCredential` as JSON (`credential.toJSON()`), with base64url binary fields; at most 64 KiB."
+                  },
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 64,
+                    "description": "Optional label to tell passkeys apart, such as the device or password manager. Plain text without control characters."
+                  }
+                },
+                "required": [
+                  "ceremony",
+                  "credential"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The donor's passkeys after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/passkeys/{passkey_id}/delete": {
+      "post": {
+        "operationId": "deleteDonorPasskey",
+        "summary": "Remove a passkey",
+        "description": "The passkey stops signing in at once. Sessions it already started are not ended; see POST /donor/me/sessions/revoke-others. 404 when the ID is not one of the donor's passkeys.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "passkey_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A malformed ID is 404, like an unknown one."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The donor's passkeys after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "dad_donor_session",
+        "description": "Web donor session: HttpOnly, Secure on HTTPS, SameSite=Lax, 30 days at most and not extended by use. Set by POST /donor/claim for browser requests. Mutations also require the exact configured `Origin`."
+      },
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Donor app access token, from POST /donor/claim or POST /donor/refresh sent as a native request. It lasts 15 minutes and stops working as soon as it is refreshed, or its session is signed out, revoked, or ends; every request checks the session, so revocation is immediate. Accepted only on native requests: `X-DAD-Client: native`, no `Origin` header, and no `Cookie` header. Any request carrying Origin or cookies is treated as a browser request, its Authorization header is ignored, and its mutations need the exact Origin. Refresh tokens are never accepted here, and access tokens are never accepted by POST /donor/refresh. Never accepted for staff routes."
+      },
+      "staffCookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "dad_staff_session",
+        "description": "Staff session: HttpOnly, SameSite=Strict, host-only on the staff host, 8 hours at most. Named `__Host-dad_staff_session` when the staff origin is HTTPS. Set by a passkey sign-in or activation. Browser-only; mutations require the exact staff `Origin`. Permissions are checked server-side against current staff state on every request."
+      },
+      "stripeSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Stripe-Signature",
+        "description": "Stripe webhook signature over the raw request body."
+      }
+    },
+    "responses": {
+      "Forbidden": {
+        "description": "Browser requests: Origin is not the configured site origin, or, on staff routes, Sec-Fetch-Site is present and neither same-origin nor none. App requests: the route does not admit the app, or the request also carried Origin or cookies. Any browser request to a route that admits only the app. Some routes also use 403 for a permission or account restriction.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "The request body exceeds the route's limit (256 KiB for JSON unless stated).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "UnsupportedMediaType": {
+        "description": "Send `Content-Type: application/json` (or an `application/*+json` type), or omit it.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Unprocessable": {
+        "description": "The body is not one JSON object of exactly the documented fields, a field or parameter is invalid (including any string containing NUL), or the Idempotency-Key is missing or not a version 4 UUID.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "The client address exhausted this route's rate-limit class. Wait `Retry-After` seconds.",
+        "headers": {
+          "Retry-After": {
+            "description": "Whole seconds until a request would be admitted.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "Without `code`: the dependency behind this route failed or is not connected; retry later, reusing the Idempotency-Key for commands. With `code`: the feature is not configured in this deployment; do not retry.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No valid session: missing, malformed, expired, or revoked. Sign in again.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "The record changed or conflicts with this request. Refresh before retrying; reusing an Idempotency-Key with different content also conflicts.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such record for this session, or no such route. A malformed record ID or referral code is also 404.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "description": "Every non-2xx response, including unmatched routes (404) and methods (405).",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Human-readable explanation, safe to show to the user. Never contains credentials, donor data, or internal error text."
+          },
+          "code": {
+            "type": "string",
+            "description": "Present only on a 503 for a feature this deployment has deliberately not configured. Such a 503 is not transient: do not retry; show the feature as unavailable.",
+            "enum": [
+              "PAYMENTS_UNCONFIGURED",
+              "EMAIL_UNCONFIGURED",
+              "SOURCE_STORAGE_UNCONFIGURED"
+            ]
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicationProblem"
+            },
+            "description": "Present only on a 422 from POST /donor/staff/content/publish: every problem found, up to 100."
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "additionalProperties": false
+      },
+      "PublicationProblem": {
+        "type": "object",
+        "properties": {
+          "sheet": {
+            "type": "string",
+            "description": "`initiatives` or `ledger`, or empty for a request field named by `column`."
+          },
+          "row": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Spreadsheet row, counting the header as row 1; 0 for the whole sheet."
+          },
+          "column": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Stable machine code, e.g. `not_integer`, `too_large`, `invalid_text`."
+          }
+        },
+        "required": [
+          "sheet",
+          "row",
+          "column",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "NativeSession": {
+        "type": "object",
+        "description": "The donor app's tokens, returned by POST /donor/claim and POST /donor/refresh to native requests only. Browsers never receive tokens in a body: their session is solely an HttpOnly cookie. Store both tokens in the platform keychain/keystore and replace both on every refresh.",
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "Opaque. Send it as `Authorization: Bearer <token>` together with `X-DAD-Client: native`."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds until the access token expires: 900, or less when the session itself ends sooner."
+          },
+          "refresh_token": {
+            "type": "string",
+            "description": "Opaque and single-use: send it to POST /donor/refresh for the next pair. Never send it as a bearer token."
+          },
+          "refresh_expires_in": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds until the session ends unless refreshed: 60 days after the latest refresh, and never more than a year after sign-in, when the donor signs in again by email."
+          }
+        },
+        "required": [
+          "access_token",
+          "expires_in",
+          "refresh_token",
+          "refresh_expires_in"
+        ],
+        "additionalProperties": false
+      },
+      "SessionList": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "description": "Sessions that can still be used, including app sessions whose access token has expired but can be refreshed: the current session first, then by latest use, at most 50.",
+            "items": {
+              "$ref": "#/components/schemas/DeviceSession"
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "additionalProperties": false
+      },
+      "DeviceSession": {
+        "type": "object",
+        "description": "One place the donor is signed in: a web browser (one per cookie) or an installation of the app.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Opaque session ID for POST /donor/me/sessions/{session_id}/revoke. It reveals nothing about any token."
+          },
+          "client": {
+            "type": "string",
+            "enum": [
+              "BROWSER",
+              "APP"
+            ]
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "IOS",
+              "ANDROID",
+              null
+            ],
+            "description": "As reported by the app at sign-in; always null for browsers."
+          },
+          "label": {
+            "type": "string",
+            "description": "A name the donor can recognize, safe to display as plain text: the device name the app reported, otherwise “iOS device”, “Android device”, or “Mobile device”; every browser is “Web browser”."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the donor signed in."
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The latest recorded use, recorded at most every five minutes and on every refresh, so it may trail the true last use by that much."
+          },
+          "current": {
+            "type": "boolean",
+            "description": "Whether this is the session making the request."
+          }
+        },
+        "required": [
+          "id",
+          "client",
+          "platform",
+          "label",
+          "created_at",
+          "last_used_at",
+          "current"
+        ],
+        "additionalProperties": false
+      },
+      "DonorDashboard": {
+        "description": "A null `referrals` or `streak` means the figure is not currently known; never show it as zero.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "description": "Always `test`: R1 accepts Stripe test payments only.",
+                "enum": [
+                  "test"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "const": "preparing"
+              }
+            },
+            "required": [
+              "mode",
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "computed_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "founding_donor": {
+                "type": "boolean"
+              },
+              "mode": {
+                "type": "string",
+                "description": "Always `test`: R1 accepts Stripe test payments only.",
+                "enum": [
+                  "test"
+                ]
+              },
+              "referrals": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReferralSummary"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "type": "string",
+                "const": "ready"
+              },
+              "streak": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/StreakSummary"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "computed_at",
+              "founding_donor",
+              "mode",
+              "referrals",
+              "state",
+              "streak"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "ReferralSummary": {
+        "type": "object",
+        "properties": {
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD"
+            ]
+          },
+          "irl": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current in-person referral count."
+          },
+          "irl_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Collected dollars attributed to in-person referrals, after successful refunds, in cents."
+          },
+          "link": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current link referral count."
+          },
+          "link_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Collected dollars attributed to link referrals, after successful refunds, in cents."
+          },
+          "total_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "irl_minor + link_minor."
+          }
+        },
+        "required": [
+          "currency",
+          "irl",
+          "irl_minor",
+          "link",
+          "link_minor",
+          "total_minor"
+        ],
+        "additionalProperties": false
+      },
+      "StreakSummary": {
+        "type": "object",
+        "properties": {
+          "at_risk": {
+            "type": "boolean",
+            "description": "A renewal failed and is inside its 14-day grace period."
+          },
+          "current": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "grace_ends_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "at_risk",
+          "current",
+          "grace_ends_at"
+        ],
+        "additionalProperties": false
+      },
+      "Profile": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "public_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "referral_emails": {
+            "type": "boolean"
+          },
+          "marketing_emails": {
+            "type": "boolean"
+          },
+          "push_referral_converted": {
+            "type": "boolean",
+            "description": "App notification when someone the donor invited makes their first gift. Starts on: the device's notification permission is the opt-in."
+          },
+          "push_streak_at_risk": {
+            "type": "boolean",
+            "description": "App notification when a declined monthly payment puts the donor's giving streak at risk. Starts on."
+          },
+          "push_streak_milestone": {
+            "type": "boolean",
+            "description": "App notification when the donor's giving streak reaches 3 or 6 months, a year, or each further year. Starts on."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Optimistic concurrency version; send it back when saving preferences."
+          },
+          "consent_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "public_name",
+          "referral_emails",
+          "marketing_emails",
+          "push_referral_converted",
+          "push_streak_at_risk",
+          "push_streak_milestone",
+          "version",
+          "consent_version"
+        ],
+        "additionalProperties": false
+      },
+      "PushRegistration": {
+        "type": "object",
+        "description": "The calling session's push registration.",
+        "properties": {
+          "registered": {
+            "type": "boolean"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "IOS",
+              "ANDROID",
+              null
+            ]
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "SANDBOX",
+              "PRODUCTION",
+              null
+            ],
+            "description": "The APNs environment for iOS; null for Android."
+          }
+        },
+        "required": [
+          "registered",
+          "platform",
+          "environment"
+        ],
+        "additionalProperties": false
+      },
+      "ConversionList": {
+        "type": "object",
+        "properties": {
+          "conversions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Conversion"
+            }
+          },
+          "more": {
+            "type": "boolean",
+            "description": "Whether older conversions after `since` were left out."
+          }
+        },
+        "required": [
+          "conversions",
+          "more"
+        ],
+        "additionalProperties": false
+      },
+      "Conversion": {
+        "type": "object",
+        "description": "A referral's first gift. It carries nothing about the referred donor.",
+        "properties": {
+          "converted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "LINK",
+              "IRL"
+            ]
+          }
+        },
+        "required": [
+          "converted_at",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "Sharing": {
+        "type": "object",
+        "properties": {
+          "public_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Referral link, once a public name is chosen.",
+            "format": "uri"
+          },
+          "irl_link": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "In-person (QR) referral link.",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "public_name",
+          "link",
+          "irl_link"
+        ],
+        "additionalProperties": false
+      },
+      "GiftsPage": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Always `test`: R1 accepts Stripe test payments only.",
+            "enum": [
+              "test"
+            ]
+          },
+          "gifts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Gift"
+            }
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Offset of the next page, or null on the last page.",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "email",
+          "mode",
+          "gifts",
+          "next_offset"
+        ],
+        "additionalProperties": false
+      },
+      "Gift": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD"
+            ]
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "MONTHLY",
+              "ONE_TIME"
+            ]
+          },
+          "paid_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "refunded_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Successfully refunded so far, in cents."
+          },
+          "net_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "amount_minor - refunded_minor."
+          }
+        },
+        "required": [
+          "id",
+          "amount_minor",
+          "currency",
+          "frequency",
+          "paid_at",
+          "refunded_minor",
+          "net_minor"
+        ],
+        "additionalProperties": false
+      },
+      "Receipt": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "Always `test`: R1 accepts Stripe test payments only.",
+            "enum": [
+              "test"
+            ]
+          },
+          "tax_receipt": {
+            "type": "boolean",
+            "description": "Always false in R1: sandbox records are not tax receipts."
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "gift": {
+            "$ref": "#/components/schemas/GiftRecord"
+          }
+        },
+        "required": [
+          "mode",
+          "tax_receipt",
+          "as_of",
+          "receipt_id",
+          "gift"
+        ],
+        "additionalProperties": false
+      },
+      "GiftRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD"
+            ]
+          },
+          "paid_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "MONTHLY",
+              "ONE_TIME"
+            ]
+          },
+          "refunded_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "net_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "refunds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RefundRecord"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "amount_minor",
+          "currency",
+          "paid_at",
+          "frequency",
+          "refunded_minor",
+          "net_minor",
+          "refunds"
+        ],
+        "additionalProperties": false
+      },
+      "RefundRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "status": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "amount_minor",
+          "status",
+          "observed_at"
+        ],
+        "additionalProperties": false
+      },
+      "AnnualSummary": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "Always `test`: R1 accepts Stripe test payments only.",
+            "enum": [
+              "test"
+            ]
+          },
+          "tax_receipt": {
+            "type": "boolean",
+            "description": "Always false in R1."
+          },
+          "year": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA zone that bounds the calendar year."
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "gifts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GiftRecord"
+            }
+          },
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "refunded_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "net_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD"
+            ]
+          }
+        },
+        "required": [
+          "mode",
+          "tax_receipt",
+          "year",
+          "timezone",
+          "as_of",
+          "gifts",
+          "amount_minor",
+          "refunded_minor",
+          "net_minor",
+          "currency"
+        ],
+        "additionalProperties": false
+      },
+      "RecurringDetails": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "Always `test`: R1 accepts Stripe test payments only.",
+            "enum": [
+              "test"
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "description": "When the subscription was last synced from Stripe; present with `subscription`.",
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "preparing",
+              "ready"
+            ]
+          },
+          "subscription": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Subscription"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mode",
+          "subscription"
+        ],
+        "additionalProperties": false
+      },
+      "Subscription": {
+        "type": "object",
+        "properties": {
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Subscription attempt ID used by recurring commands.",
+            "format": "uuid"
+          },
+          "pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PauseWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The confirmed pause, or null when none is in effect or scheduled."
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stops_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "amount_minor",
+          "currency",
+          "id",
+          "pause",
+          "period_end",
+          "status",
+          "stops_at"
+        ],
+        "additionalProperties": false
+      },
+      "PauseWindow": {
+        "type": "object",
+        "description": "Renewals from starts_at are skipped until giving resumes at resumes_at.",
+        "properties": {
+          "resumes_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "resumes_at",
+          "starts_at"
+        ],
+        "additionalProperties": false
+      },
+      "AmountOptions": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "amount_minor": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Amount of the next renewal."
+              },
+              "change": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AmountChange"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effective_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "state": {
+                "type": "string",
+                "const": "ready"
+              },
+              "subscription_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "required": [
+              "amount_minor",
+              "change",
+              "effective_at",
+              "state",
+              "subscription_id"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "AmountChange": {
+        "type": "object",
+        "properties": {
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "confirmed": {
+            "type": "boolean"
+          },
+          "effective_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "previous_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Integer USD cents."
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "amount_minor",
+          "confirmed",
+          "effective_at",
+          "previous_minor",
+          "request_id"
+        ],
+        "additionalProperties": false
+      },
+      "PauseOptions": {
+        "type": "object",
+        "properties": {
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PauseOption"
+            }
+          },
+          "pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PauseView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "subscription_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "options",
+          "pause",
+          "state"
+        ],
+        "additionalProperties": false
+      },
+      "PauseOption": {
+        "type": "object",
+        "properties": {
+          "months": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "resumes_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "months",
+          "resumes_at",
+          "starts_at"
+        ],
+        "additionalProperties": false
+      },
+      "PauseView": {
+        "type": "object",
+        "properties": {
+          "confirmed": {
+            "type": "boolean"
+          },
+          "months": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "resumes_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "confirmed",
+          "months",
+          "request_id",
+          "resumes_at",
+          "starts_at"
+        ],
+        "additionalProperties": false
+      },
+      "PauseResult": {
+        "type": "object",
+        "properties": {
+          "pause": {
+            "$ref": "#/components/schemas/PauseView"
+          }
+        },
+        "required": [
+          "pause"
+        ],
+        "additionalProperties": false
+      },
+      "ResumeOptions": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "next_renewal": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "original_resume": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "pause_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "state": {
+                "type": "string",
+                "const": "ready",
+                "description": "An offer to resume at the next renewal."
+              }
+            },
+            "required": [
+              "next_renewal",
+              "original_resume",
+              "pause_id",
+              "state"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "confirmed": {
+                "type": "boolean"
+              },
+              "next_renewal": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "pause_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "request_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "state": {
+                "type": "string",
+                "const": "saved",
+                "description": "A resumption already requested."
+              }
+            },
+            "required": [
+              "confirmed",
+              "next_renewal",
+              "pause_id",
+              "request_id",
+              "state"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "Resumption": {
+        "type": "object",
+        "properties": {
+          "confirmed": {
+            "type": "boolean"
+          },
+          "next_renewal": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "pause_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "confirmed",
+          "next_renewal",
+          "pause_id",
+          "request_id"
+        ],
+        "additionalProperties": false
+      },
+      "PaymentMethodStatus": {
+        "type": "object",
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Always `test`: R1 accepts Stripe test payments only.",
+            "enum": [
+              "test"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "NONE",
+              "PENDING",
+              "OPEN",
+              "APPLIED",
+              "EXPIRED",
+              "CANCELLED"
+            ]
+          }
+        },
+        "required": [
+          "completed_at",
+          "mode",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "PaymentUpdate": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Stripe-hosted card setup page. Open it in the system browser.",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "url"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "completed_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "APPLIED",
+                  "CANCELLED"
+                ]
+              },
+              "url": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "completed_at",
+              "status",
+              "url"
+            ],
+            "additionalProperties": false,
+            "description": "An update that finished before a new one could begin."
+          }
+        ]
+      },
+      "Ceremony": {
+        "type": "object",
+        "properties": {
+          "ceremony": {
+            "type": "string",
+            "description": "Single-use ID to send back with the credential."
+          },
+          "options": {
+            "type": "object",
+            "description": "PublicKeyCredentialRequestOptionsJSON."
+          }
+        },
+        "required": [
+          "ceremony",
+          "options"
+        ],
+        "additionalProperties": false
+      },
+      "PasskeyList": {
+        "type": "object",
+        "properties": {
+          "passkeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PasskeyInfo"
+            },
+            "description": "Oldest first."
+          }
+        },
+        "required": [
+          "passkeys"
+        ],
+        "additionalProperties": false
+      },
+      "PasskeyInfo": {
+        "type": "object",
+        "description": "A passkey the donor can sign in with. Credential material is never returned.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Opaque ID for POST /donor/me/passkeys/{passkey_id}/delete."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "The donor's label for the passkey, if they gave one."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The last sign-in with this passkey; null if it has never signed in."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "last_used_at"
+        ],
+        "additionalProperties": false
+      },
+      "CreationCeremony": {
+        "type": "object",
+        "properties": {
+          "ceremony": {
+            "type": "string",
+            "description": "Single-use ID to send back with the credential."
+          },
+          "options": {
+            "type": "object",
+            "description": "PublicKeyCredentialCreationOptionsJSON."
+          }
+        },
+        "required": [
+          "ceremony",
+          "options"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "parameters": {
+      "Offset": {
+        "name": "offset",
+        "in": "query",
+        "required": false,
+        "description": "Rows to skip. Pages hold up to 50 rows; pass the previous page's `next_offset` until it is null.",
+        "schema": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "A fresh version 4 UUID per distinct command. Retrying with the same key and body returns the original outcome and never repeats the effect; the same key with a different body is a 409.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    }
+  }
+}
