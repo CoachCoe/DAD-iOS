@@ -63,12 +63,8 @@ public actor AccountSession {
         try Task.checkCancellation()
         let before = epoch
         let current = try await usableCredentials()
-        do {
-            let result = try await api.profile(access: current.access)
-            guard before == epoch else { throw AccountError.signedOut }
-            try Task.checkCancellation()
-            return result
-        } catch AccountError.signedOut {
+        do { return try await checkedProfile(current, epoch: before) }
+        catch AccountError.signedOut {
             guard before == epoch else { throw AccountError.signedOut }
             let next = try await usableCredentials(forceFor: current.access)
             do { return try await checkedProfile(next, epoch: before) }

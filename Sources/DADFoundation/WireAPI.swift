@@ -31,8 +31,7 @@ public struct WireAPI: AccountAPI {
     private let transport: any ClientTransport
 
     public init(origin: URL) throws {
-        guard origin.scheme == "https", origin.host != nil, origin.user == nil, origin.password == nil,
-              origin.query == nil, origin.fragment == nil, origin.path.isEmpty || origin.path == "/" else { throw AccountError.invalidConfiguration }
+        guard origin.isBareHTTPSOrigin else { throw AccountError.invalidConfiguration }
         self.origin = origin
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
