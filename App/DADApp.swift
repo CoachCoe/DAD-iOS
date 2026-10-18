@@ -4,7 +4,7 @@ import SafariServices
 import CryptoKit
 
 private func tokenColor(_ name: String) -> Color {
-    guard let hex = DADTokens.color[name]?.dropFirst(), let value = UInt32(hex, radix: 16) else { return .primary }
+    guard let token = DADTokens.color[name], token.count == 7, let value = UInt32(token.dropFirst(), radix: 16) else { return .primary }
     return Color(red: Double((value >> 16) & 255) / 255, green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255)
 }
 
@@ -43,12 +43,13 @@ private final class AccountModel {
     private var activeProof: String?
     private var gate = NavigationGate()
     private var generation = 0
-    private let publicOrigin: URL?
+    private let router: LinkRouter?
     let preview: Bool
     init() {
         let apiOrigin = Bundle.main.object(forInfoDictionaryKey: "DADAPIOrigin") as? String ?? ""
         preview = apiOrigin.isEmpty
-        publicOrigin = (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String).flatMap(URL.init(string:))
+        router = (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
+            .flatMap(URL.init(string:)).flatMap { try? LinkRouter(publicOrigin: $0) }
         do {
             if apiOrigin.isEmpty {
                 session = try AccountSession(api: PreviewAPI(failFirst: ProcessInfo.processInfo.arguments.contains("--preview-unavailable")), store: PreviewStore())
@@ -72,7 +73,7 @@ private final class AccountModel {
         catch { if current == generation { state = .unavailable } }
     }
     func receive(_ url: URL) -> URL? {
-        guard let publicOrigin, let router = try? LinkRouter(publicOrigin: publicOrigin), let intent = router.route(url) else { return nil }
+        guard let intent = router?.route(url) else { return nil }
         switch intent {
         case .account(.profile):
             let signedIn: Bool
