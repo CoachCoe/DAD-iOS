@@ -9,3 +9,7 @@ build/
 DerivedData/
 xcuserdata/
 *.xcuserstate
+.swiftpm/
+Sources/DADFoundation/openapi.json
+Sources/DADFoundation/DADTokens.swift
+Sources/DADFoundation/links.json

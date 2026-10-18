@@ -1,0 +1,10 @@
+generate:
+  - types
+  - client
+accessModifier: internal
+filter:
+  operations:
+    - profile
+    - refresh
+    - logout
+    - claim
