@@ -15,7 +15,7 @@ private struct TestTransport: ClientTransport {
 
 @MainActor final class WireTests: XCTestCase {
     func testGeneratedClientSendsNativeBearerWithoutCookies() async throws {
-        let transport = TestTransport(json: #"{"email":"donor@example.org","public_name":null,"referral_emails":true,"marketing_emails":false,"push_referral_converted":true,"push_streak_at_risk":true,"push_streak_milestone":true,"version":1,"consent_version":"synthetic"}"#) { request in
+        let transport = TestTransport(json: #"{"email":"donor@example.org","public_name":null,"account_role":"DONOR","zip":null,"city":null,"timezone":null,"phone":null,"referral_emails":true,"marketing_emails":false,"push_referral_converted":true,"push_streak_at_risk":true,"push_streak_milestone":true,"push_streak_lapsed":true,"push_badge_earned":true,"push_gift_processed":true,"push_event_nearby":true,"push_event_reminder":true,"push_event_promoted":true,"rankings_opted_out":false,"network_visible":false,"volunteer":false,"volunteer_interests":[],"version":3,"consent_version":"synthetic-v1"}"#) { request in
             XCTAssertEqual(request.headerFields[.authorization], "Bearer synthetic-access")
             XCTAssertEqual(request.headerFields[.init("X-DAD-Client")!], "native")
             XCTAssertNil(request.headerFields[.cookie])

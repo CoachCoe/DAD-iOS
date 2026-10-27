@@ -2,6 +2,7 @@ import Foundation
 
 public enum AccountDestination: String, Sendable, Equatable {
     case dashboard = "/account/dashboard"
+    case gifts = "/account/gifts"
     case profile = "/account/profile"
     case paymentMethod = "/account/payment-method"
 }

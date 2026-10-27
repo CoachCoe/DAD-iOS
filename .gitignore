@@ -13,3 +13,4 @@ xcuserdata/
 Sources/DADFoundation/openapi.json
 Sources/DADFoundation/DADTokens.swift
 Sources/DADFoundation/links.json
+Sources/DADFoundation/DADNullValue.swift
