@@ -1,0 +1,36 @@
+import XCTest
+
+/// Phase C — the donor giving journey. Launches straight into the set-gift screen (a
+/// dedicated preview arg that doesn't disturb the signed-in donor-landing tests) and
+/// exercises the $1–$30/day stepper and the cancel confirmation.
+final class GivingFlowTests: XCTestCase {
+    func testSetGiftScreenRendersAndSteps() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-giving"]
+        app.launch()
+
+        let screen = app.otherElements["gift-screen"]
+        XCTAssertTrue(screen.waitForExistence(timeout: 5), "gift screen should appear")
+
+        // The preview gift starts at $1/day; incrementing moves it up a $1/day step.
+        let daily = app.staticTexts["gift-daily"]
+        XCTAssertTrue(daily.waitForExistence(timeout: 2))
+        XCTAssertEqual(daily.label, "$1/day")
+
+        app.buttons["Increase gift"].tap()
+        XCTAssertEqual(app.staticTexts["gift-daily"].label, "$2/day")
+    }
+
+    func testCancelConfirmationAppears() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-giving"]
+        app.launch()
+
+        XCTAssertTrue(app.otherElements["gift-screen"].waitForExistence(timeout: 5))
+        let cancel = app.buttons["Cancel gift"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3), "an active gift should offer cancel")
+        cancel.tap()
+        // The confirmation dialog states the ends-streak consequence.
+        XCTAssertTrue(app.buttons["Keep giving"].waitForExistence(timeout: 3))
+    }
+}

@@ -1,11 +1,12 @@
 // !$*UTF8*$!
 {archiveVersion=1; classes={}; objectVersion=56; objects={
 000000000000000000000001 = {isa=PBXProject; attributes={BuildIndependentTargetsInParallel=YES; LastUpgradeCheck=2700;}; buildConfigurationList=000000000000000000000028; compatibilityVersion="Xcode 14.0"; developmentRegion=en; hasScannedForEncodings=0; knownRegions=(en,Base); mainGroup=000000000000000000000002; productRefGroup=000000000000000000000003; projectDirPath=""; projectRoot=""; packageReferences=(00000000000000000000001E); targets=(00000000000000000000000A,000000000000000000000014);};
-000000000000000000000002 = {isa=PBXGroup; children=(000000000000000000000004,000000000000000000000005,000000000000000000000031,000000000000000000000003); sourceTree="<group>";};
+000000000000000000000002 = {isa=PBXGroup; children=(000000000000000000000004,000000000000000000000005,000000000000000000000031,000000000000000000000033,000000000000000000000003); sourceTree="<group>";};
 000000000000000000000003 = {isa=PBXGroup; children=(000000000000000000000006,000000000000000000000007); name=Products; sourceTree="<group>";};
 000000000000000000000004 = {isa=PBXFileReference; lastKnownFileType=sourcecode.swift; path=App/DADApp.swift; sourceTree="<group>";};
 000000000000000000000005 = {isa=PBXFileReference; lastKnownFileType=sourcecode.swift; path=UITests/AccountPreviewTests.swift; sourceTree="<group>";};
 000000000000000000000031 = {isa=PBXFileReference; lastKnownFileType=sourcecode.swift; path=UITests/AuthFlowTests.swift; sourceTree="<group>";};
+000000000000000000000033 = {isa=PBXFileReference; lastKnownFileType=sourcecode.swift; path=UITests/GivingFlowTests.swift; sourceTree="<group>";};
 000000000000000000000006 = {isa=PBXFileReference; explicitFileType=wrapper.application; includeInIndex=0; path=DAD.app; sourceTree=BUILT_PRODUCTS_DIR;};
 000000000000000000000007 = {isa=PBXFileReference; explicitFileType=wrapper.cfbundle; includeInIndex=0; path=DADUITests.xctest; sourceTree=BUILT_PRODUCTS_DIR;};
 000000000000000000000008 = {isa=PBXBuildFile; fileRef=000000000000000000000004;};
@@ -15,10 +16,11 @@
 00000000000000000000000C = {isa=PBXFrameworksBuildPhase; buildActionMask=2147483647; files=(000000000000000000000009); runOnlyForDeploymentPostprocessing=0;};
 00000000000000000000000D = {isa=PBXResourcesBuildPhase; buildActionMask=2147483647; files=(); runOnlyForDeploymentPostprocessing=0;};
 000000000000000000000014 = {isa=PBXNativeTarget; buildConfigurationList=00000000000000000000002A; buildPhases=(000000000000000000000015,000000000000000000000016); buildRules=(); dependencies=(000000000000000000000019); name=DADUITests; productName=DADUITests; productReference=000000000000000000000007; productType="com.apple.product-type.bundle.ui-testing";};
-000000000000000000000015 = {isa=PBXSourcesBuildPhase; buildActionMask=2147483647; files=(000000000000000000000017,000000000000000000000032); runOnlyForDeploymentPostprocessing=0;};
+000000000000000000000015 = {isa=PBXSourcesBuildPhase; buildActionMask=2147483647; files=(000000000000000000000017,000000000000000000000032,000000000000000000000034); runOnlyForDeploymentPostprocessing=0;};
 000000000000000000000016 = {isa=PBXFrameworksBuildPhase; buildActionMask=2147483647; files=(); runOnlyForDeploymentPostprocessing=0;};
 000000000000000000000017 = {isa=PBXBuildFile; fileRef=000000000000000000000005;};
 000000000000000000000032 = {isa=PBXBuildFile; fileRef=000000000000000000000031;};
+000000000000000000000034 = {isa=PBXBuildFile; fileRef=000000000000000000000033;};
 000000000000000000000018 = {isa=PBXContainerItemProxy; containerPortal=000000000000000000000001; proxyType=1; remoteGlobalIDString=00000000000000000000000A; remoteInfo=DAD;};
 000000000000000000000019 = {isa=PBXTargetDependency; target=00000000000000000000000A; targetProxy=000000000000000000000018;};
 00000000000000000000001E = {isa=XCLocalSwiftPackageReference; relativePath=".";};
