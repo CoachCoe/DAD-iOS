@@ -54,6 +54,13 @@ private final class AccountModel {
         preview = apiOrigin.isEmpty
         router = (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
             .flatMap(URL.init(string:)).flatMap { try? LinkRouter(publicOrigin: $0) }
+        // A session-less launch (no stored credentials) lands on role-select + the auth shell;
+        // the preview normally starts signed-in, so this path is opt-in for the auth journey/UITest.
+        if ProcessInfo.processInfo.arguments.contains("--preview-signed-out") {
+            session = nil
+            state = .signedOut
+            return
+        }
         do {
             if apiOrigin.isEmpty {
                 session = try AccountSession(api: PreviewAPI(failFirst: ProcessInfo.processInfo.arguments.contains("--preview-unavailable")), store: PreviewStore())
@@ -179,6 +186,91 @@ private struct RoleSelect: View {
     }
 }
 
+/// Preview sign-in transport — returns a handle and preview credentials so the auth journey
+/// runs in the simulator with no backend. The wire implementation replaces this once the
+/// phone/OIDC endpoints are consumed; the screens bind to the protocol, not this type.
+private actor PreviewSignIn: SignInService {
+    func requestPhoneCode(phone: String) async throws -> String {
+        try await Task.sleep(for: .milliseconds(150))
+        return "preview-handle"
+    }
+    func verifyPhone(handle: String, code: String) async throws -> Credentials {
+        try await Task.sleep(for: .milliseconds(150))
+        return Credentials(access: "preview", refresh: "preview-refresh", expiresAt: .distantFuture)
+    }
+}
+
+/// Sign-in method picker (PRD §5.1). Phone+SMS is the fully wired path here; the other
+/// methods are present as labeled entry points fleshed out alongside their endpoints.
+private struct SignInMethods: View {
+    let onPhone: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Sign in").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            VStack(spacing: 12) {
+                ForEach(SignInMethod.allCases) { method in
+                    Button(method.title) { if method == .phone { onPhone() } }
+                        .buttonStyle(DADButtonStyle(method == .phone ? .primary : .secondary))
+                        .disabled(method != .phone)
+                }
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityIdentifier("sign-in-methods")
+    }
+}
+
+/// Phone + SMS one-time-code journey, bound to `PhoneSignInModel`.
+private struct PhoneSignIn: View {
+    @State var model: PhoneSignInModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Sign in with your phone").font(.title.bold()).accessibilityAddTraits(.isHeader)
+            switch model.phase {
+            case .enterPhone, .requestingCode, .failed:
+                TextField("Phone number", text: $model.phone)
+                    .textContentType(.telephoneNumber)
+                    .accessibilityLabel("Phone number")
+                if case .failed(let message) = model.phase {
+                    Text(message).font(.footnote).foregroundStyle(Color.dad("fail"))
+                }
+                Button("Send code") { Task { await model.requestCode() } }
+                    .buttonStyle(DADButtonStyle(.primary))
+                    .disabled(!model.canRequestCode)
+            case .enterCode, .verifying:
+                TextField("Verification code", text: $model.code)
+                    .textContentType(.oneTimeCode)
+                    .accessibilityLabel("Verification code")
+                Button("Verify") { Task { await model.verify() } }
+                    .buttonStyle(DADButtonStyle(.primary))
+                    .disabled(!model.canVerify)
+            case .signedIn:
+                Text("You’re signed in.").font(.headline)
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityIdentifier("phone-sign-in")
+    }
+}
+
+/// The unauthenticated stack: role select → sign-in methods → the chosen method's flow.
+private struct UnauthenticatedStack: View {
+    let selectedRole: AppRole?
+    let onSignedIn: (AppRole) async -> Void
+    @State private var step: Step = .roleSelect
+    private enum Step: Equatable { case roleSelect, methods(AppRole), phone(AppRole) }
+    var body: some View {
+        switch step {
+        case .roleSelect:
+            RoleSelect { role in step = .methods(role) }
+        case .methods(let role):
+            SignInMethods { step = .phone(role) }
+        case .phone(let role):
+            PhoneSignIn(model: PhoneSignInModel(service: PreviewSignIn()) { _ in await onSignedIn(role) })
+        }
+    }
+}
+
 @main
 struct DADApp: App {
     @State private var model = AccountModel()
@@ -189,14 +281,24 @@ struct DADApp: App {
             ScrollView {
                 Group {
                     switch router.root {
-                    case .restoring, .authenticated(.donor):
-                        // Donor is the default journey and the preview session's role; show the
-                        // landing immediately (restoring collapses into it) so launch is never blank.
+                    case .authenticated(.donor):
                         DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+                    case .restoring:
+                        // During restore, show the donor landing only when a session exists
+                        // (its loading state covers the wait); a session-less launch waits on a
+                        // neutral progress view so it never flashes the signed-in screen.
+                        if model.hasSession {
+                            DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+                        } else {
+                            ProgressView().accessibilityIdentifier("restoring")
+                        }
                     case .authenticated(.partner):
                         PartnerLanding()
-                    case .unauthenticated:
-                        RoleSelect { role in router.selectRole(role); router.signedIn(as: role) }
+                    case .unauthenticated(let selectedRole):
+                        UnauthenticatedStack(selectedRole: selectedRole) { role in
+                            router.selectRole(role)
+                            router.signedIn(as: role)
+                        }
                     }
                 }
             }
