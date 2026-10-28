@@ -200,6 +200,83 @@ private actor PreviewSignIn: SignInService {
     }
 }
 
+/// Preview giving transport — an in-memory recurring gift so the Phase C giving journey runs
+/// in the simulator with no backend. The wire implementation (mapping the generated giving
+/// client) replaces this; the screens bind to the `GivingService` protocol, not this type.
+private actor PreviewGiving: GivingService {
+    private var state: RecurringState
+    init(state: RecurringState = .active(subscriptionID: "preview-sub", amountMinor: 3000, periodEnd: Date().addingTimeInterval(14 * 86_400))) {
+        self.state = state
+    }
+    func recurring() async throws -> RecurringState { state }
+    func changeAmount(subscriptionID: String, to amountMinor: Int) async throws -> RecurringState {
+        if case let .active(id, _, end) = state { state = .active(subscriptionID: id, amountMinor: amountMinor, periodEnd: end) }
+        return state
+    }
+    func cancel(subscriptionID: String, periodEnd: Date) async throws -> RecurringState {
+        if case let .active(id, amount, end) = state { state = .ending(subscriptionID: id, amountMinor: amount, periodEnd: end, stopsAt: periodEnd) }
+        return state
+    }
+    func beginPayment() async throws -> PaymentPath {
+        .webCheckoutHandoff(URL(string: "https://give.example.org/setup")!)
+    }
+}
+
+/// Set / change your recurring gift (G-1/G-2/G-7). A $1–$30/day stepper with the monthly
+/// equivalent (×30) shown derived, the streak bar, and a cancel path (G-8/G-9) with the
+/// ends-streak confirmation copy. Bound to `GivingModel`.
+private struct GiftScreen: View {
+    @State var model: GivingModel
+    @State private var confirmingCancel = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Set your gift").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            DADCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(model.selection.dailyLabel).font(.system(size: 44, weight: .bold))
+                        .accessibilityIdentifier("gift-daily")
+                    Text("\(model.selection.monthlyLabel) · charged monthly").foregroundStyle(.secondary)
+                    HStack(spacing: 16) {
+                        Button { model.decrement() } label: { Image(systemName: "minus.circle.fill").font(.title) }
+                            .accessibilityLabel("Decrease gift")
+                            .disabled(model.selection.dailyDollars <= GiftAmount.minDailyDollars)
+                        Button { model.increment() } label: { Image(systemName: "plus.circle.fill").font(.title) }
+                            .accessibilityLabel("Increase gift")
+                            .disabled(model.selection.dailyDollars >= GiftAmount.maxDailyDollars)
+                    }
+                }
+            }
+            DADStreakBar(filled: min(model.selection.dailyDollars, 30))
+            if case .failed(let message) = model.phase {
+                Text(message).font(.footnote).foregroundStyle(Color.dad("fail"))
+            }
+            Button("Save gift") { Task { await model.applySelection() } }
+                .buttonStyle(DADButtonStyle(.primary))
+                .disabled(model.phase == .working)
+            if case .active = model.recurring {
+                Button("Cancel gift") { confirmingCancel = true }
+                    .buttonStyle(DADButtonStyle(.secondary))
+            }
+            if model.recurring.isEnding {
+                Text("Your gift won’t renew — it stays active until the period ends.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("gift-ending")
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityIdentifier("gift-screen")
+        .task { await model.load() }
+        .confirmationDialog("Cancel your gift?", isPresented: $confirmingCancel, titleVisibility: .visible) {
+            Button("Cancel gift", role: .destructive) { Task { await model.cancel() } }
+            Button("Keep giving", role: .cancel) {}
+        } message: {
+            if case let .active(_, _, periodEnd) = model.recurring {
+                Text(CancelCopy.confirmation(periodEnd: periodEnd))
+            }
+        }
+    }
+}
+
 /// Sign-in method picker (PRD §5.1). Phone+SMS is the fully wired path here; the other
 /// methods are present as labeled entry points fleshed out alongside their endpoints.
 private struct SignInMethods: View {
@@ -284,7 +361,11 @@ struct DADApp: App {
                 Group {
                     switch router.root {
                     case .authenticated(.donor):
-                        DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+                        if ProcessInfo.processInfo.arguments.contains("--preview-giving") {
+                            GiftScreen(model: GivingModel(service: PreviewGiving()))
+                        } else {
+                            DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+                        }
                     case .restoring:
                         // During restore, show the donor landing only when a session exists
                         // (its loading state covers the wait); a session-less launch waits on a
