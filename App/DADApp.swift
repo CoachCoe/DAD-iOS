@@ -112,41 +112,97 @@ private struct WebFallback: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 }
 
+/// The signed-in donor landing. Carries the exact copy the app has shown since the
+/// preview shell, so the role-aware root is a structural change, not a visible one.
+private struct DonorLanding: View {
+    let state: AccountModel.State
+    let preview: Bool
+    let onRetry: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
+            Group {
+                switch state {
+                case .loading:
+                    ProgressView("Loading your account…")
+                case .ready(let profile):
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Welcome, \(profile.publicName ?? "friend")").font(.title2.bold())
+                        Text("Your account has a home here.")
+                    }
+                case .unavailable:
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Your account is unavailable right now.").font(.headline)
+                        Text("Please try again in a moment.")
+                        Button("Try again", action: onRetry).buttonStyle(.borderedProminent)
+                    }
+                case .signedOut:
+                    Text("You’re signed out. Use your DAD sign-in link to continue.")
+                }
+            }.accessibilityElement(children: .contain).accessibilityIdentifier("account-state")
+            if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
+        }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+    }
+}
+
+/// Minimal partner stack placeholder — fleshed out in the partner phase. Present now so
+/// the role-aware root compiles and routes both journeys.
+private struct PartnerLanding: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Partner portal").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            Text("Your organization’s giving home.").font(.title3)
+        }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+    }
+}
+
+/// Unauthenticated splash — pick a journey before signing in. The preview store starts
+/// signed-in, so this path is exercised only when there is no session.
+private struct RoleSelect: View {
+    let onSelect: (AppRole) -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
+            VStack(spacing: 12) {
+                Button("I’m a donor") { onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
+                Button("I’m a partner") { onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityIdentifier("role-select")
+    }
+}
+
 @main
 struct DADApp: App {
     @State private var model = AccountModel()
+    @State private var router = RoleRouter()
     @State private var web: WebDestination?
     var body: some Scene {
         WindowGroup {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-                    Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
-                    Group {
-                        switch model.state {
-                        case .loading:
-                            ProgressView("Loading your account…")
-                        case .ready(let profile):
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Welcome, \(profile.publicName ?? "friend")").font(.title2.bold())
-                                Text("Your account has a home here.")
-                            }
-                        case .unavailable:
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Your account is unavailable right now.").font(.headline)
-                                Text("Please try again in a moment.")
-                                Button("Try again") { Task { await model.load() } }.buttonStyle(.borderedProminent)
-                            }
-                        case .signedOut:
-                            Text("You’re signed out. Use your DAD sign-in link to continue.")
-                        }
-                    }.accessibilityElement(children: .contain).accessibilityIdentifier("account-state")
-                    if model.preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
-                }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+                Group {
+                    switch router.root {
+                    case .restoring, .authenticated(.donor):
+                        // Donor is the default journey and the preview session's role; show the
+                        // landing immediately (restoring collapses into it) so launch is never blank.
+                        DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+                    case .authenticated(.partner):
+                        PartnerLanding()
+                    case .unauthenticated:
+                        RoleSelect { role in router.selectRole(role); router.signedIn(as: role) }
+                    }
+                }
             }
             .modifier(AppBackground())
             .tint(tokenColor("brand-ink"))
-            .task { await model.load() }
+            .task {
+                await model.load()
+                // Reflect the restored session into the router: a usable profile means donor-authenticated.
+                if case .ready = model.state { router.signedIn(as: .donor) } else { router.restoredSignedOut() }
+            }
             .onOpenURL { if let url = model.receive($0) { web = WebDestination(url: url) } }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) {
                 if let url = $0.webpageURL, let fallback = model.receive(url) { web = WebDestination(url: fallback) }

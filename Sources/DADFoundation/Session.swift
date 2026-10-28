@@ -59,6 +59,14 @@ public actor AccountSession {
         flight = nil
     }
 
+    /// A currently-valid access token, refreshing through the single-flight path if needed.
+    /// Product clients call this per request to authorize a native call; throws `.signedOut`
+    /// when there is no usable session.
+    public func accessToken() async throws -> String {
+        try Task.checkCancellation()
+        return try await usableCredentials().access
+    }
+
     public func profile() async throws -> AccountProfile {
         try Task.checkCancellation()
         let before = epoch
