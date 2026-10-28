@@ -45,6 +45,10 @@ private final class AccountModel {
     private var generation = 0
     private let router: LinkRouter?
     let preview: Bool
+    /// Whether a session object exists. A `.unavailable`/`.signedOut` state with a session
+    /// present is a transient sub-state of the donor shell (recoverable via "Try again"),
+    /// NOT a reason to leave for the role-select splash — only a session-less app goes there.
+    var hasSession: Bool { session != nil }
     init() {
         let apiOrigin = Bundle.main.object(forInfoDictionaryKey: "DADAPIOrigin") as? String ?? ""
         preview = apiOrigin.isEmpty
@@ -200,8 +204,10 @@ struct DADApp: App {
             .tint(tokenColor("brand-ink"))
             .task {
                 await model.load()
-                // Reflect the restored session into the router: a usable profile means donor-authenticated.
-                if case .ready = model.state { router.signedIn(as: .donor) } else { router.restoredSignedOut() }
+                // A session-backed shell is the donor journey — the donor landing owns every
+                // account sub-state (loading / ready / unavailable / signed-out) and its own
+                // recovery, so stay on it. Only a genuinely session-less app goes to role-select.
+                if model.hasSession { router.signedIn(as: .donor) } else { router.restoredSignedOut() }
             }
             .onOpenURL { if let url = model.receive($0) { web = WebDestination(url: url) } }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) {
