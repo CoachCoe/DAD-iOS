@@ -390,6 +390,14 @@ struct DADApp: App {
             .modifier(AppBackground())
             .tint(tokenColor("brand-ink"))
             .task {
+                // The giving preview exercises the signed-in GiftScreen directly: route to the
+                // donor shell up front (deterministically, before the profile await) so the
+                // switch shows GiftScreen immediately instead of dwelling in `.restoring` /
+                // DonorLanding during PreviewAPI's load delay.
+                if ProcessInfo.processInfo.arguments.contains("--preview-giving") {
+                    router.signedIn(as: .donor)
+                    return
+                }
                 await model.load()
                 // A session-backed shell is the donor journey — the donor landing owns every
                 // account sub-state (loading / ready / unavailable / signed-out) and its own
