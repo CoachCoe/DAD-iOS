@@ -256,7 +256,9 @@ private struct PhoneSignIn: View {
 /// The unauthenticated stack: role select → sign-in methods → the chosen method's flow.
 private struct UnauthenticatedStack: View {
     let selectedRole: AppRole?
-    let onSignedIn: (AppRole) async -> Void
+    // @Sendable so this can be captured by PhoneSignInModel's @Sendable onEstablish closure
+    // under Swift 6 strict concurrency; the view hierarchy is @MainActor so the hop is safe.
+    let onSignedIn: @Sendable (AppRole) async -> Void
     @State private var step: Step = .roleSelect
     private enum Step: Equatable { case roleSelect, methods(AppRole), phone(AppRole) }
     var body: some View {
@@ -296,8 +298,10 @@ struct DADApp: App {
                         PartnerLanding()
                     case .unauthenticated(let selectedRole):
                         UnauthenticatedStack(selectedRole: selectedRole) { role in
-                            router.selectRole(role)
-                            router.signedIn(as: role)
+                            await MainActor.run {
+                                router.selectRole(role)
+                                router.signedIn(as: role)
+                            }
                         }
                     }
                 }
