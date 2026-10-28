@@ -252,6 +252,151 @@ private actor PreviewEngagement: EngagementService {
     }
 }
 
+// MARK: - Events preview + screen (Phase E)
+
+/// Preview double for the events service. One reservable public event, one full event (waitlist),
+/// and one invite-only event, so the list/detail/reserve path is exercised without a network.
+private actor PreviewEvents: EventsService {
+    private var store: [String: DonorEvent]
+
+    init() {
+        let soon = Date().addingTimeInterval(60 * 60 * 24 * 7)
+        let events = [
+            DonorEvent(id: "e1", slug: "park-cleanup", title: "Park Cleanup", type: "volunteer", venue: "Zilker Park",
+                       city: "Austin", startsAt: soon, endsAt: soon.addingTimeInterval(7200), capacity: 50, spotsLeft: 8,
+                       status: .none, reportIssueURL: "mailto:help@dad.org"),
+            DonorEvent(id: "e2", slug: "food-bank", title: "Food Bank Night", type: "volunteer", venue: "Central Kitchen",
+                       city: "Austin", startsAt: soon.addingTimeInterval(86400), endsAt: soon.addingTimeInterval(86400 + 7200),
+                       capacity: 30, spotsLeft: 0, status: .none, reportIssueURL: "mailto:help@dad.org"),
+            DonorEvent(id: "e3", slug: "founders-dinner", title: "Founders Dinner", type: "social", venue: "The Loft",
+                       city: "Austin", startsAt: soon.addingTimeInterval(2 * 86400), endsAt: soon.addingTimeInterval(2 * 86400 + 7200),
+                       capacity: 20, spotsLeft: 5, status: .none, invitationNote: "Founding donors only",
+                       reportIssueURL: "mailto:help@dad.org"),
+        ]
+        store = Dictionary(uniqueKeysWithValues: events.map { ($0.id, $0) })
+    }
+
+    func events() async throws -> [DonorEvent] { store.values.sorted { $0.startsAt < $1.startsAt } }
+    func event(id: String) async throws -> DonorEvent { store[id]! }
+
+    func reserve(eventID: String) async throws -> ReservationOutcome {
+        guard let event = store[eventID] else { return .reserved }
+        let outcome: ReservationOutcome = event.spotsLeft > 0 ? .reserved : .waitlisted
+        store[eventID] = DonorEvent(
+            id: event.id, slug: event.slug, title: event.title, type: event.type, venue: event.venue, city: event.city,
+            startsAt: event.startsAt, endsAt: event.endsAt, capacity: event.capacity,
+            spotsLeft: max(0, event.spotsLeft - 1), status: outcome == .reserved ? .reserved : .waitlisted,
+            invitationNote: event.invitationNote, reportIssueURL: event.reportIssueURL, cancelled: event.cancelled,
+            bookingOpensAt: event.bookingOpensAt, earlyBooking: event.earlyBooking)
+        return outcome
+    }
+
+    func cancel(eventID: String) async throws {
+        guard let event = store[eventID] else { return }
+        store[eventID] = DonorEvent(
+            id: event.id, slug: event.slug, title: event.title, type: event.type, venue: event.venue, city: event.city,
+            startsAt: event.startsAt, endsAt: event.endsAt, capacity: event.capacity, spotsLeft: event.spotsLeft + 1,
+            status: .none, invitationNote: event.invitationNote, reportIssueURL: event.reportIssueURL,
+            cancelled: event.cancelled, bookingOpensAt: event.bookingOpensAt, earlyBooking: event.earlyBooking)
+    }
+
+    func checkIn(code: String) async throws -> CheckInResultValue {
+        CheckInResultValue(eventID: "e1", checkedIn: true, alreadyCheckedIn: false)
+    }
+}
+
+/// Events home (PRD E-1..E-10): the events list (soonest-first, invite-only marked), with an
+/// inline reserve/cancel action per row and an inline confirmation — no OS action sheets, per
+/// the hard-won UITest lesson. Bound to `EventsModel`.
+private struct EventsHome: View {
+    @State var model: EventsModel
+    @State private var confirmingCancel: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Events").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            switch model.phase {
+            case .loading:
+                ProgressView().accessibilityIdentifier("events-loading")
+            case let .failed(message):
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(message).foregroundStyle(Color.dad("fail"))
+                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
+                }
+            case .ready:
+                if let outcome = model.lastOutcome {
+                    DADCard {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(outcome.confirmationTitle).font(.headline).accessibilityIdentifier("reserve-confirm")
+                            Text(outcome.confirmationDetail).font(.footnote).foregroundStyle(.secondary)
+                            Button("Done") { model.clearOutcome() }.buttonStyle(DADButtonStyle(.secondary))
+                        }
+                    }
+                }
+                ForEach(model.sortedEvents) { event in row(event) }
+            }
+        }
+        .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("events-home")
+        .task { await model.load() }
+    }
+
+    @ViewBuilder private func row(_ event: DonorEvent) -> some View {
+        DADCard {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(event.title).font(.headline)
+                    if event.isInviteOnly {
+                        Text("Invite-only").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Color.dad("brand-ink").opacity(0.12)).clipShape(Capsule())
+                            .accessibilityIdentifier("invite-only-badge")
+                    }
+                }
+                Text("\(event.venue) · \(event.city)").font(.footnote).foregroundStyle(.secondary)
+                Text(event.spotsLabel).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("spots-\(event.id)")
+                action(event)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("event-\(event.id)")
+    }
+
+    @ViewBuilder private func action(_ event: DonorEvent) -> some View {
+        switch event.availability(now: Date()) {
+        case .reservable:
+            Button("Reserve") { Task { await model.reserve(eventID: event.id) } }
+                .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("reserve-\(event.id)")
+        case .waitlistable:
+            Button("Join waitlist") { Task { await model.reserve(eventID: event.id) } }
+                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("waitlist-\(event.id)")
+        case .reserved, .waitlisted:
+            if confirmingCancel == event.id {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cancel your reservation?").font(.subheadline)
+                    HStack {
+                        Button("Yes, cancel") { Task { await model.cancel(eventID: event.id) }; confirmingCancel = nil }
+                            .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("confirm-cancel-\(event.id)")
+                        Button("Keep it") { confirmingCancel = nil }.buttonStyle(DADButtonStyle(.secondary))
+                    }
+                }
+                .accessibilityElement(children: .contain).accessibilityIdentifier("cancel-confirm-\(event.id)")
+            } else {
+                Text(event.status == .waitlisted ? "On the waitlist" : "You're going").font(.subheadline.bold())
+                Button("Cancel reservation") { confirmingCancel = event.id }
+                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("cancel-\(event.id)")
+            }
+        case .checkedIn:
+            Text("Checked in").font(.subheadline.bold()).foregroundStyle(Color.dad("brand-ink"))
+        case .notYetOpen:
+            Text("Booking not open yet").font(.footnote).foregroundStyle(.secondary)
+        case .cancelled:
+            Text("Cancelled").font(.footnote).foregroundStyle(Color.dad("fail"))
+        }
+    }
+}
+
 /// Engagement home (PRD A-*, I-*, R-*, N-*, B-*, K-*): lifetime impact totals, the badges
 /// grid (earned/locked, state in text not colour), the rankings card with its opt-out toggle,
 /// the referral network rollup, and the invite/IRL entry. Bound to `EngagementModel`.
@@ -505,6 +650,8 @@ struct DADApp: App {
                             GiftScreen(model: GivingModel(service: PreviewGiving()))
                         } else if ProcessInfo.processInfo.arguments.contains("--preview-engagement") {
                             ScrollView { EngagementHome(model: EngagementModel(service: PreviewEngagement())) }
+                        } else if ProcessInfo.processInfo.arguments.contains("--preview-events") {
+                            ScrollView { EventsHome(model: EventsModel(service: PreviewEvents())) }
                         } else {
                             DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
                         }
@@ -537,7 +684,8 @@ struct DADApp: App {
                 // switch shows GiftScreen immediately instead of dwelling in `.restoring` /
                 // DonorLanding during PreviewAPI's load delay.
                 if ProcessInfo.processInfo.arguments.contains("--preview-giving")
-                    || ProcessInfo.processInfo.arguments.contains("--preview-engagement") {
+                    || ProcessInfo.processInfo.arguments.contains("--preview-engagement")
+                    || ProcessInfo.processInfo.arguments.contains("--preview-events") {
                     router.signedIn(as: .donor)
                     return
                 }
