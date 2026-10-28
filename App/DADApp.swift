@@ -222,6 +222,132 @@ private actor PreviewGiving: GivingService {
     }
 }
 
+private actor PreviewEngagement: EngagementService {
+    private var optedIn: Bool
+    init(optedIn: Bool = true) { self.optedIn = optedIn }
+
+    private func currentRanking() -> RankingStanding {
+        optedIn
+            ? RankingStanding(nationalPercentile: 92, city: "Austin", cityRank: 4)
+            : RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil)
+    }
+
+    func snapshot() async throws -> EngagementSnapshot {
+        EngagementSnapshot(
+            impact: ImpactTotals(givenMinor: 124_000, initiativesFunded: 3, eventsVolunteered: 2),
+            badges: BadgeCollection(badges: [
+                Badge(code: "founding", title: "Founding Donor", rule: "Join in year one", perk: "Invite-only events", earned: true),
+                Badge(code: "streak_30", title: "30-Day Streak", rule: "Give 30 days running", perk: "—", earned: true),
+                Badge(code: "milestone_1000", title: "$1,000 Given", rule: "Give $1,000 lifetime", perk: "Invite-only events", earned: false),
+            ]),
+            ranking: currentRanking(),
+            network: NetworkSummary(activeCount: 6, annualizedMinor: 72_000, anonymousActive: 2),
+            referral: ReferralInfo(code: "SHAWN42", linkCount: 4, irlCount: 2)
+        )
+    }
+
+    func setRankingOptIn(_ optIn: Bool) async throws -> RankingStanding {
+        optedIn = optIn
+        return currentRanking()
+    }
+}
+
+/// Engagement home (PRD A-*, I-*, R-*, N-*, B-*, K-*): lifetime impact totals, the badges
+/// grid (earned/locked, state in text not colour), the rankings card with its opt-out toggle,
+/// the referral network rollup, and the invite/IRL entry. Bound to `EngagementModel`.
+private struct EngagementHome: View {
+    @State var model: EngagementModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Your impact").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            switch model.phase {
+            case .loading:
+                ProgressView().accessibilityIdentifier("engagement-loading")
+            case let .failed(message):
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(message).foregroundStyle(Color.dad("fail"))
+                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
+                }
+            case .ready:
+                if let snapshot = model.snapshot { content(snapshot) }
+            }
+        }
+        .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("engagement-home")
+        .task { await model.load() }
+    }
+
+    @ViewBuilder private func content(_ snapshot: EngagementSnapshot) -> some View {
+        DADCard {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Lifetime given").font(.footnote).foregroundStyle(.secondary)
+                Text(snapshot.impact.givenLabel).font(.title.bold()).accessibilityIdentifier("impact-given")
+                Text("\(snapshot.impact.initiativesFunded) initiatives · \(snapshot.impact.eventsVolunteered) events")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+
+        // Badges — earned/locked conveyed by text, never colour alone.
+        VStack(alignment: .leading, spacing: 8) {
+            Text(snapshot.badges.summaryLabel).font(.headline).accessibilityIdentifier("badge-summary")
+            ForEach(snapshot.badges.badges) { badge in
+                HStack(spacing: 10) {
+                    Image(systemName: badge.earned ? "checkmark.seal.fill" : "lock.fill")
+                        .foregroundStyle(badge.earned ? Color.dad("brand-ink") : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(badge.title).fontWeight(badge.earned ? .semibold : .regular)
+                        Text(badge.earned ? "Earned" : badge.rule).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(badge.accessibilityLabel)
+            }
+        }
+
+        // Rankings — opt-out hides the position entirely (K-2/K-3), never a name list.
+        DADCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Rankings").font(.headline)
+                if snapshot.ranking.isOptedOut {
+                    Text("You're not shown in rankings.").font(.footnote).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("ranking-optedout")
+                    Button("Show my ranking") { Task { await model.setRankingOptIn(true) } }
+                        .buttonStyle(DADButtonStyle(.secondary))
+                } else {
+                    if let national = snapshot.ranking.nationalLabel {
+                        Text(national).accessibilityIdentifier("ranking-national")
+                    }
+                    if let city = snapshot.ranking.cityLabel { Text(city).font(.footnote).foregroundStyle(.secondary) }
+                    Button("Hide my ranking") { Task { await model.setRankingOptIn(false) } }
+                        .buttonStyle(DADButtonStyle(.secondary))
+                }
+            }
+        }
+
+        // Network rollup (opt-in visibility: anonymous invitees counted, never named).
+        DADCard {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Your network").font(.headline)
+                Text("\(snapshot.network.activeCount) active · \(snapshot.network.annualizedLabel)")
+                if snapshot.network.hasAnonymous {
+                    Text("\(snapshot.network.anonymousActive) choose to stay anonymous")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+
+        // Invite / IRL (share message + code; full-screen QR + scan live behind the share seam).
+        DADCard {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Invite friends").font(.headline)
+                Text("Your code: \(snapshot.referral.code)").accessibilityIdentifier("referral-code")
+                Text("\(snapshot.referral.totalConverted) have joined through you").font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 /// Set / change your recurring gift (G-1/G-2/G-7). A $1–$30/day stepper with the monthly
 /// equivalent (×30) shown derived, the streak bar, and a cancel path (G-8/G-9) with the
 /// ends-streak confirmation copy. Bound to `GivingModel`.
@@ -377,6 +503,8 @@ struct DADApp: App {
                     case .authenticated(.donor):
                         if ProcessInfo.processInfo.arguments.contains("--preview-giving") {
                             GiftScreen(model: GivingModel(service: PreviewGiving()))
+                        } else if ProcessInfo.processInfo.arguments.contains("--preview-engagement") {
+                            ScrollView { EngagementHome(model: EngagementModel(service: PreviewEngagement())) }
                         } else {
                             DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
                         }
@@ -408,7 +536,8 @@ struct DADApp: App {
                 // donor shell up front (deterministically, before the profile await) so the
                 // switch shows GiftScreen immediately instead of dwelling in `.restoring` /
                 // DonorLanding during PreviewAPI's load delay.
-                if ProcessInfo.processInfo.arguments.contains("--preview-giving") {
+                if ProcessInfo.processInfo.arguments.contains("--preview-giving")
+                    || ProcessInfo.processInfo.arguments.contains("--preview-engagement") {
                     router.signedIn(as: .donor)
                     return
                 }
