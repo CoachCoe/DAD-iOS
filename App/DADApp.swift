@@ -254,8 +254,29 @@ private struct GiftScreen: View {
                 .buttonStyle(DADButtonStyle(.primary))
                 .disabled(model.phase == .working)
             if case .active = model.recurring {
-                Button("Cancel gift") { confirmingCancel = true }
-                    .buttonStyle(DADButtonStyle(.secondary))
+                if confirmingCancel {
+                    // Inline confirmation rather than a `confirmationDialog`: the OS action sheet
+                    // presents in a separate layer whose buttons the simulator's XCUITest harness
+                    // surfaces unreliably (the sheet animation races the automation idle-wait), so
+                    // an inline block is both deterministic to test and keeps the ends-streak copy
+                    // on screen beside the choice.
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Cancel your gift?").font(.headline)
+                        if case let .active(_, _, periodEnd) = model.recurring {
+                            Text(CancelCopy.confirmation(periodEnd: periodEnd))
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        Button("End my gift") { Task { await model.cancel() }; confirmingCancel = false }
+                            .buttonStyle(DADButtonStyle(.secondary))
+                        Button("Keep giving") { confirmingCancel = false }
+                            .buttonStyle(DADButtonStyle(.primary))
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("cancel-confirm")
+                } else {
+                    Button("Cancel gift") { confirmingCancel = true }
+                        .buttonStyle(DADButtonStyle(.secondary))
+                }
             }
             if model.recurring.isEnding {
                 Text("Your gift won’t renew — it stays active until the period ends.")
@@ -267,17 +288,6 @@ private struct GiftScreen: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("gift-screen")
         .task { await model.load() }
-        .confirmationDialog("Cancel your gift?", isPresented: $confirmingCancel, titleVisibility: .visible) {
-            // Distinct label from the "Cancel gift" trigger above — a confirmationDialog that
-            // reused the same title would give XCUITest two "Cancel gift" buttons and make the
-            // trigger tap (and the dialog's own cancel button) ambiguous.
-            Button("End my gift", role: .destructive) { Task { await model.cancel() } }
-            Button("Keep giving", role: .cancel) {}
-        } message: {
-            if case let .active(_, _, periodEnd) = model.recurring {
-                Text(CancelCopy.confirmation(periodEnd: periodEnd))
-            }
-        }
     }
 }
 
