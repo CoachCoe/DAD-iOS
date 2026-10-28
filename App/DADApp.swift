@@ -264,6 +264,7 @@ private struct GiftScreen: View {
             }
         }
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("gift-screen")
         .task { await model.load() }
         .confirmationDialog("Cancel your gift?", isPresented: $confirmingCancel, titleVisibility: .visible) {
