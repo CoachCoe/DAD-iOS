@@ -268,7 +268,10 @@ private struct GiftScreen: View {
         .accessibilityIdentifier("gift-screen")
         .task { await model.load() }
         .confirmationDialog("Cancel your gift?", isPresented: $confirmingCancel, titleVisibility: .visible) {
-            Button("Cancel gift", role: .destructive) { Task { await model.cancel() } }
+            // Distinct label from the "Cancel gift" trigger above — a confirmationDialog that
+            // reused the same title would give XCUITest two "Cancel gift" buttons and make the
+            // trigger tap (and the dialog's own cancel button) ambiguous.
+            Button("End my gift", role: .destructive) { Task { await model.cancel() } }
             Button("Keep giving", role: .cancel) {}
         } message: {
             if case let .active(_, _, periodEnd) = model.recurring {
