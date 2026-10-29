@@ -12,6 +12,9 @@ jobs:
           node-version: '24'
       - run: node scripts/check-foundation.mjs
       - run: node --test scripts/check-foundation.test.mjs
+      - name: Foundation drift (advisory)
+        run: node scripts/check-foundation-drift.mjs
+      - run: node --test scripts/check-foundation-drift.test.mjs
   ios:
     runs-on: [self-hosted, dad, macos]
     timeout-minutes: 25
