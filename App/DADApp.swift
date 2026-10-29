@@ -620,7 +620,10 @@ private struct UnauthenticatedStack: View {
     let selectedRole: AppRole?
     // @Sendable so this can be captured by PhoneSignInModel's @Sendable onEstablish closure
     // under Swift 6 strict concurrency; the view hierarchy is @MainActor so the hop is safe.
-    let onSignedIn: @Sendable (AppRole) async -> Void
+    // Carries the established Credentials through so the caller can install them into the
+    // AccountSession (session.establish) — the real-session wiring lands with auth integration;
+    // the preview routes on success. The credentials are no longer silently dropped here.
+    let onSignedIn: @Sendable (AppRole, Credentials) async -> Void
     @State private var step: Step = .roleSelect
     private enum Step: Equatable { case roleSelect, methods(AppRole), phone(AppRole) }
     var body: some View {
@@ -630,7 +633,7 @@ private struct UnauthenticatedStack: View {
         case .methods(let role):
             SignInMethods { step = .phone(role) }
         case .phone(let role):
-            PhoneSignIn(model: PhoneSignInModel(service: PreviewSignIn()) { _ in await onSignedIn(role) })
+            PhoneSignIn(model: PhoneSignInModel(service: PreviewSignIn()) { credentials in await onSignedIn(role, credentials) })
         }
     }
 }
@@ -667,7 +670,11 @@ struct DADApp: App {
                     case .authenticated(.partner):
                         PartnerLanding()
                     case .unauthenticated(let selectedRole):
-                        UnauthenticatedStack(selectedRole: selectedRole) { role in
+                        UnauthenticatedStack(selectedRole: selectedRole) { role, _ in
+                            // The established Credentials arrive here; installing them into the real
+                            // AccountSession (session.establish { credentials }) lands with the
+                            // auth-integration phase, where the live session replaces AccountModel's
+                            // preview path. Until then the preview routes to the signed-in shell.
                             await MainActor.run {
                                 router.selectRole(role)
                                 router.signedIn(as: role)

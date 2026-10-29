@@ -45,10 +45,41 @@ public struct GiftAmount: Sendable, Equatable, Hashable, Comparable {
 
 /// Format an integer-cents USD figure as "$12.34" / "$150". Whole-dollar amounts drop the
 /// decimals; this is display-only and never used for arithmetic.
+/// Format an integer-cents USD figure as "$12.34" / "$150" / "$1,240". Whole-dollar amounts drop
+/// the decimals; thousands are grouped for readability (WCAG). Display-only, never used for
+/// arithmetic. The formatter is pinned to en_US_POSIX so grouping is stable regardless of host
+/// locale, and cached because NumberFormatter construction is expensive.
+private let usdWholeFormatter: NumberFormatter = {
+    let f = NumberFormatter()
+    f.numberStyle = .decimal
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.usesGroupingSeparator = true
+    f.groupingSeparator = ","
+    f.groupingSize = 3
+    f.maximumFractionDigits = 0
+    return f
+}()
+
+private let usdCentsFormatter: NumberFormatter = {
+    let f = NumberFormatter()
+    f.numberStyle = .decimal
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.usesGroupingSeparator = true
+    f.groupingSeparator = ","
+    f.groupingSize = 3
+    f.decimalSeparator = "."
+    f.minimumFractionDigits = 2
+    f.maximumFractionDigits = 2
+    return f
+}()
+
 public func formatUSDMinor(_ minor: Int) -> String {
-    let dollars = Double(minor) / 100
-    if minor % 100 == 0 { return "$\(minor / 100)" }
-    return String(format: "$%.2f", dollars)
+    if minor % 100 == 0 {
+        let whole = usdWholeFormatter.string(from: NSNumber(value: minor / 100)) ?? "\(minor / 100)"
+        return "$\(whole)"
+    }
+    let dollars = usdCentsFormatter.string(from: NSNumber(value: Double(minor) / 100)) ?? String(format: "%.2f", Double(minor) / 100)
+    return "$\(dollars)"
 }
 
 /// The recurring gift as the giving screens see it: either none set yet, or an active
