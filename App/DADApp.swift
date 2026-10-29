@@ -74,7 +74,11 @@ private final class AccountModel {
                 #endif
             } else {
                 guard let origin = URL(string: apiOrigin) else { throw AccountError.invalidConfiguration }
-                session = try AccountSession(api: WireAPI(origin: origin), store: KeychainStore(service: "org.dad.foundation.preview"))
+                // Namespace the keychain by the running bundle id so the release
+                // (org.dad.foundation) and debug (.debug) builds never share a
+                // credential bucket, and the name tracks the id automatically.
+                let service = Bundle.main.bundleIdentifier ?? "org.dad.foundation"
+                session = try AccountSession(api: WireAPI(origin: origin), store: KeychainStore(service: service))
             }
         } catch { session = nil; state = .unavailable }
     }
