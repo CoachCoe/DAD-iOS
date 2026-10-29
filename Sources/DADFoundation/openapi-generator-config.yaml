@@ -73,6 +73,26 @@ filter:
     - employeeTeams
     - employeeOurPeople
     - employeeWorkforce
+    # --- Partner portal (Phase F, P-*/EM-*); partner push is the v2.2 addition ---
+    - partnerRequestSignIn
+    - partnerAcceptInvite
+    - partnerSignOut
+    - partnerOverview
+    - partnerInitiatives
+    - partnerSpend
+    - partnerUsers
+    - partnerInviteUser
+    - partnerRemoveUser
+    - partnerSaveProfile
+    - partnerLogo
+    - partnerSaveLogo
+    - partnerReport
+    - partnerExports
+    - partnerRetainedReport
+    - partnerCompanyCode
+    - applicationStatus
+    - partnerRegisterPushDevice
+    - partnerUnregisterPushDevice
     # --- Analytics ingest (Phase G) ---
     - ingestAnalytics
     # --- Health ---
