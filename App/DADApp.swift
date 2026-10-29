@@ -473,7 +473,7 @@ private struct PartnerPortal: View {
             case .failed(let message):
                 VStack(alignment: .leading, spacing: 8) {
                     Text(message).accessibilityIdentifier("partner-error")
-                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(kind: .primary))
+                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
                 }
             case .ready:
                 if let overview = model.overview { PartnerContent(model: model, overview: overview) }
@@ -528,13 +528,13 @@ private struct PartnerContent: View {
                     if model.role.canManageUsers {
                         Spacer()
                         Button("Remove") { Task { await model.removeUser(id: user.id) } }
-                            .buttonStyle(DADButtonStyle(kind: .secondary))
+                            .buttonStyle(DADButtonStyle(.secondary))
                     }
                 }
             }
             if model.role.canManageUsers {
                 Button("Invite user") { Task { await model.inviteUser(email: "new@acme.com", role: .viewer) } }
-                    .buttonStyle(DADButtonStyle(kind: .primary)).accessibilityIdentifier("partner-invite")
+                    .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("partner-invite")
             } else {
                 Text("Read-only access").font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-readonly")
             }
