@@ -70,7 +70,7 @@ final class RankingTests: XCTestCase {
 
 final class ImpactTests: XCTestCase {
     func testKnownTotalFormats() {
-        XCTAssertEqual(ImpactTotals(givenMinor: 124000, initiativesFunded: 3, eventsVolunteered: 2).givenLabel, "$1240")
+        XCTAssertEqual(ImpactTotals(givenMinor: 124000, initiativesFunded: 3, eventsVolunteered: 2).givenLabel, "$1,240")
     }
     func testUnknownTotalShowsDashNotZero() {
         XCTAssertEqual(ImpactTotals(givenMinor: nil, initiativesFunded: 0, eventsVolunteered: 0).givenLabel, "—")

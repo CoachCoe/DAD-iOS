@@ -15,7 +15,7 @@ final class EngagementFlowTests: XCTestCase {
 
         let given = app.staticTexts["impact-given"]
         XCTAssertTrue(given.waitForExistence(timeout: 3))
-        XCTAssertEqual(given.label, "$1240") // 124_000 minor, known total
+        XCTAssertEqual(given.label, "$1,240") // 124_000 minor, known total
 
         XCTAssertTrue(app.staticTexts["badge-summary"].waitForExistence(timeout: 2))
         XCTAssertEqual(app.staticTexts["badge-summary"].label, "2 of 3 earned")
