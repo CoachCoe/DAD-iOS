@@ -543,6 +543,7 @@ private struct PartnerContent: View {
             }
         }
     }
+}
 
 /// In-memory settings service for the preview/UITest.
 private actor PreviewAccountSettings: AccountSettingsService {
