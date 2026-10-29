@@ -543,6 +543,115 @@ private struct PartnerContent: View {
             }
         }
     }
+
+/// In-memory settings service for the preview/UITest.
+private actor PreviewAccountSettings: AccountSettingsService {
+    private var prefs = AccountPreferences(
+        version: 3, referralEmails: true, marketingEmails: false, pushReferralConverted: true,
+        pushStreakAtRisk: true, pushStreakMilestone: true, pushStreakLapsed: true,
+        pushBadgeEarned: true, pushEventNearby: false, pushEventReminder: true,
+        pushEventPromoted: false, pushGiftProcessed: true, rankingsOptedOut: false,
+        networkVisible: true, volunteer: true)
+
+    private func snapshot() -> AccountSettingsSnapshot {
+        AccountSettingsSnapshot(
+            profile: AccountProfileSummary(email: "donor@example.com", accountRole: "DONOR",
+                                           zip: "78701", city: "Austin", phone: nil),
+            preferences: prefs)
+    }
+
+    func load() async throws -> AccountSettingsSnapshot { snapshot() }
+    func savePreferences(_ preferences: AccountPreferences) async throws -> AccountSettingsSnapshot {
+        prefs = AccountPreferences(
+            version: preferences.version + 1, referralEmails: preferences.referralEmails,
+            marketingEmails: preferences.marketingEmails, pushReferralConverted: preferences.pushReferralConverted,
+            pushStreakAtRisk: preferences.pushStreakAtRisk, pushStreakMilestone: preferences.pushStreakMilestone,
+            pushStreakLapsed: preferences.pushStreakLapsed, pushBadgeEarned: preferences.pushBadgeEarned,
+            pushEventNearby: preferences.pushEventNearby, pushEventReminder: preferences.pushEventReminder,
+            pushEventPromoted: preferences.pushEventPromoted, pushGiftProcessed: preferences.pushGiftProcessed,
+            rankingsOptedOut: preferences.rankingsOptedOut, networkVisible: preferences.networkVisible,
+            volunteer: preferences.volunteer)
+        return snapshot()
+    }
+    func deleteAccount() async throws {}
+    func signOut() async throws {}
+}
+
+/// Account & settings (PRD §6.11/§6.12): profile header, notification + privacy toggles, sign
+/// out, and the store-mandated delete-account flow with a typed-word confirm gate — all inline.
+/// Bound to `AccountSettingsModel`.
+private struct AccountSettingsScreen: View {
+    @State var model: AccountSettingsModel
+    @State private var confirmingDelete = false
+    @State private var deleteTyped = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Settings").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            if model.signedOut {
+                Text("You're signed out.").accessibilityIdentifier("settings-signed-out")
+            } else {
+                switch model.phase {
+                case .loading:
+                    ProgressView().accessibilityIdentifier("settings-loading")
+                case .failed(let message):
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(message).accessibilityIdentifier("settings-error")
+                        Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
+                    }
+                case .ready:
+                    if let snapshot = model.snapshot {
+                        settingsBody(snapshot)
+                    }
+                }
+            }
+            if let error = model.actionError {
+                Text(error).foregroundStyle(.red).accessibilityIdentifier("settings-action-error")
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain).accessibilityIdentifier("settings-screen")
+        .task { await model.load() }
+    }
+
+    @ViewBuilder private func settingsBody(_ snapshot: AccountSettingsSnapshot) -> some View {
+        Text(snapshot.profile.email).font(.headline).accessibilityIdentifier("settings-email")
+        Text("ZIP: \(snapshot.profile.zipLabel)").font(.footnote)
+
+        // Notification toggles (§6.11) — payment-failure email is absent by design.
+        ForEach(snapshot.preferences.pushToggles, id: \.key) { toggle in
+            Toggle(toggle.label, isOn: Binding(
+                get: { toggle.value },
+                set: { newValue in Task { await model.toggle(toggle.key, newValue) } }
+            )).accessibilityIdentifier("pref-\(toggle.key)")
+        }
+        // Privacy: "Show my ranking" inverts rankings_opted_out.
+        Toggle("Show my ranking", isOn: Binding(
+            get: { snapshot.preferences.showRanking },
+            set: { newValue in Task { await model.toggle("rankings_opted_out", !newValue) } }
+        )).accessibilityIdentifier("ranking-toggle")
+
+        Button("Sign out") { Task { await model.signOut() } }
+            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("settings-signout")
+
+        // Delete account (store-mandated, §6.12): typed-word confirm gate, inline.
+        if !confirmingDelete {
+            Button("Delete my account") { confirmingDelete = true }
+                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("delete-start")
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(DeleteAccountGate(typed: deleteTyped).helpText).font(.footnote)
+                TextField("Type \(DeleteAccountGate.confirmWord)", text: $deleteTyped)
+                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("delete-input")
+                Button("Permanently delete") { Task { await model.deleteAccount(DeleteAccountGate(typed: deleteTyped)) } }
+                    .buttonStyle(DADButtonStyle(.primary))
+                    .disabled(!DeleteAccountGate(typed: deleteTyped).isConfirmed)
+                    .accessibilityIdentifier("delete-confirm")
+                Button("Keep my account") { confirmingDelete = false; deleteTyped = "" }
+                    .buttonStyle(DADButtonStyle(.secondary))
+            }.accessibilityElement(children: .contain).accessibilityIdentifier("delete-confirm-block")
+        }
+    }
+}
 }
 /// Engagement home (PRD A-*, I-*, R-*, N-*, B-*, K-*): lifetime impact totals, the badges
 /// grid (earned/locked, state in text not colour), the rankings card with its opt-out toggle,
@@ -802,6 +911,8 @@ struct DADApp: App {
                             ScrollView { EngagementHome(model: EngagementModel(service: PreviewEngagement())) }
                         } else if ProcessInfo.processInfo.arguments.contains("--preview-events") {
                             ScrollView { EventsHome(model: EventsModel(service: PreviewEvents())) }
+                        } else if ProcessInfo.processInfo.arguments.contains("--preview-settings") {
+                            ScrollView { AccountSettingsScreen(model: AccountSettingsModel(service: PreviewAccountSettings())) }
                         } else {
                             DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
                         }
@@ -847,7 +958,8 @@ struct DADApp: App {
                 // DonorLanding during PreviewAPI's load delay.
                 if ProcessInfo.processInfo.arguments.contains("--preview-giving")
                     || ProcessInfo.processInfo.arguments.contains("--preview-engagement")
-                    || ProcessInfo.processInfo.arguments.contains("--preview-events") {
+                    || ProcessInfo.processInfo.arguments.contains("--preview-events")
+                    || ProcessInfo.processInfo.arguments.contains("--preview-settings") {
                     router.signedIn(as: .donor)
                     return
                 }

@@ -83,3 +83,37 @@ HTTPS Go API: claim/profile, expired-access refresh and credential replacement,
 revocation cleanup, and logout. Test-only transports trust the temporary server's
 certificate; production TLS settings are unchanged. No provider credentials are used.
 The test runner removes the private proof fixtures after either success or failure.
+
+## Release readiness (App Store)
+
+**In-app account deletion (required).** The settings screen offers in-app account deletion
+(§6.12): it calls `POST /donor/me/delete` (the server removes personal data and keeps the
+legally-required gift records) and then wipes the local session through `AccountSession`'s
+logout path. The action is gated behind a typed-word confirmation, so it cannot fire by
+accident. This satisfies App Store Review Guideline 5.1.1(v) (apps with account creation must
+let users delete their account from within the app). Disclose the retained gift records in the
+App Store "Account Deletion" question: personal data is deleted; aggregate/receipt records
+required by law are retained.
+
+**Privacy disclosure (App Store Privacy "nutrition label").** The app collects: email and phone
+(account), approximate location via ZIP (streak day boundary, nearby events), and gift history.
+No third-party analytics SDK is embedded — analytics events go only to the first-party DAD-Main
+ingest endpoint. No tracking across apps/sites; no IDFA. Declare Contact Info, Coarse Location,
+and Financial Info as "used for app functionality", not linked to third-party advertising.
+
+**Entitlements / capabilities** required before submission (not needed for simulator builds):
+Push Notifications (APNs) for §6.11 categories, Associated Domains (`applinks:` +
+`webcredentials:`) for universal links and passkeys, and — if in-app giving ships rather than the
+Stripe web handoff — the Apple Pay / In-App Purchase entitlement per the final §10 decision. The
+preview bundle id `org.dad.foundation.preview` is not a production identity.
+
+### Device-gated hardening (manual, pre-submission — not CI-automatable)
+
+These Phase H items require a real device / Instruments and are tracked as a manual pre-submission
+checklist; they cannot run on the CI simulator:
+
+- [ ] Instruments Leaks/Allocations pass over signup → gift, events, and the partner dashboard.
+- [ ] VoiceOver walk, Dynamic Type XXL, and contrast audit on device.
+- [ ] Performance on a throttled network: dashboards < 2s, checkout < 60s (PRD §10).
+- [ ] Real-device APNs delivery; Apple Pay or the Stripe web handoff end-to-end.
+- [ ] Universal-link + deferred-attribution acceptance on a clean install.
