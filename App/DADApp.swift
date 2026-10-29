@@ -397,6 +397,153 @@ private struct EventsHome: View {
     }
 }
 
+
+/// In-memory partner service for the preview/UITest. A `--preview-partner-pending` launch shows
+/// the pending gate; `--preview-partner-viewer` loads as a VIEWER (read-only); otherwise an ADMIN
+/// portal with one verified and one unverified figure, an unsuppressed workforce, and two users.
+private actor PreviewPartner: PartnerService {
+    private let pending: Bool
+    private let role: PartnerRole
+    private var userList: [PartnerUser]
+
+    init(pending: Bool = false, role: PartnerRole = .admin) {
+        self.pending = pending
+        self.role = role
+        userList = [
+            PartnerUser(id: "u1", email: "ada@acme.com", name: "Ada Admin", role: .admin),
+            PartnerUser(id: "u2", email: "val@acme.com", name: "Val Viewer", role: .viewer),
+        ]
+    }
+
+    func overview() async throws -> PartnerOverview {
+        if pending { throw PartnerPendingApproval() }
+        return PartnerOverview(
+            organization: "Acme Corp", description: "Doing good together.", role: role, companyCode: "ACME",
+            committed: VerifiedMoney(amountMinor: 5_000_000, verified: true),
+            deployed: VerifiedMoney(amountMinor: 3_000_000, verified: false), // unverified -> hidden (§7.3)
+            deployedPercent: 60,
+            peopleReached: VerifiedCount(value: 12_400, verified: true),
+            employeesEnrolled: 86, workforceSize: 240, enrolledPercent: 35,
+            updatedAt: Date(timeIntervalSince1970: 1_793_000_000), hasLogo: false)
+    }
+
+    func initiatives() async throws -> [PartnerInitiative] {
+        [PartnerInitiative(id: "i1", title: "Clean Water West", summary: "Wells across 6 counties.",
+                           status: .active, region: "West", committedMinor: 2_000_000, deployedMinor: 1_200_000,
+                           metrics: [PartnerMetric(label: "People reached", value: 8400, unit: .people),
+                                     PartnerMetric(label: "Wells", value: 32, unit: .initiatives)])]
+    }
+
+    func spend() async throws -> [PartnerSpendCategory] {
+        [PartnerSpendCategory(category: "Water", amountMinor: 1_800_000),
+         PartnerSpendCategory(category: "Housing", amountMinor: 1_200_000)]
+    }
+
+    func people() async throws -> PartnerPeople {
+        PartnerPeople(enrolled: 86, workforceSize: 240, givenMinor: 940_000, matchedMinor: 470_000,
+                      avgStreakDays: 42, volunteerMinutes: 6_300, teams: 7, suppressed: false)
+    }
+
+    func users() async throws -> [PartnerUser] { userList }
+    func inviteUser(email: String, role: PartnerRole) async throws {
+        userList.append(PartnerUser(id: "u\(userList.count + 1)", email: email, name: email, role: role))
+    }
+    func removeUser(id: String) async throws { userList.removeAll { $0.id == id } }
+    func registerPushDevice(token: String) async throws {}
+    func unregisterPushDevice() async throws {}
+}
+
+/// Partner portal (PRD P-*, EM-*, §7). The pending-approval gate shows nothing else (P-2); the
+/// loaded portal renders verified-or-hidden Overview tiles (§7.3), spend totals, the Our People
+/// rollup with <5 suppression (EM-3), and user management gated to admins (§7.2) — all inline.
+private struct PartnerPortal: View {
+    @State var model: PartnerModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Partner portal").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            switch model.phase {
+            case .loading:
+                ProgressView().accessibilityIdentifier("partner-loading")
+            case .pending:
+                // P-2: pending approval shows nothing else.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Awaiting approval").font(.title3.bold())
+                    Text("Your organization’s account is pending review. We’ll email you when it’s approved.")
+                }.accessibilityElement(children: .contain).accessibilityIdentifier("partner-pending")
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(message).accessibilityIdentifier("partner-error")
+                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(kind: .primary))
+                }
+            case .ready:
+                if let overview = model.overview { PartnerContent(model: model, overview: overview) }
+            }
+        }
+        .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain).accessibilityIdentifier("partner-portal")
+        .task { await model.load() }
+    }
+}
+
+private struct PartnerContent: View {
+    let model: PartnerModel
+    let overview: PartnerOverview
+    var body: some View {
+        // Overview tiles — a figure renders ONLY when verified (§7.3); unverified is omitted.
+        VStack(alignment: .leading, spacing: 4) {
+            Text(overview.organization).font(.title2.bold())
+            if let line = overview.verifiedLine() {
+                Text(line).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-verified-line")
+            }
+            if let committed = overview.committed.label {
+                Text("Committed: \(committed)").accessibilityIdentifier("partner-committed")
+            }
+            // deployed is unverified in the preview -> intentionally absent (never estimated)
+            if let reached = overview.peopleReached.label {
+                Text("People reached: \(reached)").accessibilityIdentifier("partner-reached")
+            }
+            if let enrolled = overview.enrolledLabel {
+                Text("Enrolled: \(enrolled)").accessibilityIdentifier("partner-enrolled")
+            }
+        }
+
+        // Our People rollup — figures or the suppression notice (EM-3).
+        if let people = model.people {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Our people").font(.title3.bold())
+                if let notice = people.suppressionNotice {
+                    Text(notice).accessibilityIdentifier("partner-suppressed")
+                } else if let given = people.givenLabel {
+                    Text("Given: \(given)").accessibilityIdentifier("partner-given")
+                }
+            }
+        }
+
+        // Users — admin can invite/remove inline; a viewer sees the list read-only (§7.2).
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Team").font(.title3.bold())
+            ForEach(model.users) { user in
+                HStack {
+                    Text("\(user.name) · \(user.role.rawValue)")
+                    if model.role.canManageUsers {
+                        Spacer()
+                        Button("Remove") { Task { await model.removeUser(id: user.id) } }
+                            .buttonStyle(DADButtonStyle(kind: .secondary))
+                    }
+                }
+            }
+            if model.role.canManageUsers {
+                Button("Invite user") { Task { await model.inviteUser(email: "new@acme.com", role: .viewer) } }
+                    .buttonStyle(DADButtonStyle(kind: .primary)).accessibilityIdentifier("partner-invite")
+            } else {
+                Text("Read-only access").font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-readonly")
+            }
+            if let error = model.actionError {
+                Text(error).foregroundStyle(.red).accessibilityIdentifier("partner-action-error")
+            }
+        }
+    }
+}
 /// Engagement home (PRD A-*, I-*, R-*, N-*, B-*, K-*): lifetime impact totals, the badges
 /// grid (earned/locked, state in text not colour), the rankings card with its opt-out toggle,
 /// the referral network rollup, and the invite/IRL entry. Bound to `EngagementModel`.
@@ -668,7 +815,15 @@ struct DADApp: App {
                             ProgressView().accessibilityIdentifier("restoring")
                         }
                     case .authenticated(.partner):
-                        PartnerLanding()
+                        if ProcessInfo.processInfo.arguments.contains("--preview-partner-pending") {
+                            ScrollView { PartnerPortal(model: PartnerModel(service: PreviewPartner(pending: true))) }
+                        } else if ProcessInfo.processInfo.arguments.contains("--preview-partner-viewer") {
+                            ScrollView { PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer))) }
+                        } else if ProcessInfo.processInfo.arguments.contains("--preview-partner") {
+                            ScrollView { PartnerPortal(model: PartnerModel(service: PreviewPartner())) }
+                        } else {
+                            PartnerLanding()
+                        }
                     case .unauthenticated(let selectedRole):
                         UnauthenticatedStack(selectedRole: selectedRole) { role, _ in
                             // The established Credentials arrive here; installing them into the real
@@ -694,6 +849,12 @@ struct DADApp: App {
                     || ProcessInfo.processInfo.arguments.contains("--preview-engagement")
                     || ProcessInfo.processInfo.arguments.contains("--preview-events") {
                     router.signedIn(as: .donor)
+                    return
+                }
+                if ProcessInfo.processInfo.arguments.contains("--preview-partner")
+                    || ProcessInfo.processInfo.arguments.contains("--preview-partner-viewer")
+                    || ProcessInfo.processInfo.arguments.contains("--preview-partner-pending") {
+                    router.signedIn(as: .partner)
                     return
                 }
                 await model.load()

@@ -1,0 +1,121 @@
+import Foundation
+
+// Partner portal view models + the service seam. The models own explicit load/ready/failed state
+// and the pending-approval gate, role-gated actions, and push register/unregister, so they are
+// unit-tested without a network or UI — the same shape as the donor models (C/D/E).
+
+/// The seam the partner models call. A conformer maps to the generated client (WireAPI, under the
+/// 12-hour partner session) or a preview/test double; all value types so the models stay testable.
+public protocol PartnerService: Sendable {
+    /// The portal snapshot after sign-in. Throws `.signedOut` (401) or a pending-approval signal.
+    func overview() async throws -> PartnerOverview
+    func initiatives() async throws -> [PartnerInitiative]
+    func spend() async throws -> [PartnerSpendCategory]
+    func people() async throws -> PartnerPeople
+    func users() async throws -> [PartnerUser]
+    /// Admin-only (P-13). The model gates on role before calling, but the server re-checks.
+    func inviteUser(email: String, role: PartnerRole) async throws
+    func removeUser(id: String) async throws
+    /// Partner push (§7.5, v2.2). Register on sign-in, clear on sign-out; both native-only.
+    func registerPushDevice(token: String) async throws
+    func unregisterPushDevice() async throws
+}
+
+/// Thrown by a conformer when the signed-in partner account is still awaiting approval (P-2):
+/// the portal must show the pending screen and nothing else.
+public struct PartnerPendingApproval: Error, Sendable { public init() {} }
+
+// MARK: - Partner portal model (P-1, P-2, P-10..P-14)
+
+@MainActor
+@Observable
+public final class PartnerModel {
+    public enum Phase: Sendable, Equatable {
+        case loading
+        /// Signed in but awaiting approval — show the pending screen and nothing else (P-2).
+        case pending
+        case ready
+        case failed(String)
+    }
+
+    public private(set) var phase: Phase = .loading
+    public private(set) var overview: PartnerOverview?
+    public private(set) var initiatives: [PartnerInitiative] = []
+    public private(set) var spend: [PartnerSpendCategory] = []
+    public private(set) var people: PartnerPeople?
+    public private(set) var users: [PartnerUser] = []
+    /// A transient action error (invite/remove) shown inline without losing the portal.
+    public private(set) var actionError: String?
+
+    private let service: any PartnerService
+
+    public init(service: any PartnerService) { self.service = service }
+
+    /// The current role, defaulting to the least-privileged VIEWER until the overview loads, so
+    /// capability gates never open early.
+    public var role: PartnerRole { overview?.role ?? .viewer }
+
+    public func load() async {
+        phase = .loading
+        do {
+            // Overview first — it carries the role and is the gate for everything else. A
+            // pending-approval account throws before any portal data is fetched (P-2).
+            let overview = try await service.overview()
+            self.overview = overview
+            async let initiatives = service.initiatives()
+            async let spend = service.spend()
+            async let people = service.people()
+            // Users are admin-managed but readable by both roles; load them with the rest.
+            async let users = service.users()
+            self.initiatives = (try? await initiatives) ?? []
+            self.spend = (try? await spend) ?? []
+            self.people = try? await people
+            self.users = (try? await users) ?? []
+            phase = .ready
+        } catch is PartnerPendingApproval {
+            phase = .pending
+        } catch {
+            phase = .failed(Self.message(error))
+        }
+    }
+
+    /// Invite a user (P-13), admin-only. Gated client-side; the server re-checks. A viewer call
+    /// is a no-op that surfaces the gate rather than hitting the network.
+    public func inviteUser(email: String, role: PartnerRole) async {
+        guard self.role.canManageUsers else { actionError = "Only an admin can invite users."; return }
+        actionError = nil
+        do {
+            try await service.inviteUser(email: email, role: role)
+            users = (try? await service.users()) ?? users
+        } catch {
+            actionError = Self.message(error)
+        }
+    }
+
+    public func removeUser(id: String) async {
+        guard role.canManageUsers else { actionError = "Only an admin can remove users."; return }
+        actionError = nil
+        do {
+            try await service.removeUser(id: id)
+            users.removeAll { $0.id == id }
+        } catch {
+            actionError = Self.message(error)
+        }
+    }
+
+    /// Register this device for partner push after sign-in (§7.5). Best-effort — a push failure
+    /// never blocks the portal.
+    public func registerPush(token: String) async {
+        try? await service.registerPushDevice(token: token)
+    }
+
+    /// Clear the push registration on sign-out (§7.5).
+    public func unregisterPush() async {
+        try? await service.unregisterPushDevice()
+    }
+
+    static func message(_ error: Error) -> String {
+        if let account = error as? AccountError, account == .signedOut { return "Please sign in again." }
+        return "Something went wrong. Please try again."
+    }
+}
