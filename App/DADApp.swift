@@ -652,7 +652,6 @@ private struct AccountSettingsScreen: View {
         }
     }
 }
-}
 /// Engagement home (PRD A-*, I-*, R-*, N-*, B-*, K-*): lifetime impact totals, the badges
 /// grid (earned/locked, state in text not colour), the rankings card with its opt-out toggle,
 /// the referral network rollup, and the invite/IRL entry. Bound to `EngagementModel`.
