@@ -63,7 +63,15 @@ private final class AccountModel {
         }
         do {
             if apiOrigin.isEmpty {
+                // The synthetic (PreviewAPI/PreviewStore) path must NEVER ship in a release build —
+                // an empty origin there is a misconfiguration, not a demo mode, and falling back
+                // would serve synthetic data as if real. Compile it only into DEBUG; a release
+                // build with an empty origin is a hard configuration failure.
+                #if DEBUG
                 session = try AccountSession(api: PreviewAPI(failFirst: ProcessInfo.processInfo.arguments.contains("--preview-unavailable")), store: PreviewStore())
+                #else
+                throw AccountError.invalidConfiguration
+                #endif
             } else {
                 guard let origin = URL(string: apiOrigin) else { throw AccountError.invalidConfiguration }
                 session = try AccountSession(api: WireAPI(origin: origin), store: KeychainStore(service: "org.dad.foundation.preview"))
