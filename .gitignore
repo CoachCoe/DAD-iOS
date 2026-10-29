@@ -10,6 +10,9 @@ DerivedData/
 xcuserdata/
 *.xcuserstate
 .swiftpm/
+# Signing config is account-held and never committed (see README "Signing").
+*.xcconfig
+ExportOptions.plist
 Sources/DADFoundation/openapi.json
 Sources/DADFoundation/DADTokens.swift
 Sources/DADFoundation/links.json

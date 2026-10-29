@@ -104,8 +104,13 @@ and Financial Info as "used for app functionality", not linked to third-party ad
 **Entitlements / capabilities** required before submission (not needed for simulator builds):
 Push Notifications (APNs) for §6.11 categories, Associated Domains (`applinks:` +
 `webcredentials:`) for universal links and passkeys, and — if in-app giving ships rather than the
-Stripe web handoff — the Apple Pay / In-App Purchase entitlement per the final §10 decision. The
-preview bundle id `org.dad.foundation.preview` is not a production identity.
+Stripe web handoff — the Apple Pay / In-App Purchase entitlement per the final §10 decision.
+
+**Bundle identifier.** The app ships under the production identity `org.dad.foundation` (Release),
+with `org.dad.foundation.debug` for Debug builds so a dev build installs alongside a release build
+(the mirror of DAD-Android's `.debug` suffix). The keychain service is derived from the running
+bundle id, so the two variants never share a credential store. The UITest targets follow the host
+app (`org.dad.foundation.uitests` / `.debug.uitests`).
 
 ### Device-gated hardening (manual, pre-submission — not CI-automatable)
 
@@ -117,3 +122,18 @@ checklist; they cannot run on the CI simulator:
 - [ ] Performance on a throttled network: dashboards < 2s, checkout < 60s (PRD §10).
 - [ ] Real-device APNs delivery; Apple Pay or the Stripe web handoff end-to-end.
 - [ ] Universal-link + deferred-attribution acceptance on a clean install.
+
+### Signing (manual, account-held — not committed, not CI-verified)
+
+Code signing needs an Apple Developer account's team, certificate, and provisioning profile,
+which are yours and are never committed. CI builds with `CODE_SIGNING_ALLOWED=NO`, so signing is
+exercised only at archive/submission time. Pre-submission:
+
+- [ ] Set `DEVELOPMENT_TEAM` for the archive build (an xcconfig or the archive command, kept out
+      of the repo), and confirm `CODE_SIGN_STYLE` matches your provisioning (Automatic, or Manual
+      with an explicit profile).
+- [ ] Register the `org.dad.foundation` App ID in the developer portal with the Push Notifications
+      and Associated Domains capabilities enabled.
+- [ ] Produce an `ExportOptions.plist` for `xcodebuild -exportArchive` (method `app-store`, your
+      team id) — gitignored, not committed.
+- [ ] Verify the archived build is signed with the distribution certificate before upload.
