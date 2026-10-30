@@ -97,8 +97,5 @@ public struct WireAPI: AccountAPI {
     public func logout(access: String) async throws {
         guard case .ok = try await client(access).logout(.init()) else { throw AccountError.unavailable }
     }
-    private func credentials(_ value: Components.Schemas.NativeSession) throws -> Credentials {
-        guard !value.access_token.isEmpty, !value.refresh_token.isEmpty, value.expires_in > 0 else { throw AccountError.invalidResponse }
-        return Credentials(access: value.access_token, refresh: value.refresh_token, expiresAt: Date().addingTimeInterval(Double(value.expires_in)))
-    }
+    private func credentials(_ value: Components.Schemas.NativeSession) throws -> Credentials { try nativeCredentials(value) }
 }

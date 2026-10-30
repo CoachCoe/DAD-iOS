@@ -3,25 +3,32 @@ import HTTPTypes
 import OpenAPIRuntime
 import OpenAPIURLSession
 
-/// Authenticated transport seam for product (donor/partner) calls, Phase A.
+/// Authenticated transport seam for product (donor/partner) calls.
 ///
 /// The generated client and its operation/schema types are `internal` to this module
-/// (`accessModifier: internal` in the generator config), so typed product methods are added
-/// here, in-module, one per endpoint as each phase consumes it — Phase C (donor core) is the
-/// first to do so. Phase A establishes only the authenticated `Client`: every call it issues
-/// carries a fresh bearer from `AccountSession` (single-flight refresh, atomic swap) and the
-/// native middleware (no cookies, no Origin, bounded response body).
-///
-/// `WireAPI` already proves this pattern for the session-bootstrap operations
-/// (profile/refresh/claim/logout); `ProductClient` is the same pattern scoped to the widened
-/// product surface, keyed off the live session rather than a single access token.
-struct ProductClient {
-    let client: Client
+/// (`accessModifier: internal` in the generator config), so typed product methods live here,
+/// in-module, one `Wire<X>` conformer per `<X>Service`. Every call goes through `perform`, which
+/// hands the closure a `Client` that carries a fresh bearer from `AccountSession.authorized`
+/// (single-flight refresh, one bounded 401 retry, epoch-guarded) and the native middleware
+/// (no cookies, no Origin, bounded response body).
+struct ProductClient: Sendable {
+    let origin: URL
+    let transport: any ClientTransport
+    let session: AccountSession
 
     init(origin: URL, session: AccountSession) throws {
         guard origin.isBareHTTPSOrigin else { throw AccountError.invalidConfiguration }
-        let transport = makeNativeTransport()
-        let auth = NativeHeaders(access: { try await session.accessToken() })
-        self.client = Client(serverURL: origin, transport: transport, middlewares: [auth])
+        self.init(origin: origin, transport: makeNativeTransport(), session: session)
+    }
+
+    init(origin: URL, transport: any ClientTransport, session: AccountSession) {
+        self.origin = origin; self.transport = transport; self.session = session
+    }
+
+    func perform<T: Sendable>(_ operation: @Sendable (Client) async throws -> T) async throws -> T {
+        let origin = origin, transport = transport
+        return try await session.authorized { access in
+            try await operation(Client(serverURL: origin, transport: transport, middlewares: [NativeHeaders(access: { access })]))
+        }
     }
 }
