@@ -185,6 +185,7 @@ struct GiftHistoryScreen: View {
     @State private var model: GiftHistoryModel
     let onClose: () -> Void
     let onSignedOut: () -> Void
+    @Environment(\.colorScheme) private var scheme
 
     init(service: any DashboardService, onClose: @escaping () -> Void, onSignedOut: @escaping () -> Void) {
         self.onClose = onClose
@@ -296,7 +297,7 @@ struct GiftHistoryScreen: View {
                 }
             }
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.dad("line").opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(scheme == .dark ? Color.dad("ink") : Color.dad("line").opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .accessibilityElement(children: .contain).accessibilityIdentifier("receipt-detail")
         case nil:
             EmptyView()
