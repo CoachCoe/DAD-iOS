@@ -69,7 +69,11 @@ public struct AnalyticsRecord: Sendable, Equatable, Identifiable {
     public enum ValidationError: Error, Equatable {
         case missingRequiredProperty(String)
         case unexpectedProperties
+        case invalidValue(String)
     }
+
+    /// The only `attribution_captured.source` values the ingest accepts (case-sensitive).
+    public static let attributionSources: Set<String> = ["link", "IRL", "company"]
 
     /// Build a validated record. Throws when a carrier event is missing its required key, or when
     /// a no-property event is given properties — mirroring what the server would reject.
@@ -80,6 +84,9 @@ public struct AnalyticsRecord: Sendable, Equatable, Identifiable {
         if let key = name.requiredPropertyKey {
             guard let value = properties[key], !value.isEmpty else {
                 throw ValidationError.missingRequiredProperty(key)
+            }
+            if name == .attributionCaptured, !Self.attributionSources.contains(value) {
+                throw ValidationError.invalidValue(key)
             }
         } else if !properties.isEmpty {
             throw ValidationError.unexpectedProperties

@@ -22,6 +22,16 @@ public struct Attribution: Codable, Sendable, Equatable {
         self.source = Attribution.sanitized(source)
     }
 
+    /// The `attribution_captured{source}` value the analytics ingest accepts (`link`, `IRL` or
+    /// `company`, case-sensitive), derived from which code was captured; nil when none was. The
+    /// free-form `source` campaign tag is never sent as the analytics source.
+    public var analyticsSource: String? {
+        if irlCode != nil { return "IRL" }
+        if inviteCode != nil { return "link" }
+        if companyCode != nil { return "company" }
+        return nil
+    }
+
     /// True when nothing worth persisting was captured.
     public var isEmpty: Bool {
         inviteCode == nil && irlCode == nil && companyCode == nil && source == nil
@@ -69,8 +79,8 @@ public struct DefaultsAttributionStore: AttributionStore {
 
 /// Captures attribution from an incoming source and MERGES it with whatever was already
 /// stored, so an invite captured on first touch is not lost when a later company code
-/// arrives. First writer wins per field (the earliest touch is the truest attribution);
-/// a new field only fills a slot that was empty.
+/// arrives. Last touch wins per field (PRD R-4: the most recent code used before the first
+/// gift wins, matching the server); a field the new touch does not supply keeps its stored value.
 public struct AttributionCapture: Sendable {
     private let store: any AttributionStore
     public init(store: any AttributionStore) { self.store = store }
@@ -79,10 +89,10 @@ public struct AttributionCapture: Sendable {
     public func capture(_ incoming: Attribution) -> Attribution {
         let existing = store.load() ?? Attribution()
         let merged = Attribution(
-            inviteCode: existing.inviteCode ?? incoming.inviteCode,
-            irlCode: existing.irlCode ?? incoming.irlCode,
-            companyCode: existing.companyCode ?? incoming.companyCode,
-            source: existing.source ?? incoming.source
+            inviteCode: incoming.inviteCode ?? existing.inviteCode,
+            irlCode: incoming.irlCode ?? existing.irlCode,
+            companyCode: incoming.companyCode ?? existing.companyCode,
+            source: incoming.source ?? existing.source
         )
         // Nothing worth keeping — do not write an empty record (holds for any store).
         if !merged.isEmpty { store.save(merged) }

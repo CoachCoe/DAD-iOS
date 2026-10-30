@@ -14,7 +14,14 @@ final class AnalyticsRecordTests: XCTestCase {
         XCTAssertThrowsError(try AnalyticsRecord(.attributionCaptured)) { error in
             XCTAssertEqual(error as? AnalyticsRecord.ValidationError, .missingRequiredProperty("source"))
         }
-        XCTAssertNoThrow(try AnalyticsRecord(.attributionCaptured, properties: ["source": "link"]))
+        for source in ["link", "IRL", "company"] {
+            XCTAssertNoThrow(try AnalyticsRecord(.attributionCaptured, properties: ["source": source]))
+        }
+        for bad in ["share", "irl", "Link", "organic"] {
+            XCTAssertThrowsError(try AnalyticsRecord(.attributionCaptured, properties: ["source": bad])) { error in
+                XCTAssertEqual(error as? AnalyticsRecord.ValidationError, .invalidValue("source"))
+            }
+        }
         XCTAssertNoThrow(try AnalyticsRecord(.inviteShared, properties: ["channel": "sms"]))
         XCTAssertNoThrow(try AnalyticsRecord(.pushOpened, properties: ["type": "reminder"]))
     }
