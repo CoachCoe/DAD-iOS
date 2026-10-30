@@ -159,9 +159,11 @@ public struct ReferralInfo: Sendable, Equatable {
 
     public var totalConverted: Int { linkCount + irlCount }
 
-    /// The shareable invite URL carrying this donor's code (R-1). A single canonical host so
-    /// the deep-link router and the QR encode the same string.
-    public func inviteURL(host: String = "https://dollaraday.org") -> URL? {
+    /// The shareable invite URL carrying this donor's code (R-1). The host is the configured
+    /// public origin (`DAD_PUBLIC_ORIGIN`), the same one the deep-link router trusts, so the QR
+    /// and the router agree. Nil when no valid origin is configured.
+    public func inviteURL(host: String? = PublicOrigin.configured()) -> URL? {
+        guard let host else { return nil }
         var components = URLComponents(string: host)
         components?.path = "/join"
         components?.queryItems = [URLQueryItem(name: "ref", value: code)]
@@ -169,9 +171,31 @@ public struct ReferralInfo: Sendable, Equatable {
     }
 
     /// The prefilled share-sheet message (R-1).
-    public func shareMessage(host: String = "https://dollaraday.org") -> String {
-        let link = inviteURL(host: host)?.absoluteString ?? host
-        return "Join me on Dollar A Day — give $1 a day to local causes. \(link)"
+    public func shareMessage(host: String? = PublicOrigin.configured()) -> String {
+        let base = "Join me on Dollar A Day — give $1 a day to local causes."
+        guard let link = inviteURL(host: host)?.absoluteString else { return base }
+        return "\(base) \(link)"
+    }
+}
+
+/// The app's configured public HTTPS origin (Info.plist `DADPublicOrigin`, from the
+/// `DAD_PUBLIC_ORIGIN` build setting). A DEBUG build with nothing configured falls back to
+/// production so previews and tests have a link; a release build never invents an origin.
+public enum PublicOrigin {
+    public static func configured(_ bundle: Bundle = .main) -> String? {
+        resolve(bundle.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
+    }
+
+    public static func resolve(_ value: String?) -> String? {
+        if let value, !value.isEmpty {
+            guard let url = URL(string: value), url.isBareHTTPSOrigin else { return nil }
+            return value
+        }
+        #if DEBUG
+        return "https://dollaraday.org"
+        #else
+        return nil
+        #endif
     }
 }
 

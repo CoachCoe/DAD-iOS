@@ -87,6 +87,27 @@ final class ReferralQRTests: XCTestCase {
         XCTAssertTrue(referral.shareMessage().contains("ref=SHAWN42"))
     }
 
+    func testInviteURLUsesTheInjectedOrigin() {
+        let referral = ReferralInfo(code: "SHAWN42", linkCount: 0, irlCount: 0)
+        XCTAssertEqual(referral.inviteURL(host: "https://staging.example.org")?.absoluteString,
+                       "https://staging.example.org/join?ref=SHAWN42")
+        XCTAssertTrue(referral.shareMessage(host: "https://staging.example.org").hasSuffix("https://staging.example.org/join?ref=SHAWN42"))
+        XCTAssertNil(referral.inviteURL(host: nil))
+        XCTAssertFalse(referral.shareMessage(host: nil).contains("http"))
+    }
+
+    func testPublicOriginResolution() {
+        XCTAssertEqual(PublicOrigin.resolve("https://staging.example.org"), "https://staging.example.org")
+        XCTAssertNil(PublicOrigin.resolve("http://insecure.example.org"))
+        XCTAssertNil(PublicOrigin.resolve("https://example.org/path"))
+        #if DEBUG
+        XCTAssertEqual(PublicOrigin.resolve(nil), "https://dollaraday.org")
+        XCTAssertEqual(PublicOrigin.resolve(""), "https://dollaraday.org")
+        #else
+        XCTAssertNil(PublicOrigin.resolve(nil))
+        #endif
+    }
+
     func testQREncodeDecodeRoundTrip() {
         let url = ReferralInfo(code: "ABC123", linkCount: 0, irlCount: 0).inviteURL()!.absoluteString
         let payload = QRPayload(url)
