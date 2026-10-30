@@ -17,3 +17,6 @@ Sources/DADFoundation/openapi.json
 Sources/DADFoundation/DADTokens.swift
 Sources/DADFoundation/links.json
 Sources/DADFoundation/DADNullValue.swift
+
+# Local working docs (plans, gap analysis) are never committed.
+docs/
