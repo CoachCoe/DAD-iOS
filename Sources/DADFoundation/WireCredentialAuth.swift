@@ -32,9 +32,9 @@ public struct WireCredentialAuth: SignupService, PasswordSignInService, OIDCSign
     public func requestSignup(_ form: SignupForm) async throws {
         let body = Operations.postDonorSignup.Input.Body.jsonPayload(name: form.name, email: form.email, zip: form.zip, city: form.city)
         switch try await client.postDonorSignup(.init(body: .json(body))) {
-        case .accepted: return
-        // DAD-Main answers 200 `{"sent":true}` where the contract documents 202 `{message}`; the
-        // outcome is the same (a link was emailed), so any 2xx is accepted without reading the body.
+        case .ok: return
+        // Contract 2.4 answers 200 `{"sent":true}`; an older server's 202 means the same thing (a
+        // link was emailed), so any 2xx is accepted without reading the body.
         case .undocumented(let status, _) where (200..<300).contains(status): return
         case .unprocessableContent: throw AccountError.invalidInput
         case .tooManyRequests: throw AccountError.rateLimited
@@ -45,9 +45,8 @@ public struct WireCredentialAuth: SignupService, PasswordSignInService, OIDCSign
     // MARK: Password sign-in
 
     public func signIn(email: String, password: String) async throws -> Credentials {
-        // The contract's body carries no device_name/platform for this operation; the native
-        // client marker header is what selects the token-bearing response shape.
-        let body = Operations.postDonorPasswordSignIn.Input.Body.jsonPayload(email: email, password: password)
+        let body = Operations.postDonorPasswordSignIn.Input.Body.jsonPayload(
+            email: email, password: password, device_name: deviceName, platform: .IOS)
         switch try await client.postDonorPasswordSignIn(.init(body: .json(body))) {
         case .ok(let response):
             guard case .NativeSession(let session) = try response.body.json else { throw AccountError.invalidResponse }
@@ -108,13 +107,14 @@ public struct WireCredentialAuth: SignupService, PasswordSignInService, OIDCSign
 
 /// Authenticated password management (`postDonorMePassword`) through the session.
 ///
-/// The server answers a wrong `current_password` with the same 401 as an expired access token.
-/// Treating both as "signed out" would refresh, retry, and then wipe a perfectly good local session
-/// on a typo, so a 401 whose problem detail is the server's credential-rejection sentence is surfaced as
-/// `AccountError.passwordIncorrect` (never retried, never ends the session); any other 401 is a real
-/// session failure and takes the normal refresh-once path.
+/// A wrong `current_password` answers 422 with `code` `CURRENT_PASSWORD_INCORRECT` (contract 2.4):
+/// the session is fine, so it surfaces as `AccountError.passwordIncorrect` and never ends the session.
+/// Any other 401 is a real session failure and takes the normal refresh-once path. Servers older than
+/// 2.4 answered a wrong password with a 401 carrying `rejectedDetail`; that is still read as a wrong
+/// password. A 422 body whose `code` is unknown (or unreadable) is plain invalid input.
 public struct WirePasswordSettings: PasswordSettingsService, PasskeyManagementService {
     private let product: ProductClient
+    static let wrongCurrentCode = "CURRENT_PASSWORD_INCORRECT"
     static let rejectedDetail = "The email or password is incorrect"
 
     public init(origin: URL, session: AccountSession) throws {
@@ -131,7 +131,9 @@ public struct WirePasswordSettings: PasswordSettingsService, PasskeyManagementSe
             case .unauthorized(let response):
                 if let detail = try? response.body.json.detail, detail == Self.rejectedDetail { throw AccountError.passwordIncorrect }
                 throw AccountError.signedOut
-            case .unprocessableContent: throw AccountError.invalidInput
+            case .unprocessableContent(let response):
+                if let code = try? response.body.json.code, code == Self.wrongCurrentCode { throw AccountError.passwordIncorrect }
+                throw AccountError.invalidInput
             case .tooManyRequests: throw AccountError.rateLimited
             default: throw AccountError.unavailable
             }

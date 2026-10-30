@@ -13,7 +13,7 @@ import OpenAPIRuntime
 /// with a token starting `stubclaim`); password sign-in accepts `correct horse battery` (the
 /// stored password, replaceable via set-password), `throttled password` is 429, anything else is
 /// the server's 401 "email or password is incorrect". Set-password rejects a wrong `current_password`
-/// with that same 401 and a new password outside 12...72 bytes with 422. Profile/preferences/
+/// with 422 `CURRENT_PASSWORD_INCORRECT` and a new password outside 12...72 bytes with 422. Profile/preferences/
 /// logout/refresh behave like a live account; account deletion succeeds (200) unless
 /// `deletionBlocked` (409), after which the account is gone (profile -> 401).
 public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
@@ -78,6 +78,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         }
     }
 
+    private static let wrongCurrent = #"{"detail":"Current password is incorrect","code":"CURRENT_PASSWORD_INCORRECT"}"#
     private static let rejected = #"{"detail":"The email or password is incorrect"}"#
 
     private static func object(_ payload: String) -> [String: Any] {
@@ -117,7 +118,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             let new = fields["password"] as? String ?? ""
             guard (12...72).contains(new.utf8.count) else { return reply(.unprocessableContent) }
             if let current = fields["current_password"] as? String, current != lock.withLock({ storedPassword }) {
-                return reply(.unauthorized, Self.rejected)
+                return reply(.unprocessableContent, Self.wrongCurrent)
             }
             lock.withLock { storedPassword = new }
             return reply(.ok, #"{"saved":true}"#)

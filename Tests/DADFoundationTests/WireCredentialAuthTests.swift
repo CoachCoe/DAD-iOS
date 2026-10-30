@@ -4,13 +4,14 @@ import OpenAPIRuntime
 import XCTest
 @testable import DADFoundation
 
+private let wrongCurrentJSON = #"{"detail":"Current password is incorrect","code":"CURRENT_PASSWORD_INCORRECT"}"#
 private let rejectedJSON = #"{"detail":"The email or password is incorrect"}"#
 
 final class WireSignupTests: XCTestCase {
     private let form = SignupForm(name: "Alex Rivera", email: "alex@example.org", zip: "78701", city: "Austin")
 
-    func testSignupPostsTheFormUnauthenticatedAndAcceptsTheDocumented202() async throws {
-        let transport = ScriptedTransport { _, _ in (.accepted, #"{"message":"Check your email"}"#) }
+    func testSignupPostsTheFormUnauthenticatedAndAcceptsTheDocumented200() async throws {
+        let transport = ScriptedTransport { _, _ in (.ok, #"{"sent":true}"#) }
         try await WireCredentialAuth(origin: testOrigin, transport: transport).requestSignup(form)
         let call = try XCTUnwrap(transport.seen.first)
         XCTAssertEqual(call.request.path, "/donor/signup")
@@ -24,9 +25,9 @@ final class WireSignupTests: XCTestCase {
         XCTAssertEqual(sent.count, 4)
     }
 
-    /// DAD-Main actually replies 200 `{"sent":true}`; the contract documents 202. Both mean "link emailed".
-    func testSignupAcceptsTheLiveServers200Reply() async throws {
-        let transport = ScriptedTransport { _, _ in (.ok, #"{"sent":true}"#) }
+    /// An older server's 202 (with any body) still means "link emailed".
+    func testSignupAcceptsAnyOlderServer2xxReply() async throws {
+        let transport = ScriptedTransport { _, _ in (.accepted, #"{"message":"Check your email"}"#) }
         try await WireCredentialAuth(origin: testOrigin, transport: transport).requestSignup(form)
     }
 
@@ -62,7 +63,18 @@ final class WirePasswordSignInTests: XCTestCase {
         let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: Any])
         XCTAssertEqual(sent["email"] as? String, "alex@example.org")
         XCTAssertEqual(sent["password"] as? String, "correct horse battery")
-        XCTAssertEqual(sent.count, 2, "the contract body carries only email and password")
+        XCTAssertEqual(sent["platform"] as? String, "IOS")
+        XCTAssertNil(sent["device_name"], "no device name configured, none sent")
+        XCTAssertEqual(sent.count, 3)
+    }
+
+    func testPasswordSignInSendsDeviceNameAndPlatform() async throws {
+        let transport = ScriptedTransport { _, _ in (.ok, nativeSessionJSON) }
+        _ = try await WireCredentialAuth(origin: testOrigin, transport: transport, deviceName: "Alex’s iPhone")
+            .signIn(email: "alex@example.org", password: "correct horse battery")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(transport.seen.first).body.utf8)) as? [String: Any])
+        XCTAssertEqual(sent["device_name"] as? String, "Alex’s iPhone")
+        XCTAssertEqual(sent["platform"] as? String, "IOS")
     }
 
     func testStatusMapping() async {
@@ -274,9 +286,25 @@ final class WirePasswordSettingsTests: XCTestCase {
         XCTAssertEqual(second["current_password"] as? String, "old passphrase!")
     }
 
-    /// The server's wrong-current-password reply is a 401. It must NOT refresh, retry or end the session.
+    /// A wrong current password is a 422 with a code. It must NOT refresh, retry or end the session.
     func testWrongCurrentPasswordIsNotASessionFailure() async throws {
-        let transport = ScriptedTransport { _, _ in (.unauthorized, rejectedJSON) }
+        try await assertWrongPassword(.unprocessableContent, wrongCurrentJSON)
+    }
+
+    /// Servers older than contract 2.4 answered the same condition with a 401 and this detail.
+    func testLegacy401WrongPasswordFallbackIsNotASessionFailure() async throws {
+        try await assertWrongPassword(.unauthorized, rejectedJSON)
+    }
+
+    func testUnknownProblemCodeOn422IsInvalidInput() async throws {
+        let (settings, _, store) = try make(ScriptedTransport { _, _ in (.unprocessableContent, #"{"detail":"x","code":"SOMETHING_NEW"}"#) })
+        do { try await settings.setPassword(current: "a", new: "a brand new passphrase"); XCTFail() }
+        catch { XCTAssertEqual(error as? AccountError, .invalidInput) }
+        XCTAssertNotNil(try store.load())
+    }
+
+    private func assertWrongPassword(_ status: HTTPResponse.Status, _ json: String) async throws {
+        let transport = ScriptedTransport { _, _ in (status, json) }
         let (settings, session, store) = try make(transport)
         do { try await settings.setPassword(current: "typo", new: "a brand new passphrase"); XCTFail() }
         catch { XCTAssertEqual(error as? AccountError, .passwordIncorrect) }
