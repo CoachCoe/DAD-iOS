@@ -15,4 +15,7 @@
     <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>DADAPIOrigin</key><string>$(DAD_API_ORIGIN)</string>
     <key>DADPublicOrigin</key><string>$(DAD_PUBLIC_ORIGIN)</string>
+    <key>DADAppleSignInEnabled</key><string>$(DAD_APPLE_SIGNIN_ENABLED)</string>
+    <key>DADGoogleClientID</key><string>$(DAD_GOOGLE_CLIENT_ID)</string>
+    <key>DADPasskeyRelyingParty</key><string>$(DAD_PASSKEY_RP_ID)</string>
 </dict></plist>
