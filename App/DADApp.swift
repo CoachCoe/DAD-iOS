@@ -59,6 +59,9 @@ private final class AccountModel {
     private var settingsService: (any AccountSettingsService)?
     /// Set/change password in Settings; nil in previews, where there is no real account to change.
     private(set) var passwordSettings: (any PasswordSettingsService)?
+    /// Donor-home reads (dashboard, today's initiative, gift history): real `WireDashboard` or the
+    /// scripted stub; nil in the synthetic DEBUG preview, which has no account to read.
+    private(set) var dashboardService: (any DashboardService)?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -100,13 +103,18 @@ private final class AccountModel {
             // The REAL conformers (WireAuth, WireAPI, WireAccountSettings, AccountSession) run on a
             // scripted in-process transport: UITests exercise release code paths with no network.
             do {
-                let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"),
+                let scenario: StubBackend.Scenario = launchFlag("--stub-dashboard-empty") ? .empty
+                    : launchFlag("--stub-dashboard-fail-first") ? .failFirst
+                    : launchFlag("--stub-dashboard-unranked") ? .unranked : .populated
+                let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"), scenario: scenario,
+                                                    signedIn: launchFlag("--stub-signed-in"),
                                                     onLocalWipe: { DefaultsAttributionStore().clear() })
                 session = services.session
                 kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, password: services.credentialAuth,
                                 oidc: nil, passkey: nil, capabilities: .none)
                 settingsService = services.settings
                 passwordSettings = services.passwords
+                dashboardService = services.dashboard
                 state = .loading
             } catch { session = nil; state = .unavailable }
             return
@@ -156,6 +164,7 @@ private final class AccountModel {
                                 passkeyRelyingParty: (Bundle.main.object(forInfoDictionaryKey: "DADPasskeyRelyingParty") as? String) ?? "")
                 settingsService = settings
                 passwordSettings = try WirePasswordSettings(origin: origin, session: built)
+                dashboardService = try WireDashboard(origin: origin, session: built)
                 session = built
             }
         } catch {
@@ -240,6 +249,9 @@ private struct DonorLanding: View {
     let preview: Bool
     let onRetry: () -> Void
     var onSettings: (() -> Void)?
+    /// The real donor-home reads; nil in the synthetic preview, which keeps its placeholder line.
+    var dashboard: (any DashboardService)?
+    var onSignedOut: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
@@ -251,7 +263,7 @@ private struct DonorLanding: View {
                 case .ready(let profile):
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Welcome, \(profile.publicName ?? "friend")").font(.title2.bold())
-                        Text("Your account has a home here.")
+                        if dashboard == nil { Text("Your account has a home here.") }
                     }
                 case .unavailable:
                     VStack(alignment: .leading, spacing: 12) {
@@ -269,6 +281,7 @@ private struct DonorLanding: View {
                 Button("Settings", action: onSettings)
                     .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
             }
+            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, onSignedOut: onSignedOut) }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
@@ -1424,7 +1437,8 @@ struct DADApp: App {
 
     private var donorLanding: some View {
         DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
-                     onSettings: model.makeSettings() == nil ? nil : { showSettings = true })
+                     onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
+                     dashboard: model.dashboardService, onSignedOut: { Task { await model.load() } })
     }
 
     @ViewBuilder private var partnerRoot: some View {
