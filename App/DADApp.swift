@@ -528,6 +528,7 @@ private struct PartnerPortal: View {
 private struct PartnerContent: View {
     let model: PartnerModel
     let overview: PartnerOverview
+    @State private var inviteEmail = ""
     var body: some View {
         // Overview tiles — a figure renders ONLY when verified (§7.3); unverified is omitted.
         VStack(alignment: .leading, spacing: 4) {
@@ -570,19 +571,49 @@ private struct PartnerContent: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Team").font(.title3.bold()).accessibilityAddTraits(.isHeader)
             ForEach(model.users) { user in
-                HStack {
-                    Text("\(user.name) · \(user.role.rawValue)")
-                    if model.role.canManageUsers {
-                        Spacer()
-                        Button("Remove") { Task { await model.removeUser(id: user.id) } }
-                            .buttonStyle(DADButtonStyle(.secondary))
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("\(user.name) · \(user.role.rawValue)")
+                        if model.canRemove(user) {
+                            Spacer()
+                            Button("Remove") { model.requestRemoval(id: user.id) }
+                                .buttonStyle(DADButtonStyle(.secondary, fillsWidth: false))
+                                .accessibilityLabel("Remove \(user.name)")
+                                .accessibilityIdentifier("partner-remove-\(user.id)")
+                        }
+                    }
+                    if model.pendingRemoval?.id == user.id {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Remove \(user.name) from your team?").font(.footnote)
+                            HStack {
+                                Button("Cancel") { model.cancelRemoval() }
+                                    .buttonStyle(DADButtonStyle(.secondary, fillsWidth: false))
+                                    .accessibilityIdentifier("partner-remove-cancel")
+                                Button("Confirm remove") { Task { await model.confirmRemoval() } }
+                                    .buttonStyle(DADButtonStyle(.primary, fillsWidth: false))
+                                    .accessibilityIdentifier("partner-remove-confirm")
+                            }
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("partner-remove-prompt")
                     }
                 }
             }
             if model.role.canManageUsers {
-                // Placeholder recipient: the email/role form lands with the live partner wiring.
-                Button("Invite user") { Task { await model.inviteUser(email: "new@acme.com", role: .viewer) } }
-                    .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("partner-invite")
+                TextField("Colleague’s email", text: $inviteEmail)
+                    .textFieldStyle(.roundedBorder).keyboardType(.emailAddress)
+                    .textContentType(.emailAddress).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("partner-invite-email")
+                Button("Invite user") {
+                    let email = inviteEmail
+                    Task {
+                        await model.inviteUser(email: email, role: .viewer)
+                        if model.actionError == nil { inviteEmail = "" }
+                    }
+                }
+                .buttonStyle(DADButtonStyle(.primary))
+                .disabled(!PartnerModel.isPlausibleEmail(inviteEmail))
+                .accessibilityIdentifier("partner-invite")
             } else {
                 Text("Read-only access").font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-readonly")
             }
@@ -721,7 +752,13 @@ private struct EngagementHome: View {
                     Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
                 }
             case .ready:
-                if let snapshot = model.snapshot { content(snapshot) }
+                if let snapshot = model.snapshot {
+                    if let error = model.actionError {
+                        Text(error).font(.footnote).foregroundStyle(Color.dad("fail"))
+                            .accessibilityIdentifier("engagement-action-error")
+                    }
+                    content(snapshot)
+                }
             }
         }
         .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
@@ -1006,9 +1043,9 @@ struct DADApp: App {
         if launchFlag("--preview-partner-pending") {
             PartnerPortal(model: PartnerModel(service: PreviewPartner(pending: true)))
         } else if launchFlag("--preview-partner-viewer") {
-            PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer)))
+            PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer), currentUserID: "u2"))
         } else if launchFlag("--preview-partner") {
-            PartnerPortal(model: PartnerModel(service: PreviewPartner()))
+            PartnerPortal(model: PartnerModel(service: PreviewPartner(), currentUserID: "u1"))
         } else {
             PartnerLanding()
         }
