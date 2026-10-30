@@ -23,7 +23,10 @@ private struct AppBackground: ViewModifier {
 #if DEBUG
 private final class PreviewStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
-    private var value: Credentials? = Credentials(access: "preview", refresh: "preview-refresh", expiresAt: .distantFuture)
+    private var value: Credentials?
+    init(signedIn: Bool = true) {
+        value = signedIn ? Credentials(access: "preview", refresh: "preview-refresh", expiresAt: .distantFuture) : nil
+    }
     func load() throws -> Credentials? { lock.withLock { value } }
     func save(_ credentials: Credentials) throws { lock.withLock { value = credentials } }
     func clear() throws { lock.withLock { value = nil } }
@@ -47,9 +50,16 @@ private actor PreviewAPI: AccountAPI {
 
 @MainActor @Observable
 private final class AccountModel {
-    enum State { case loading, ready(AccountProfile), unavailable, signedOut }
+    enum State: Equatable { case loading, ready(AccountProfile), unavailable, signedOut }
     var state = State.loading
-    private let session: AccountSession?
+    let session: AccountSession?
+    /// Sign-in transport for the unauthenticated stack: the real `WireAuth` against a configured
+    /// origin, the scripted stub under `--stub-backend`, or a DEBUG preview double. Never a preview in Release.
+    private(set) var signInService: any SignInService = UnconfiguredSignIn()
+    private var settingsService: (any AccountSettingsService)?
+    /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
+    /// no API origin configured (never silently synthetic data).
+    var notice: String?
     private var completedProof: String?
     private var activeProof: String?
     private var gate = NavigationGate()
@@ -60,22 +70,48 @@ private final class AccountModel {
     /// present is a transient sub-state of the donor shell (recoverable via "Try again"),
     /// NOT a reason to leave for the role-select splash — only a session-less app goes there.
     var hasSession: Bool { session != nil }
+    /// A session whose credentials were found on launch: the donor shell (and its own loading and
+    /// recovery states) is the right place to wait. A session with nothing stored goes straight to sign-in.
+    var hasRestorableSession: Bool { session?.restoredCredentials == true }
+    func makeSettings() -> (any AccountSettingsService)? { settingsService }
+    /// Runs sign-in verification INSIDE the session so it owns the await and the epoch guard.
+    func establish() -> PhoneSignInModel.Establish {
+        guard let session else { return { _ in throw AccountError.invalidConfiguration } }
+        return { produce in try await session.establish(produce) }
+    }
     init() {
         let apiOrigin = Bundle.main.object(forInfoDictionaryKey: "DADAPIOrigin") as? String ?? ""
         #if DEBUG
-        preview = apiOrigin.isEmpty
+        preview = apiOrigin.isEmpty && !launchFlag("--stub-backend")
         #else
         preview = false
         #endif
         router = (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
             .flatMap(URL.init(string:)).flatMap { try? LinkRouter(publicOrigin: $0) }
+        #if DEBUG
+        if launchFlag("--stub-backend") {
+            // The REAL conformers (WireAuth, WireAPI, WireAccountSettings, AccountSession) run on a
+            // scripted in-process transport: UITests exercise release code paths with no network.
+            do {
+                let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"),
+                                                    onLocalWipe: { DefaultsAttributionStore().clear() })
+                session = services.session
+                signInService = services.signIn
+                settingsService = services.settings
+                state = .loading
+            } catch { session = nil; state = .unavailable }
+            return
+        }
         // A session-less launch (no stored credentials) lands on role-select + the auth shell;
         // the preview normally starts signed-in, so this path is opt-in for the auth journey/UITest.
         if launchFlag("--preview-signed-out") {
-            session = nil
+            session = try? AccountSession(api: PreviewAPI(failFirst: false), store: PreviewStore(signedIn: false))
+            signInService = PreviewSignIn()
+            if let session { settingsService = PreviewSessionSettings(session: session) }
             state = .signedOut
             return
         }
+        #endif
         do {
             if apiOrigin.isEmpty {
                 // The synthetic (PreviewAPI/PreviewStore) path must NEVER ship in a release build —
@@ -83,7 +119,10 @@ private final class AccountModel {
                 // would serve synthetic data as if real. Compile it only into DEBUG; a release
                 // build with an empty origin is a hard configuration failure.
                 #if DEBUG
-                session = try AccountSession(api: PreviewAPI(failFirst: launchFlag("--preview-unavailable")), store: PreviewStore())
+                let built = try AccountSession(api: PreviewAPI(failFirst: launchFlag("--preview-unavailable")), store: PreviewStore())
+                signInService = PreviewSignIn()
+                settingsService = PreviewSessionSettings(session: built)
+                session = built
                 #else
                 throw AccountError.invalidConfiguration
                 #endif
@@ -93,9 +132,18 @@ private final class AccountModel {
                 // (org.dad.foundation) and debug (.debug) builds never share a
                 // credential bucket, and the name tracks the id automatically.
                 let service = Bundle.main.bundleIdentifier ?? "org.dad.foundation"
-                session = try AccountSession(api: WireAPI(origin: origin), store: KeychainStore(service: service))
+                let built = try AccountSession(api: WireAPI(origin: origin), store: KeychainStore(service: service))
+                let auth = try WireAuth(origin: origin, deviceName: UIDevice.current.name)
+                let settings = try WireAccountSettings(origin: origin, session: built, onLocalWipe: { DefaultsAttributionStore().clear() })
+                signInService = auth
+                settingsService = settings
+                session = built
             }
-        } catch { session = nil; state = .unavailable }
+        } catch {
+            session = nil
+            state = .unavailable
+            notice = "This build isn’t configured to reach DAD. Install a build with a valid API origin."
+        }
     }
     func load() async {
         guard let session else { state = .unavailable; return }
@@ -135,7 +183,13 @@ private final class AccountModel {
                     completedProof = digest
                     _ = gate.signedIn()
                     await load()
-                } catch { state = .unavailable }
+                } catch {
+                    if await session.isSignedIn { state = .unavailable }
+                    else {
+                        state = .signedOut
+                        notice = "That sign-in link didn’t work. It may have expired — request a new one."
+                    }
+                }
             }
             return nil
         default: return url
@@ -156,6 +210,7 @@ private struct DonorLanding: View {
     let state: AccountModel.State
     let preview: Bool
     let onRetry: () -> Void
+    var onSettings: (() -> Void)?
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
@@ -179,6 +234,12 @@ private struct DonorLanding: View {
                     Text("You’re signed out. Use your DAD sign-in link to continue.")
                 }
             }.accessibilityElement(children: .contain).accessibilityIdentifier("account-state")
+            // Settings hosts sign-out and the store-mandated in-app account deletion, so it is
+            // reachable whenever the donor is signed in, including while the profile read is retrying.
+            if let onSettings {
+                Button("Settings", action: onSettings)
+                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
+            }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
@@ -198,11 +259,15 @@ private struct PartnerLanding: View {
 /// Unauthenticated splash — pick a journey before signing in. The preview store starts
 /// signed-in, so this path is exercised only when there is no session.
 private struct RoleSelect: View {
+    let notice: String?
     let onSelect: (AppRole) -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
             Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
+            if let notice {
+                Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("auth-notice")
+            }
             VStack(spacing: 12) {
                 Button("I’m a donor") { onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
                 Button("I’m a partner") { onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
@@ -658,6 +723,18 @@ private actor PreviewAccountSettings: AccountSettingsService {
     func deleteAccount() async throws {}
     func signOut() async throws {}
 }
+
+/// Preview settings tied to the live (preview) session, so signing out or deleting from the donor
+/// shell really ends the session and routes back to sign-in, like a release build.
+private struct PreviewSessionSettings: AccountSettingsService {
+    let session: AccountSession
+    private let inner = PreviewAccountSettings()
+    init(session: AccountSession) { self.session = session }
+    func load() async throws -> AccountSettingsSnapshot { try await inner.load() }
+    func savePreferences(_ preferences: AccountPreferences) async throws -> AccountSettingsSnapshot { try await inner.savePreferences(preferences) }
+    func deleteAccount() async throws { try await session.discardLocal() }
+    func signOut() async throws { try await session.logout() }
+}
 #endif
 
 /// Account & settings (PRD §6.11/§6.12): profile header, notification + privacy toggles, sign
@@ -665,6 +742,7 @@ private actor PreviewAccountSettings: AccountSettingsService {
 /// Bound to `AccountSettingsModel`.
 private struct AccountSettingsScreen: View {
     @State var model: AccountSettingsModel
+    var onSignedOut: (() -> Void)?
     @State private var confirmingDelete = false
     @State private var deleteTyped = ""
     var body: some View {
@@ -694,6 +772,7 @@ private struct AccountSettingsScreen: View {
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain).accessibilityIdentifier("settings-screen")
         .task { await model.load() }
+        .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut?() } }
     }
 
     @ViewBuilder private func settingsBody(_ snapshot: AccountSettingsSnapshot) -> some View {
@@ -935,6 +1014,7 @@ private struct SignInMethods: View {
 /// Phone + SMS one-time-code journey, bound to `PhoneSignInModel`.
 private struct PhoneSignIn: View {
     @State var model: PhoneSignInModel
+    let onSignedIn: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Sign in with your phone").font(.title.bold()).accessibilityAddTraits(.isHeader)
@@ -965,6 +1045,7 @@ private struct PhoneSignIn: View {
         }
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
         .accessibilityIdentifier("phone-sign-in")
+        .onChange(of: model.phase) { _, phase in if case .signedIn = phase { onSignedIn() } }
     }
 
     private var isVerifying: Bool {
@@ -978,39 +1059,65 @@ private struct PhoneSignIn: View {
     }
 }
 
-/// Release builds have no sign-in transport yet (the wire phone/OIDC endpoints are PRD work), so
-/// they fail honestly as unreachable rather than inheriting the preview double.
+/// Used when no API origin is configured (Release): sign-in fails clearly instead of inheriting a preview double.
 private struct UnconfiguredSignIn: SignInService {
-    func requestPhoneCode(phone: String) async throws -> String { throw AccountError.unavailable }
-    func verifyPhone(handle: String, code: String) async throws -> Credentials { throw AccountError.unavailable }
+    func requestPhoneCode(phone: String) async throws -> String { throw AccountError.invalidConfiguration }
+    func verifyPhone(handle: String, code: String) async throws -> Credentials { throw AccountError.invalidConfiguration }
 }
 
-/// The unauthenticated stack: role select → sign-in methods → the chosen method's flow.
-private struct UnauthenticatedStack: View {
-    // @Sendable so this can be captured by PhoneSignInModel's @Sendable onEstablish closure under
-    // Swift 6 strict concurrency. It carries the established Credentials so the caller can install
-    // them into the AccountSession once auth integration lands; they are not dropped here.
-    let onSignedIn: @Sendable (AppRole, Credentials) async -> Void
-    @State private var step: Step = .roleSelect
-    private enum Step: Equatable { case roleSelect, methods(AppRole), phone(AppRole) }
-
-    private var service: any SignInService {
-        #if DEBUG
-        PreviewSignIn()
-        #else
-        UnconfiguredSignIn()
-        #endif
+/// Partner sign-in is an emailed-link flow (`partnerRequestSignIn`) that lands with the partner
+/// wiring phase; until then say so rather than offering a donor phone sign-in under a partner label.
+private struct PartnerSignInNotice: View {
+    let onBack: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Partner sign-in").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+            Text("Partner sign-in isn’t available in the app yet. Use the DAD website to sign in as a partner.")
+            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityIdentifier("partner-sign-in-notice")
     }
+}
+
+/// The unauthenticated stack: role select → sign-in methods → the chosen method's flow. Verification
+/// runs through `establish` so the session (not this view) owns the network await and its epoch guard.
+private struct UnauthenticatedStack: View {
+    let service: any SignInService
+    let establish: PhoneSignInModel.Establish
+    let notice: String?
+    let onSignedIn: () -> Void
+    @State private var step: Step = .roleSelect
+    private enum Step: Equatable { case roleSelect, methods, phone, partner }
 
     var body: some View {
         switch step {
         case .roleSelect:
-            RoleSelect { role in step = .methods(role) }
-        case .methods(let role):
-            SignInMethods { step = .phone(role) }
-        case .phone(let role):
-            PhoneSignIn(model: PhoneSignInModel(service: service) { credentials in await onSignedIn(role, credentials) })
+            RoleSelect(notice: notice) { role in step = role == .donor ? .methods : .partner }
+        case .methods:
+            SignInMethods { step = .phone }
+        case .phone:
+            PhoneSignIn(model: PhoneSignInModel(service: service, establish: establish), onSignedIn: onSignedIn)
+        case .partner:
+            PartnerSignInNotice { step = .roleSelect }
         }
+    }
+}
+
+/// Settings presented from the donor shell: sign-out and deletion run against the real session, and
+/// leaving the signed-in state dismisses the sheet so the root can route to sign-in.
+private struct SettingsSheet: View {
+    let service: any AccountSettingsService
+    let onClose: () -> Void
+    let onSignedOut: () -> Void
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
+                    .accessibilityIdentifier("settings-close")
+                AccountSettingsScreen(model: AccountSettingsModel(service: service), onSignedOut: onSignedOut)
+            }
+        }.modifier(AppBackground()).tint(tokenColor("brand-ink"))
     }
 }
 
@@ -1019,6 +1126,7 @@ struct DADApp: App {
     @State private var model = AccountModel()
     @State private var router = RoleRouter()
     @State private var web: WebDestination?
+    @State private var showSettings = false
 
     @ViewBuilder private var donorRoot: some View {
         #if DEBUG
@@ -1039,7 +1147,8 @@ struct DADApp: App {
     }
 
     private var donorLanding: some View {
-        DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+        DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
+                     onSettings: model.makeSettings() == nil ? nil : { showSettings = true })
     }
 
     @ViewBuilder private var partnerRoot: some View {
@@ -1069,7 +1178,7 @@ struct DADApp: App {
                         // During restore, show the donor landing only when a session exists
                         // (its loading state covers the wait); a session-less launch waits on a
                         // neutral progress view so it never flashes the signed-in screen.
-                        if model.hasSession {
+                        if model.hasRestorableSession {
                             donorLanding
                         } else {
                             ProgressView().accessibilityIdentifier("restoring")
@@ -1077,14 +1186,14 @@ struct DADApp: App {
                     case .authenticated(.partner):
                         partnerRoot
                     case .unauthenticated:
-                        UnauthenticatedStack { role, _ in
-                            // The established Credentials arrive here; installing them into the real
-                            // AccountSession (session.establish { credentials }) lands with the
-                            // auth-integration phase, where the live session replaces AccountModel's
-                            // preview path. Until then the preview routes to the signed-in shell.
-                            await MainActor.run {
-                                router.selectRole(role)
-                                router.signedIn(as: role)
+                        UnauthenticatedStack(service: model.signInService, establish: model.establish(), notice: model.notice) {
+                            // The session already holds the established credentials; read the profile
+                            // through it, then enter the donor shell (which owns load/recovery states).
+                            Task {
+                                await model.load()
+                                router.selectRole(.donor)
+                                router.signedIn(as: .donor)
+                                _ = router.flushPendingDestination()
                             }
                         }
                     }
@@ -1109,7 +1218,24 @@ struct DADApp: App {
                 // A session-backed shell is the donor journey — the donor landing owns every
                 // account sub-state (loading / ready / unavailable / signed-out) and its own
                 // recovery, so stay on it. Only a genuinely session-less app goes to role-select.
-                if model.hasSession { router.signedIn(as: .donor) } else { router.restoredSignedOut() }
+                // A session with nothing stored (or one the server revoked) is signed out: go to sign-in.
+                if model.state == .signedOut || !model.hasSession { router.restoredSignedOut() } else { router.signedIn(as: .donor) }
+            }
+            .onChange(of: model.state) { _, state in
+                switch state {
+                case .ready where router.currentRole == nil:
+                    router.signedIn(as: .donor)   // a claim link signed the person in from the sign-in screen
+                case .signedOut where router.currentRole == .donor:
+                    router.signedOut()            // sign-out, deletion, or a revoked session
+                    showSettings = false
+                default: break
+                }
+            }
+            .sheet(isPresented: $showSettings) {
+                if let service = model.makeSettings() {
+                    SettingsSheet(service: service, onClose: { showSettings = false },
+                                  onSignedOut: { showSettings = false; Task { await model.load() } })
+                }
             }
             .onOpenURL { if let url = model.receive($0) { web = WebDestination(url: url) } }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) {

@@ -48,9 +48,12 @@ cleanup; errors propagate rather than claiming a confirmed remote revocation.
 
 Set Xcode build settings `DAD_API_ORIGIN` and `DAD_PUBLIC_ORIGIN` to the direct HTTPS API
 origin and public website origin for a real environment. No production hostname or secret
-is compiled by default. An existing live session can read the profile; a plain account
-claim link can establish one. Sign-in screens (phone, passkey, OIDC) exist as models and previews, but
-the real-session service behind them is not wired yet; only profile, claim, refresh, and logout are bound. Native entry hooks
+is compiled by default. A Release build with no API origin shows an unavailable state and sign-in fails
+with a clear message; it never serves synthetic data. Wired against the API: donor phone + SMS sign-in
+(`beginPhoneSignIn`/`finishPhoneSignIn`, existing accounts only), claim-link sign-in, profile read,
+settings load/save, refresh, logout and account deletion. All authenticated calls go through
+`AccountSession.authorized` (single-flight refresh, one bounded 401 retry, epoch-guarded). Passkey, OIDC,
+email signup/password and partner sign-in are not wired yet (models and previews only). Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next
@@ -93,11 +96,9 @@ The test runner removes the private proof fixtures after either success or failu
 
 **In-app account deletion (required).** The settings screen offers in-app account deletion
 (§6.12) behind a typed-word confirmation, and the flow wipes the local session through
-`AccountSession`'s logout path. The real-session service is not wired: only the preview
-conformer implements `deleteAccount()`, and `WireAPI` does not bind `POST /donor/me/delete`
-yet. Until that call is bound, deletion does not remove server-side data, so App Store Review
-Guideline 5.1.1(v) is not yet satisfied. Binding it (and adding it to the generator
-allow-list) is a release blocker. Once bound, disclose in the App Store "Account Deletion"
+`AccountSession`. In a configured build the confirmed deletion calls `POST /donor/me/delete`, and only on
+success wipes the local session and attribution state and returns to sign-in; a 409 (an active monthly gift or
+open checkout) is surfaced as a recoverable error and nothing local is wiped. Disclose in the App Store "Account Deletion"
 question that personal data is deleted while aggregate/receipt records required by law are
 retained.
 
