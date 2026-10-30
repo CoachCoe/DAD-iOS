@@ -49,4 +49,47 @@ import XCTest
         signout.tap()
         XCTAssertTrue(app.staticTexts["settings-signed-out"].waitForExistence(timeout: 3))
     }
+
+    func testConfirmedDeleteLeavesTheShell() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-settings"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["delete-start"].waitForExistence(timeout: 5))
+        app.buttons["delete-start"].tap()
+        let field = app.textFields["delete-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        field.tap()
+        field.typeText("DELETE")
+        app.buttons["delete-confirm"].tap()
+        XCTAssertTrue(app.staticTexts["settings-signed-out"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["delete-confirm"].exists)
+    }
+
+    func testKeepMyAccountBacksOutAndClearsTheTypedWord() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-settings"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["delete-start"].waitForExistence(timeout: 5))
+        app.buttons["delete-start"].tap()
+        let field = app.textFields["delete-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        field.tap()
+        field.typeText("DELETE")
+        app.buttons["Keep my account"].tap()
+        XCTAssertTrue(app.buttons["delete-start"].waitForExistence(timeout: 3))
+        app.buttons["delete-start"].tap()
+        XCTAssertFalse(app.buttons["delete-confirm"].waitForExistence(timeout: 1) && app.buttons["delete-confirm"].isEnabled,
+                       "the typed word must not survive backing out")
+    }
+
+    func testLargestAccessibilityTextStillReachesSignOut() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-settings", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["settings-signout"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["delete-start"].exists)
+    }
 }

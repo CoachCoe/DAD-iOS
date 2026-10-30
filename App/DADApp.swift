@@ -3,6 +3,16 @@ import DADFoundation
 import SafariServices
 import CryptoKit
 
+/// Preview/UITest launch switches exist only in DEBUG builds: a release binary ignores them, so a
+/// shipped app can never be steered into synthetic data or a canned screen by launch arguments.
+private func launchFlag(_ name: String) -> Bool {
+    #if DEBUG
+    ProcessInfo.processInfo.arguments.contains(name)
+    #else
+    false
+    #endif
+}
+
 private func tokenColor(_ name: String) -> Color {
     guard let token = DADTokens.color[name], token.count == 7, let value = UInt32(token.dropFirst(), radix: 16) else { return .primary }
     return Color(red: Double((value >> 16) & 255) / 255, green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255)
@@ -13,6 +23,7 @@ private struct AppBackground: ViewModifier {
     func body(content: Content) -> some View { content.background(tokenColor(scheme == .dark ? "ink-deep" : "paper")) }
 }
 
+#if DEBUG
 private final class PreviewStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Credentials? = Credentials(access: "preview", refresh: "preview-refresh", expiresAt: .distantFuture)
@@ -20,7 +31,9 @@ private final class PreviewStore: CredentialStore, @unchecked Sendable {
     func save(_ credentials: Credentials) throws { lock.withLock { value = credentials } }
     func clear() throws { lock.withLock { value = nil } }
 }
+#endif
 
+#if DEBUG
 private actor PreviewAPI: AccountAPI {
     private var failFirst: Bool
     init(failFirst: Bool) { self.failFirst = failFirst }
@@ -33,6 +46,7 @@ private actor PreviewAPI: AccountAPI {
     func claim(token: String) async throws -> Credentials { throw AccountError.unavailable }
     func logout(access: String) async throws {}
 }
+#endif
 
 @MainActor @Observable
 private final class AccountModel {
@@ -51,12 +65,16 @@ private final class AccountModel {
     var hasSession: Bool { session != nil }
     init() {
         let apiOrigin = Bundle.main.object(forInfoDictionaryKey: "DADAPIOrigin") as? String ?? ""
+        #if DEBUG
         preview = apiOrigin.isEmpty
+        #else
+        preview = false
+        #endif
         router = (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
             .flatMap(URL.init(string:)).flatMap { try? LinkRouter(publicOrigin: $0) }
         // A session-less launch (no stored credentials) lands on role-select + the auth shell;
         // the preview normally starts signed-in, so this path is opt-in for the auth journey/UITest.
-        if ProcessInfo.processInfo.arguments.contains("--preview-signed-out") {
+        if launchFlag("--preview-signed-out") {
             session = nil
             state = .signedOut
             return
@@ -68,7 +86,7 @@ private final class AccountModel {
                 // would serve synthetic data as if real. Compile it only into DEBUG; a release
                 // build with an empty origin is a hard configuration failure.
                 #if DEBUG
-                session = try AccountSession(api: PreviewAPI(failFirst: ProcessInfo.processInfo.arguments.contains("--preview-unavailable")), store: PreviewStore())
+                session = try AccountSession(api: PreviewAPI(failFirst: launchFlag("--preview-unavailable")), store: PreviewStore())
                 #else
                 throw AccountError.invalidConfiguration
                 #endif
@@ -198,6 +216,7 @@ private struct RoleSelect: View {
     }
 }
 
+#if DEBUG
 /// Preview sign-in transport — returns a handle and preview credentials so the auth journey
 /// runs in the simulator with no backend. The wire implementation replaces this once the
 /// phone/OIDC endpoints are consumed; the screens bind to the protocol, not this type.
@@ -211,7 +230,9 @@ private actor PreviewSignIn: SignInService {
         return Credentials(access: "preview", refresh: "preview-refresh", expiresAt: .distantFuture)
     }
 }
+#endif
 
+#if DEBUG
 /// Preview giving transport — an in-memory recurring gift so the Phase C giving journey runs
 /// in the simulator with no backend. The wire implementation (mapping the generated giving
 /// client) replaces this; the screens bind to the `GivingService` protocol, not this type.
@@ -233,7 +254,9 @@ private actor PreviewGiving: GivingService {
         .webCheckoutHandoff(URL(string: "https://give.example.org/setup")!)
     }
 }
+#endif
 
+#if DEBUG
 private actor PreviewEngagement: EngagementService {
     private var optedIn: Bool
     init(optedIn: Bool = true) { self.optedIn = optedIn }
@@ -263,9 +286,11 @@ private actor PreviewEngagement: EngagementService {
         return currentRanking()
     }
 }
+#endif
 
 // MARK: - Events preview + screen (Phase E)
 
+#if DEBUG
 /// Preview double for the events service. One reservable public event, one full event (waitlist),
 /// and one invite-only event, so the list/detail/reserve path is exercised without a network.
 private actor PreviewEvents: EventsService {
@@ -289,7 +314,10 @@ private actor PreviewEvents: EventsService {
     }
 
     func events() async throws -> [DonorEvent] { store.values.sorted { $0.startsAt < $1.startsAt } }
-    func event(id: String) async throws -> DonorEvent { store[id]! }
+    func event(id: String) async throws -> DonorEvent {
+        guard let event = store[id] else { throw AccountError.unavailable }
+        return event
+    }
 
     func reserve(eventID: String) async throws -> ReservationOutcome {
         guard let event = store[eventID] else { return .reserved }
@@ -316,6 +344,7 @@ private actor PreviewEvents: EventsService {
         CheckInResultValue(eventID: "e1", checkedIn: true, alreadyCheckedIn: false)
     }
 }
+#endif
 
 /// Events home (PRD E-1..E-10): the events list (soonest-first, invite-only marked), with an
 /// inline reserve/cancel action per row and an inline confirmation — no OS action sheets, per
@@ -410,6 +439,7 @@ private struct EventsHome: View {
 }
 
 
+#if DEBUG
 /// In-memory partner service for the preview/UITest. A `--preview-partner-pending` launch shows
 /// the pending gate; `--preview-partner-viewer` loads as a VIEWER (read-only); otherwise an ADMIN
 /// portal with one verified and one unverified figure, an unsuppressed workforce, and two users.
@@ -464,6 +494,7 @@ private actor PreviewPartner: PartnerService {
     func registerPushDevice(token: String) async throws {}
     func unregisterPushDevice() async throws {}
 }
+#endif
 
 /// Partner portal (PRD P-*, EM-*, §7). The pending-approval gate shows nothing else (P-2); the
 /// loaded portal renders verified-or-hidden Overview tiles (§7.3), spend totals, the Our People
@@ -519,10 +550,17 @@ private struct PartnerContent: View {
             }
         }
 
+        if model.sectionsUnavailable {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Some details couldn’t be loaded right now.").font(.footnote).foregroundStyle(.secondary)
+                Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
+            }.accessibilityElement(children: .contain).accessibilityIdentifier("partner-partial")
+        }
+
         // Our People rollup — figures or the suppression notice (EM-3).
         if let people = model.people {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Our people").font(.title3.bold())
+                Text("Our people").font(.title3.bold()).accessibilityAddTraits(.isHeader)
                 if let notice = people.suppressionNotice {
                     Text(notice).accessibilityIdentifier("partner-suppressed")
                 } else if let given = people.givenLabel {
@@ -533,7 +571,7 @@ private struct PartnerContent: View {
 
         // Users — admin can invite/remove inline; a viewer sees the list read-only (§7.2).
         VStack(alignment: .leading, spacing: 6) {
-            Text("Team").font(.title3.bold())
+            Text("Team").font(.title3.bold()).accessibilityAddTraits(.isHeader)
             ForEach(model.users) { user in
                 HStack {
                     Text("\(user.name) · \(user.role.rawValue)")
@@ -545,18 +583,20 @@ private struct PartnerContent: View {
                 }
             }
             if model.role.canManageUsers {
+                // Placeholder recipient: the email/role form lands with the live partner wiring.
                 Button("Invite user") { Task { await model.inviteUser(email: "new@acme.com", role: .viewer) } }
                     .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("partner-invite")
             } else {
                 Text("Read-only access").font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-readonly")
             }
             if let error = model.actionError {
-                Text(error).foregroundStyle(.red).accessibilityIdentifier("partner-action-error")
+                Text(error).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("partner-action-error")
             }
         }
     }
 }
 
+#if DEBUG
 /// In-memory settings service for the preview/UITest.
 private actor PreviewAccountSettings: AccountSettingsService {
     private var prefs = AccountPreferences(
@@ -589,6 +629,7 @@ private actor PreviewAccountSettings: AccountSettingsService {
     func deleteAccount() async throws {}
     func signOut() async throws {}
 }
+#endif
 
 /// Account & settings (PRD §6.11/§6.12): profile header, notification + privacy toggles, sign
 /// out, and the store-mandated delete-account flow with a typed-word confirm gate — all inline.
@@ -618,7 +659,7 @@ private struct AccountSettingsScreen: View {
                 }
             }
             if let error = model.actionError {
-                Text(error).foregroundStyle(.red).accessibilityIdentifier("settings-action-error")
+                Text(error).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("settings-action-error")
             }
         }
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
@@ -635,16 +676,16 @@ private struct AccountSettingsScreen: View {
             Toggle(toggle.label, isOn: Binding(
                 get: { toggle.value },
                 set: { newValue in Task { await model.toggle(toggle.key, newValue) } }
-            )).accessibilityIdentifier("pref-\(toggle.key)")
+            )).disabled(model.isBusy).accessibilityIdentifier("pref-\(toggle.key)")
         }
         // Privacy: "Show my ranking" inverts rankings_opted_out.
         Toggle("Show my ranking", isOn: Binding(
             get: { snapshot.preferences.showRanking },
             set: { newValue in Task { await model.toggle("rankings_opted_out", !newValue) } }
-        )).accessibilityIdentifier("ranking-toggle")
+        )).disabled(model.isBusy).accessibilityIdentifier("ranking-toggle")
 
         Button("Sign out") { Task { await model.signOut() } }
-            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("settings-signout")
+            .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isBusy).accessibilityIdentifier("settings-signout")
 
         // Delete account (store-mandated, §6.12): typed-word confirm gate, inline.
         if !confirmingDelete {
@@ -654,10 +695,11 @@ private struct AccountSettingsScreen: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(DeleteAccountGate(typed: deleteTyped).helpText).font(.footnote)
                 TextField("Type \(DeleteAccountGate.confirmWord)", text: $deleteTyped)
-                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("delete-input")
+                    .textFieldStyle(.roundedBorder).textInputAutocapitalization(.characters).autocorrectionDisabled()
+                    .accessibilityIdentifier("delete-input")
                 Button("Permanently delete") { Task { await model.deleteAccount(DeleteAccountGate(typed: deleteTyped)) } }
                     .buttonStyle(DADButtonStyle(.primary))
-                    .disabled(!DeleteAccountGate(typed: deleteTyped).isConfirmed)
+                    .disabled(!DeleteAccountGate(typed: deleteTyped).isConfirmed || model.isBusy)
                     .accessibilityIdentifier("delete-confirm")
                 Button("Keep my account") { confirmingDelete = false; deleteTyped = "" }
                     .buttonStyle(DADButtonStyle(.secondary))
@@ -721,7 +763,7 @@ private struct EngagementHome: View {
         // Rankings — opt-out hides the position entirely (K-2/K-3), never a name list.
         DADCard {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Rankings").font(.headline)
+                Text("Rankings").font(.headline).accessibilityAddTraits(.isHeader)
                 if snapshot.ranking.isOptedOut {
                     Text("You're not shown in rankings.").font(.footnote).foregroundStyle(.secondary)
                         .accessibilityIdentifier("ranking-optedout")
@@ -741,7 +783,7 @@ private struct EngagementHome: View {
         // Network rollup (opt-in visibility: anonymous invitees counted, never named).
         DADCard {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Your network").font(.headline)
+                Text("Your network").font(.headline).accessibilityAddTraits(.isHeader)
                 Text("\(snapshot.network.activeCount) active · \(snapshot.network.annualizedLabel)")
                 if snapshot.network.hasAnonymous {
                     Text("\(snapshot.network.anonymousActive) choose to stay anonymous")
@@ -753,7 +795,7 @@ private struct EngagementHome: View {
         // Invite / IRL (share message + code; full-screen QR + scan live behind the share seam).
         DADCard {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Invite friends").font(.headline)
+                Text("Invite friends").font(.headline).accessibilityAddTraits(.isHeader)
                 Text("Your code: \(snapshot.referral.code)").accessibilityIdentifier("referral-code")
                 Text("\(snapshot.referral.totalConverted) have joined through you").font(.footnote).foregroundStyle(.secondary)
             }
@@ -767,12 +809,13 @@ private struct EngagementHome: View {
 private struct GiftScreen: View {
     @State var model: GivingModel
     @State private var confirmingCancel = false
+    @ScaledMetric(relativeTo: .largeTitle) private var amountSize: CGFloat = 44
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Set your gift").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
             DADCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(model.selection.dailyLabel).font(.system(size: 44, weight: .bold))
+                    Text(model.selection.dailyLabel).font(.system(size: amountSize, weight: .bold))
                         .accessibilityIdentifier("gift-daily")
                     Text("\(model.selection.monthlyLabel) · charged monthly").foregroundStyle(.secondary)
                     HStack(spacing: 16) {
@@ -842,6 +885,7 @@ private struct SignInMethods: View {
                     Button(method.title) { if method == .phone { onPhone() } }
                         .buttonStyle(DADButtonStyle(method == .phone ? .primary : .secondary))
                         .disabled(method != .phone)
+                        .accessibilityHint(method == .phone ? "" : "Not available yet")
                 }
             }
         }
@@ -856,44 +900,70 @@ private struct PhoneSignIn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Sign in with your phone").font(.title.bold()).accessibilityAddTraits(.isHeader)
-            switch model.phase {
-            case .enterPhone, .requestingCode, .failed:
-                TextField("Phone number", text: $model.phone)
-                    .textContentType(.telephoneNumber)
-                    .accessibilityLabel("Phone number")
-                if case .failed(let message) = model.phase {
-                    Text(message).font(.footnote).foregroundStyle(Color.dad("fail"))
-                }
-                Button("Send code") { Task { await model.requestCode() } }
-                    .buttonStyle(DADButtonStyle(.primary))
-                    .disabled(!model.canRequestCode)
-            case .enterCode, .verifying:
+            if model.isAwaitingCode {
                 TextField("Verification code", text: $model.code)
+                    .textFieldStyle(.roundedBorder)
                     .textContentType(.oneTimeCode)
+                    .keyboardType(.numberPad)
                     .accessibilityLabel("Verification code")
+                failure
                 Button("Verify") { Task { await model.verify() } }
                     .buttonStyle(DADButtonStyle(.primary))
                     .disabled(!model.canVerify)
-            case .signedIn:
+            } else if case .signedIn = model.phase {
                 Text("You’re signed in.").font(.headline)
+            } else {
+                TextField("Phone number", text: $model.phone)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.telephoneNumber)
+                    .keyboardType(.phonePad)
+                    .accessibilityLabel("Phone number")
+                failure
+                Button("Send code") { Task { await model.requestCode() } }
+                    .buttonStyle(DADButtonStyle(.primary))
+                    .disabled(!model.canRequestCode)
             }
+            if model.phase == .requestingCode || isVerifying { ProgressView() }
         }
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
         .accessibilityIdentifier("phone-sign-in")
     }
+
+    private var isVerifying: Bool {
+        if case .verifying = model.phase { true } else { false }
+    }
+
+    @ViewBuilder private var failure: some View {
+        if case .failed(let message) = model.phase {
+            Text(message).font(.footnote).foregroundStyle(Color.dad("fail"))
+        }
+    }
+}
+
+/// Release builds have no sign-in transport yet (the wire phone/OIDC endpoints are PRD work), so
+/// they fail honestly as unreachable rather than inheriting the preview double.
+private struct UnconfiguredSignIn: SignInService {
+    func requestPhoneCode(phone: String) async throws -> String { throw AccountError.unavailable }
+    func verifyPhone(handle: String, code: String) async throws -> Credentials { throw AccountError.unavailable }
 }
 
 /// The unauthenticated stack: role select → sign-in methods → the chosen method's flow.
 private struct UnauthenticatedStack: View {
-    let selectedRole: AppRole?
-    // @Sendable so this can be captured by PhoneSignInModel's @Sendable onEstablish closure
-    // under Swift 6 strict concurrency; the view hierarchy is @MainActor so the hop is safe.
-    // Carries the established Credentials through so the caller can install them into the
-    // AccountSession (session.establish) — the real-session wiring lands with auth integration;
-    // the preview routes on success. The credentials are no longer silently dropped here.
+    // @Sendable so this can be captured by PhoneSignInModel's @Sendable onEstablish closure under
+    // Swift 6 strict concurrency. It carries the established Credentials so the caller can install
+    // them into the AccountSession once auth integration lands; they are not dropped here.
     let onSignedIn: @Sendable (AppRole, Credentials) async -> Void
     @State private var step: Step = .roleSelect
     private enum Step: Equatable { case roleSelect, methods(AppRole), phone(AppRole) }
+
+    private var service: any SignInService {
+        #if DEBUG
+        PreviewSignIn()
+        #else
+        UnconfiguredSignIn()
+        #endif
+    }
+
     var body: some View {
         switch step {
         case .roleSelect:
@@ -901,7 +971,7 @@ private struct UnauthenticatedStack: View {
         case .methods(let role):
             SignInMethods { step = .phone(role) }
         case .phone(let role):
-            PhoneSignIn(model: PhoneSignInModel(service: PreviewSignIn()) { credentials in await onSignedIn(role, credentials) })
+            PhoneSignIn(model: PhoneSignInModel(service: service) { credentials in await onSignedIn(role, credentials) })
         }
     }
 }
@@ -911,44 +981,65 @@ struct DADApp: App {
     @State private var model = AccountModel()
     @State private var router = RoleRouter()
     @State private var web: WebDestination?
+
+    @ViewBuilder private var donorRoot: some View {
+        #if DEBUG
+        if launchFlag("--preview-giving") {
+            GiftScreen(model: GivingModel(service: PreviewGiving()))
+        } else if launchFlag("--preview-engagement") {
+            EngagementHome(model: EngagementModel(service: PreviewEngagement()))
+        } else if launchFlag("--preview-events") {
+            EventsHome(model: EventsModel(service: PreviewEvents()))
+        } else if launchFlag("--preview-settings") {
+            AccountSettingsScreen(model: AccountSettingsModel(service: PreviewAccountSettings()))
+        } else {
+            donorLanding
+        }
+        #else
+        donorLanding
+        #endif
+    }
+
+    private var donorLanding: some View {
+        DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+    }
+
+    @ViewBuilder private var partnerRoot: some View {
+        #if DEBUG
+        if launchFlag("--preview-partner-pending") {
+            PartnerPortal(model: PartnerModel(service: PreviewPartner(pending: true)))
+        } else if launchFlag("--preview-partner-viewer") {
+            PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer)))
+        } else if launchFlag("--preview-partner") {
+            PartnerPortal(model: PartnerModel(service: PreviewPartner()))
+        } else {
+            PartnerLanding()
+        }
+        #else
+        PartnerLanding()
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
             ScrollView {
                 Group {
                     switch router.root {
                     case .authenticated(.donor):
-                        if ProcessInfo.processInfo.arguments.contains("--preview-giving") {
-                            GiftScreen(model: GivingModel(service: PreviewGiving()))
-                        } else if ProcessInfo.processInfo.arguments.contains("--preview-engagement") {
-                            ScrollView { EngagementHome(model: EngagementModel(service: PreviewEngagement())) }
-                        } else if ProcessInfo.processInfo.arguments.contains("--preview-events") {
-                            ScrollView { EventsHome(model: EventsModel(service: PreviewEvents())) }
-                        } else if ProcessInfo.processInfo.arguments.contains("--preview-settings") {
-                            ScrollView { AccountSettingsScreen(model: AccountSettingsModel(service: PreviewAccountSettings())) }
-                        } else {
-                            DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
-                        }
+                        donorRoot
                     case .restoring:
                         // During restore, show the donor landing only when a session exists
                         // (its loading state covers the wait); a session-less launch waits on a
                         // neutral progress view so it never flashes the signed-in screen.
                         if model.hasSession {
-                            DonorLanding(state: model.state, preview: model.preview) { Task { await model.load() } }
+                            donorLanding
                         } else {
                             ProgressView().accessibilityIdentifier("restoring")
                         }
                     case .authenticated(.partner):
-                        if ProcessInfo.processInfo.arguments.contains("--preview-partner-pending") {
-                            ScrollView { PartnerPortal(model: PartnerModel(service: PreviewPartner(pending: true))) }
-                        } else if ProcessInfo.processInfo.arguments.contains("--preview-partner-viewer") {
-                            ScrollView { PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer))) }
-                        } else if ProcessInfo.processInfo.arguments.contains("--preview-partner") {
-                            ScrollView { PartnerPortal(model: PartnerModel(service: PreviewPartner())) }
-                        } else {
-                            PartnerLanding()
-                        }
-                    case .unauthenticated(let selectedRole):
-                        UnauthenticatedStack(selectedRole: selectedRole) { role, _ in
+                        partnerRoot
+                    case .unauthenticated:
+                        UnauthenticatedStack { role, _ in
                             // The established Credentials arrive here; installing them into the real
                             // AccountSession (session.establish { credentials }) lands with the
                             // auth-integration phase, where the live session replaces AccountModel's
@@ -964,23 +1055,18 @@ struct DADApp: App {
             .modifier(AppBackground())
             .tint(tokenColor("brand-ink"))
             .task {
-                // The giving preview exercises the signed-in GiftScreen directly: route to the
-                // donor shell up front (deterministically, before the profile await) so the
-                // switch shows GiftScreen immediately instead of dwelling in `.restoring` /
-                // DonorLanding during PreviewAPI's load delay.
-                if ProcessInfo.processInfo.arguments.contains("--preview-giving")
-                    || ProcessInfo.processInfo.arguments.contains("--preview-engagement")
-                    || ProcessInfo.processInfo.arguments.contains("--preview-events")
-                    || ProcessInfo.processInfo.arguments.contains("--preview-settings") {
+                #if DEBUG
+                // A preview screen is launched straight into its router state, before the profile
+                // await, so the target renders immediately instead of dwelling in `.restoring`.
+                if ["--preview-giving", "--preview-engagement", "--preview-events", "--preview-settings"].contains(where: launchFlag) {
                     router.signedIn(as: .donor)
                     return
                 }
-                if ProcessInfo.processInfo.arguments.contains("--preview-partner")
-                    || ProcessInfo.processInfo.arguments.contains("--preview-partner-viewer")
-                    || ProcessInfo.processInfo.arguments.contains("--preview-partner-pending") {
+                if ["--preview-partner", "--preview-partner-viewer", "--preview-partner-pending"].contains(where: launchFlag) {
                     router.signedIn(as: .partner)
                     return
                 }
+                #endif
                 await model.load()
                 // A session-backed shell is the donor journey — the donor landing owns every
                 // account sub-state (loading / ready / unavailable / signed-out) and its own
