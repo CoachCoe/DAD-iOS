@@ -55,8 +55,10 @@ private final class AccountModel {
     let session: AccountSession?
     /// Sign-in transport for the unauthenticated stack: the real `WireAuth` against a configured
     /// origin, the scripted stub under `--stub-backend`, or a DEBUG preview double. Never a preview in Release.
-    private(set) var signInService: any SignInService = UnconfiguredSignIn()
+    private(set) var kit = SignInKit.unconfigured
     private var settingsService: (any AccountSettingsService)?
+    /// Set/change password in Settings; nil in previews, where there is no real account to change.
+    private(set) var passwordSettings: (any PasswordSettingsService)?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -86,7 +88,12 @@ private final class AccountModel {
         #else
         preview = false
         #endif
-        router = (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
+        #if DEBUG
+        let stubRouter = launchFlag("--stub-backend") ? try? LinkRouter(publicOrigin: StubBackend.origin) : nil
+        #else
+        let stubRouter: LinkRouter? = nil
+        #endif
+        router = stubRouter ?? (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
             .flatMap(URL.init(string:)).flatMap { try? LinkRouter(publicOrigin: $0) }
         #if DEBUG
         if launchFlag("--stub-backend") {
@@ -96,8 +103,10 @@ private final class AccountModel {
                 let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"),
                                                     onLocalWipe: { DefaultsAttributionStore().clear() })
                 session = services.session
-                signInService = services.signIn
+                kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, password: services.credentialAuth,
+                                oidc: nil, passkey: nil, capabilities: .none)
                 settingsService = services.settings
+                passwordSettings = services.passwords
                 state = .loading
             } catch { session = nil; state = .unavailable }
             return
@@ -106,7 +115,7 @@ private final class AccountModel {
         // the preview normally starts signed-in, so this path is opt-in for the auth journey/UITest.
         if launchFlag("--preview-signed-out") {
             session = try? AccountSession(api: PreviewAPI(failFirst: false), store: PreviewStore(signedIn: false))
-            signInService = PreviewSignIn()
+            kit = .preview
             if let session { settingsService = PreviewSessionSettings(session: session) }
             state = .signedOut
             return
@@ -120,7 +129,7 @@ private final class AccountModel {
                 // build with an empty origin is a hard configuration failure.
                 #if DEBUG
                 let built = try AccountSession(api: PreviewAPI(failFirst: launchFlag("--preview-unavailable")), store: PreviewStore())
-                signInService = PreviewSignIn()
+                kit = .preview
                 settingsService = PreviewSessionSettings(session: built)
                 session = built
                 #else
@@ -134,9 +143,19 @@ private final class AccountModel {
                 let service = Bundle.main.bundleIdentifier ?? "org.dad.foundation"
                 let built = try AccountSession(api: WireAPI(origin: origin), store: KeychainStore(service: service))
                 let auth = try WireAuth(origin: origin, deviceName: UIDevice.current.name)
+                let credentialAuth = try WireCredentialAuth(origin: origin, deviceName: UIDevice.current.name)
                 let settings = try WireAccountSettings(origin: origin, session: built, onLocalWipe: { DefaultsAttributionStore().clear() })
-                signInService = auth
+                // Apple, Google and passkeys stay off until the owner supplies their build settings.
+                let capabilities = SignInCapabilities(config: SignInConfig(
+                    appleFlag: Bundle.main.object(forInfoDictionaryKey: "DADAppleSignInEnabled") as? String,
+                    googleClientID: Bundle.main.object(forInfoDictionaryKey: "DADGoogleClientID") as? String,
+                    passkeyRelyingParty: Bundle.main.object(forInfoDictionaryKey: "DADPasskeyRelyingParty") as? String))
+                kit = SignInKit(phone: auth, signup: credentialAuth, password: credentialAuth,
+                                oidc: capabilities.apple || capabilities.google ? credentialAuth : nil,
+                                passkey: capabilities.passkey ? credentialAuth : nil, capabilities: capabilities,
+                                passkeyRelyingParty: (Bundle.main.object(forInfoDictionaryKey: "DADPasskeyRelyingParty") as? String) ?? "")
                 settingsService = settings
+                passwordSettings = try WirePasswordSettings(origin: origin, session: built)
                 session = built
             }
         } catch {
@@ -158,6 +177,16 @@ private final class AccountModel {
         catch AccountError.signedOut { if current == generation { state = .signedOut } }
         catch { if current == generation { state = .unavailable } }
     }
+    /// A sign-in link pasted from the "check your email" screen (the email may have been opened on
+    /// another device or in a browser). Only a plain claim link is accepted; it goes through the
+    /// same single-use proof exchange as a tapped link. Returns false when the text is not one.
+    func openPastedLink(_ text: String) -> Bool {
+        guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let intent = router?.route(url), case .claim(_, let next) = intent, next == nil else { return false }
+        notice = nil
+        return receive(url) == nil
+    }
+
     func receive(_ url: URL) -> URL? {
         guard let intent = router?.route(url) else { return nil }
         switch intent {
@@ -282,7 +311,12 @@ private struct RoleSelect: View {
 /// Preview sign-in transport — returns a handle and preview credentials so the auth journey
 /// runs in the simulator with no backend. The wire implementation replaces this once the
 /// phone/OIDC endpoints are consumed; the screens bind to the protocol, not this type.
-private actor PreviewSignIn: SignInService {
+private actor PreviewSignIn: SignInService, SignupService, PasswordSignInService {
+    func requestSignup(_ form: SignupForm) async throws { try await Task.sleep(for: .milliseconds(150)) }
+    func signIn(email: String, password: String) async throws -> Credentials {
+        try await Task.sleep(for: .milliseconds(150))
+        return Credentials(access: "preview", refresh: "preview-refresh", expiresAt: .distantFuture)
+    }
     func requestPhoneCode(phone: String) async throws -> String {
         try await Task.sleep(for: .milliseconds(150))
         return "preview-handle"
@@ -742,6 +776,8 @@ private struct PreviewSessionSettings: AccountSettingsService {
 /// Bound to `AccountSettingsModel`.
 private struct AccountSettingsScreen: View {
     @State var model: AccountSettingsModel
+    /// Set/change password; nil where there is no real account to change (previews).
+    var passwords: (any PasswordSettingsService)?
     var onSignedOut: (() -> Void)?
     @State private var confirmingDelete = false
     @State private var deleteTyped = ""
@@ -792,6 +828,10 @@ private struct AccountSettingsScreen: View {
             set: { newValue in Task { await model.toggle("rankings_opted_out", !newValue) } }
         )).disabled(model.isBusy).accessibilityIdentifier("ranking-toggle")
 
+        if let passwords {
+            PasswordSection(service: passwords, onSignedOut: { onSignedOut?() })
+        }
+
         Button("Sign out") { Task { await model.signOut() } }
             .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isBusy).accessibilityIdentifier("settings-signout")
 
@@ -815,6 +855,52 @@ private struct AccountSettingsScreen: View {
         }
     }
 }
+/// Set or change the sign-in password, inline in Settings. Collapsed until asked for. The current
+/// password is optional: right after a fresh sign-in the server accepts the recent authentication.
+private struct PasswordSection: View {
+    @State private var model: PasswordChangeModel
+    @State private var expanded = false
+    let onSignedOut: () -> Void
+
+    init(service: any PasswordSettingsService, onSignedOut: @escaping () -> Void) {
+        _model = State(initialValue: PasswordChangeModel(service: service))
+        self.onSignedOut = onSignedOut
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !expanded {
+                Button("Set or change password") { expanded = true }
+                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("password-start")
+            } else {
+                Text("Password").font(.headline)
+                SecureField("Current password (if you have one)", text: $model.currentPassword)
+                    .textFieldStyle(.roundedBorder).textContentType(.password).accessibilityIdentifier("password-current")
+                SecureField("New password", text: $model.newPassword)
+                    .textFieldStyle(.roundedBorder).textContentType(.newPassword).accessibilityIdentifier("password-new")
+                SecureField("Confirm new password", text: $model.confirmPassword)
+                    .textFieldStyle(.roundedBorder).textContentType(.newPassword).accessibilityIdentifier("password-confirm")
+                Text(model.newPasswordHint ?? "Use 12 to 72 characters.").font(.footnote).foregroundStyle(.secondary)
+                if model.confirmMismatch {
+                    Text("The two passwords don’t match.").font(.footnote).foregroundStyle(Color.dad("fail"))
+                }
+                switch model.phase {
+                case .failed(let message):
+                    Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("password-error")
+                case .saved:
+                    Text("Password saved.").font(.footnote).accessibilityIdentifier("password-saved")
+                default: EmptyView()
+                }
+                Button("Save password") { Task { await model.save() } }
+                    .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSave).accessibilityIdentifier("password-save")
+                Button("Cancel") { model.edit(); expanded = false }.buttonStyle(DADButtonStyle(.secondary))
+            }
+        }
+        .accessibilityElement(children: .contain).accessibilityIdentifier("password-section")
+        .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
+    }
+}
+
 /// Engagement home (PRD A-*, I-*, R-*, N-*, B-*, K-*): lifetime impact totals, the badges
 /// grid (earned/locked, state in text not colour), the rankings card with its opt-out toggle,
 /// the referral network rollup, and the invite/IRL entry. Bound to `EngagementModel`.
@@ -990,24 +1076,36 @@ private struct GiftScreen: View {
     }
 }
 
-/// Sign-in method picker (PRD §5.1). Phone+SMS is the fully wired path here; the other
-/// methods are present as labeled entry points fleshed out alongside their endpoints.
+/// Sign-in method picker (PRD §5.1). Phone and email + password are always wired; Apple, Google and
+/// passkeys light up only when their build configuration is present (`SignInCapabilities`) and are
+/// otherwise visibly disabled with a plain-text reason. "Create an account" starts email signup (D-2).
 private struct SignInMethods: View {
-    let onPhone: () -> Void
+    let capabilities: SignInCapabilities
+    let onSelect: (SignInMethod) -> Void
+    let onCreateAccount: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Sign in").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
             VStack(spacing: 12) {
                 ForEach(SignInMethod.allCases) { method in
-                    Button(method.title) { if method == .phone { onPhone() } }
+                    let available = capabilities.isAvailable(method)
+                    Button(method.title) { onSelect(method) }
                         .buttonStyle(DADButtonStyle(method == .phone ? .primary : .secondary))
-                        .disabled(method != .phone)
-                        .accessibilityHint(method == .phone ? "" : "Not available yet")
+                        .disabled(!available)
+                        .accessibilityHint(available ? "" : "Not available yet")
                 }
             }
+            if capabilities.hasUnavailableMethod {
+                Text("Apple, Google and passkey sign-in aren’t available in this build yet.")
+                    .font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("methods-unavailable-note")
+            }
+            Divider()
+            Text("New to DAD?").font(.headline)
+            Button("Create an account", action: onCreateAccount)
+                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("create-account")
         }
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityIdentifier("sign-in-methods")
+        .accessibilityElement(children: .contain).accessibilityIdentifier("sign-in-methods")
     }
 }
 
@@ -1059,10 +1157,156 @@ private struct PhoneSignIn: View {
     }
 }
 
+/// New-donor signup (D-2): name, email, ZIP, city. The server emails a single-use sign-in link
+/// (it never reveals whether the address exists); the link signs the donor in and lands in the donor
+/// shell. A pasted link works when the email was opened on another device.
+private struct SignupView: View {
+    @State var model: SignupModel
+    let notice: String?
+    let onBack: () -> Void
+    let onPasteLink: (String) -> Bool
+    @State private var pasted = ""
+    @State private var pasteFailed = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Create your account").font(.title.bold()).accessibilityAddTraits(.isHeader)
+            if case .sent(let email) = model.phase {
+                sentBody(email)
+            } else {
+                formBody
+            }
+            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("signup-back")
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain).accessibilityIdentifier("signup")
+    }
+
+    @ViewBuilder private var formBody: some View {
+        TextField("Full name", text: $model.name)
+            .textFieldStyle(.roundedBorder).textContentType(.name).textInputAutocapitalization(.words)
+            .accessibilityLabel("Full name")
+        TextField("Email", text: $model.email)
+            .textFieldStyle(.roundedBorder).textContentType(.emailAddress).keyboardType(.emailAddress)
+            .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
+        TextField("ZIP code", text: $model.zip)
+            .textFieldStyle(.roundedBorder).textContentType(.postalCode).keyboardType(.numberPad)
+            .accessibilityLabel("ZIP code")
+        TextField("City", text: $model.city)
+            .textFieldStyle(.roundedBorder).textContentType(.addressCity).textInputAutocapitalization(.words)
+            .accessibilityLabel("City")
+        if case .failed(let message) = model.phase {
+            Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("signup-error")
+        }
+        Button("Create account") { Task { await model.submit() } }
+            .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit)
+        if model.phase == .submitting { ProgressView() }
+    }
+
+    @ViewBuilder private func sentBody(_ email: String) -> some View {
+        Text("Check your email").font(.headline).accessibilityIdentifier("signup-sent")
+        Text("We sent a sign-in link to \(email). Open it on this device to finish creating your account. The link works once and expires in 15 minutes.")
+        if let notice {
+            Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("signup-link-error")
+        }
+        Text("Opened the email somewhere else? Paste the link here.").font(.footnote)
+        TextField("Paste your sign-in link", text: $pasted)
+            .textFieldStyle(.roundedBorder).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+            .accessibilityLabel("Paste your sign-in link")
+        if pasteFailed {
+            Text("That doesn’t look like a DAD sign-in link.").font(.footnote).foregroundStyle(Color.dad("fail"))
+                .accessibilityIdentifier("signup-paste-error")
+        }
+        Button("Continue") { pasteFailed = !onPasteLink(pasted) }
+            .buttonStyle(DADButtonStyle(.primary)).disabled(pasted.isEmpty).accessibilityIdentifier("signup-continue")
+        Button("Use a different email") { model.edit() }.buttonStyle(DADButtonStyle(.secondary))
+    }
+}
+
+/// Email + password sign-in, bound to `PasswordSignInModel`. The password field is a secure entry
+/// field that offers saved credentials; the model clears the secret as soon as it is sent.
+private struct PasswordSignIn: View {
+    @State var model: PasswordSignInModel
+    let onBack: () -> Void
+    let onSignedIn: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Sign in with email & password").font(.title.bold()).accessibilityAddTraits(.isHeader)
+            TextField("Email", text: $model.email)
+                .textFieldStyle(.roundedBorder).textContentType(.username).keyboardType(.emailAddress)
+                .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
+            SecureField("Password", text: $model.password)
+                .textFieldStyle(.roundedBorder).textContentType(.password).accessibilityLabel("Password")
+            if case .failed(let message) = model.phase {
+                Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("password-sign-in-error")
+            }
+            Button("Sign in") { Task { await model.submit() } }
+                .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit).accessibilityIdentifier("password-sign-in-submit")
+            if model.phase == .submitting { ProgressView() }
+            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain).accessibilityIdentifier("password-sign-in")
+        .onChange(of: model.phase) { _, phase in if case .signedIn = phase { onSignedIn() } }
+    }
+}
+
+/// One in-flight Apple / Google / passkey attempt: the platform sheet runs on appear.
+@MainActor private struct ExternalRun {
+    let title: String
+    let phase: () -> ExternalSignInPhase
+    let start: () async -> Void
+}
+
+private struct ExternalSignInView: View {
+    let run: ExternalRun
+    let onBack: () -> Void
+    let onSignedIn: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(run.title).font(.title.bold()).accessibilityAddTraits(.isHeader)
+            switch run.phase() {
+            case .working: ProgressView()
+            case .failed(let message):
+                Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("external-sign-in-error")
+                Button("Try again") { Task { await run.start() } }.buttonStyle(DADButtonStyle(.primary))
+            case .idle:
+                Button("Try again") { Task { await run.start() } }.buttonStyle(DADButtonStyle(.primary))
+            case .signedIn:
+                Text("You’re signed in.").font(.headline)
+            }
+            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain).accessibilityIdentifier("external-sign-in")
+        .task { await run.start() }
+        .onChange(of: run.phase()) { _, phase in if case .signedIn = phase { onSignedIn() } }
+    }
+}
+
 /// Used when no API origin is configured (Release): sign-in fails clearly instead of inheriting a preview double.
-private struct UnconfiguredSignIn: SignInService {
+private struct UnconfiguredSignIn: SignInService, SignupService, PasswordSignInService {
     func requestPhoneCode(phone: String) async throws -> String { throw AccountError.invalidConfiguration }
     func verifyPhone(handle: String, code: String) async throws -> Credentials { throw AccountError.invalidConfiguration }
+    func requestSignup(_ form: SignupForm) async throws { throw AccountError.invalidConfiguration }
+    func signIn(email: String, password: String) async throws -> Credentials { throw AccountError.invalidConfiguration }
+}
+
+/// Every sign-in transport the unauthenticated stack can use, plus which optional methods are on.
+private struct SignInKit {
+    let phone: any SignInService
+    let signup: any SignupService
+    let password: any PasswordSignInService
+    let oidc: (any OIDCSignInService)?
+    let passkey: (any PasskeySignInService)?
+    let capabilities: SignInCapabilities
+    var passkeyRelyingParty = ""
+
+    static let unconfigured = SignInKit(phone: UnconfiguredSignIn(), signup: UnconfiguredSignIn(), password: UnconfiguredSignIn(),
+                                        oidc: nil, passkey: nil, capabilities: .none)
+    #if DEBUG
+    static let preview = SignInKit(phone: PreviewSignIn(), signup: PreviewSignIn(), password: PreviewSignIn(),
+                                   oidc: nil, passkey: nil, capabilities: .none)
+    #endif
 }
 
 /// Partner sign-in is an emailed-link flow (`partnerRequestSignIn`) that lands with the partner
@@ -1083,23 +1327,54 @@ private struct PartnerSignInNotice: View {
 /// The unauthenticated stack: role select → sign-in methods → the chosen method's flow. Verification
 /// runs through `establish` so the session (not this view) owns the network await and its epoch guard.
 private struct UnauthenticatedStack: View {
-    let service: any SignInService
+    let kit: SignInKit
     let establish: PhoneSignInModel.Establish
     let notice: String?
+    let onPasteLink: (String) -> Bool
     let onSignedIn: () -> Void
     @State private var step: Step = .roleSelect
-    private enum Step: Equatable { case roleSelect, methods, phone, partner }
+    @State private var external: ExternalRun?
+    private enum Step: Equatable { case roleSelect, methods, phone, password, signup, external, partner }
 
     var body: some View {
         switch step {
         case .roleSelect:
             RoleSelect(notice: notice) { role in step = role == .donor ? .methods : .partner }
         case .methods:
-            SignInMethods { step = .phone }
+            SignInMethods(capabilities: kit.capabilities, onSelect: select, onCreateAccount: { step = .signup })
         case .phone:
-            PhoneSignIn(model: PhoneSignInModel(service: service, establish: establish), onSignedIn: onSignedIn)
+            PhoneSignIn(model: PhoneSignInModel(service: kit.phone, establish: establish), onSignedIn: onSignedIn)
+        case .password:
+            PasswordSignIn(model: PasswordSignInModel(service: kit.password, establish: establish),
+                           onBack: { step = .methods }, onSignedIn: onSignedIn)
+        case .signup:
+            SignupView(model: SignupModel(service: kit.signup), notice: notice, onBack: { step = .methods }, onPasteLink: onPasteLink)
+        case .external:
+            if let external {
+                ExternalSignInView(run: external, onBack: { step = .methods; self.external = nil }, onSignedIn: onSignedIn)
+            }
         case .partner:
             PartnerSignInNotice { step = .roleSelect }
+        }
+    }
+
+    private func select(_ method: SignInMethod) {
+        switch method {
+        case .phone: step = .phone
+        case .password: step = .password
+        case .apple, .google:
+            guard let oidc = kit.oidc else { return }
+            let provider: OIDCProvider = method == .apple ? .apple : .google
+            let tokens: any IDTokenProvider = method == .apple ? AppleIDTokenProvider() : UnavailableIDTokenProvider()
+            let model = OIDCSignInModel(provider: provider, tokens: tokens, service: oidc, establish: establish)
+            external = ExternalRun(title: method.title, phase: { model.phase }, start: { await model.start() })
+            step = .external
+        case .passkey:
+            guard let passkey = kit.passkey else { return }
+            let model = PasskeySignInModel(authenticator: PlatformPasskeyAuthenticator(fallbackRelyingParty: kit.passkeyRelyingParty),
+                                           service: passkey, establish: establish)
+            external = ExternalRun(title: method.title, phase: { model.phase }, start: { await model.start() })
+            step = .external
         }
     }
 }
@@ -1108,6 +1383,7 @@ private struct UnauthenticatedStack: View {
 /// leaving the signed-in state dismisses the sheet so the root can route to sign-in.
 private struct SettingsSheet: View {
     let service: any AccountSettingsService
+    let passwords: (any PasswordSettingsService)?
     let onClose: () -> Void
     let onSignedOut: () -> Void
     var body: some View {
@@ -1115,7 +1391,7 @@ private struct SettingsSheet: View {
             VStack(alignment: .leading, spacing: 0) {
                 Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
                     .accessibilityIdentifier("settings-close")
-                AccountSettingsScreen(model: AccountSettingsModel(service: service), onSignedOut: onSignedOut)
+                AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, onSignedOut: onSignedOut)
             }
         }.modifier(AppBackground()).tint(tokenColor("brand-ink"))
     }
@@ -1186,7 +1462,8 @@ struct DADApp: App {
                     case .authenticated(.partner):
                         partnerRoot
                     case .unauthenticated:
-                        UnauthenticatedStack(service: model.signInService, establish: model.establish(), notice: model.notice) {
+                        UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
+                                             onPasteLink: { model.openPastedLink($0) }) {
                             // The session already holds the established credentials; read the profile
                             // through it, then enter the donor shell (which owns load/recovery states).
                             Task {
@@ -1233,7 +1510,7 @@ struct DADApp: App {
             }
             .sheet(isPresented: $showSettings) {
                 if let service = model.makeSettings() {
-                    SettingsSheet(service: service, onClose: { showSettings = false },
+                    SettingsSheet(service: service, passwords: model.passwordSettings, onClose: { showSettings = false },
                                   onSignedOut: { showSettings = false; Task { await model.load() } })
                 }
             }

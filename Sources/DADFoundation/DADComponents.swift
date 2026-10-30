@@ -75,6 +75,7 @@ public struct DADButtonStyle: ButtonStyle {
     private let fillsWidth: Bool
     @Environment(\.colorScheme) private var scheme
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.dynamicTypeSize) private var typeSize
     /// `fillsWidth: false` sizes the button to its label, for actions that sit inside a row.
     public init(_ kind: Kind = .primary, fillsWidth: Bool = true) {
         self.kind = kind
@@ -95,16 +96,20 @@ public struct DADButtonStyle: ButtonStyle {
         }
         return configuration.label
             .font(.body.weight(.semibold))
+            .multilineTextAlignment(.center)
+            // Accessibility sizes wrap labels onto several lines: pad them and drop the full pill
+            // radius so wrapped text is not clipped by the corners.
+            .padding(.vertical, typeSize.isAccessibilitySize ? 14 : 0)
             .frame(minHeight: 44)
             .frame(maxWidth: fillsWidth ? .infinity : nil)
             .padding(.horizontal, .dadSpace("4"))
             .background(background.opacity(configuration.isPressed ? 0.82 : 1))
             .foregroundStyle(foreground)
-            .clipShape(RoundedRectangle(cornerRadius: .dadRadius("pill"), style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: typeSize.isAccessibilitySize ? 28 : .dadRadius("pill"), style: .continuous))
             .overlay {
                 // Secondary buttons sit on same-coloured cards; the outline keeps them visible.
                 if kind == .secondary {
-                    RoundedRectangle(cornerRadius: .dadRadius("pill"), style: .continuous)
+                    RoundedRectangle(cornerRadius: typeSize.isAccessibilitySize ? 28 : .dadRadius("pill"), style: .continuous)
                         .strokeBorder(Color.dad(scheme == .dark ? "ghost-line-dark" : "ghost-line"), lineWidth: 1)
                 }
             }
