@@ -11,6 +11,8 @@
     <key>UILaunchScreen</key><dict/>
     <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
     <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>DADAPIOrigin</key><string>$(DAD_API_ORIGIN)</string>
     <key>DADPublicOrigin</key><string>$(DAD_PUBLIC_ORIGIN)</string>
 </dict></plist>
