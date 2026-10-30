@@ -118,6 +118,7 @@ final class PhoneSignInModelTests: XCTestCase {
         model.code = "000000"
         await model.verify()
         guard case .failed = model.phase else { return XCTFail("expected failed, got \(model.phase)") }
+        XCTAssertTrue(model.isAwaitingCode, "a wrong code keeps the screen on code entry, not back at the phone field")
         model.retryCodeEntry()
         // Retry returns to code entry WITHOUT re-requesting a code (same handle).
         guard case .enterCode(let handle) = model.phase else { return XCTFail("expected enterCode, got \(model.phase)") }
@@ -130,6 +131,7 @@ final class PhoneSignInModelTests: XCTestCase {
         model.phone = "+14155551234"
         await model.requestCode()
         guard case .failed = model.phase else { return XCTFail("expected failed, got \(model.phase)") }
+        XCTAssertFalse(model.isAwaitingCode, "a failed SMS request has no code to wait for")
         // retry with no handle falls back to the phone screen.
         model.retryCodeEntry()
         XCTAssertEqual(model.phase, .enterPhone)

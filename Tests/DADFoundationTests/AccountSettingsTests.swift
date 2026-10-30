@@ -45,6 +45,9 @@ final class DeleteAccountGateTests: XCTestCase {
 final class AccountSettingsModelTests: XCTestCase {
     private final class FakeService: AccountSettingsService, @unchecked Sendable {
         var failLoad = false
+        var failSave = false
+        var failDelete = false
+        var failSignOut = false
         private(set) var deleted = false
         private(set) var didSignOut = false
         private var prefs = AccountPreferences(
@@ -63,6 +66,7 @@ final class AccountSettingsModelTests: XCTestCase {
             return snap()
         }
         func savePreferences(_ preferences: AccountPreferences) async throws -> AccountSettingsSnapshot {
+            if failSave { throw AccountError.unavailable }
             prefs = AccountPreferences(
                 version: preferences.version + 1, referralEmails: preferences.referralEmails,
                 marketingEmails: preferences.marketingEmails, pushReferralConverted: preferences.pushReferralConverted,
@@ -74,8 +78,14 @@ final class AccountSettingsModelTests: XCTestCase {
                 volunteer: preferences.volunteer)
             return snap()
         }
-        func deleteAccount() async throws { deleted = true }
-        func signOut() async throws { didSignOut = true }
+        func deleteAccount() async throws {
+            if failDelete { throw AccountError.unavailable }
+            deleted = true
+        }
+        func signOut() async throws {
+            didSignOut = true
+            if failSignOut { throw AccountError.unavailable }
+        }
     }
 
     func testLoadReadySetsSnapshot() async {
@@ -123,5 +133,54 @@ final class AccountSettingsModelTests: XCTestCase {
         await model.signOut()
         XCTAssertTrue(svc.didSignOut)
         XCTAssertTrue(model.signedOut)
+    }
+
+    func testFailedToggleKeepsSnapshotAndSurfacesError() async {
+        let svc = FakeService()
+        let model = AccountSettingsModel(service: svc)
+        await model.load()
+        svc.failSave = true
+        await model.toggle("marketing_emails", true)
+        XCTAssertEqual(model.snapshot?.preferences.version, 3)
+        XCTAssertFalse(model.snapshot!.preferences.marketingEmails)
+        XCTAssertEqual(model.actionError, "Something went wrong. Please try again.")
+        XCTAssertFalse(model.isBusy)
+    }
+
+    func testFailedDeleteKeepsDonorSignedInWithoutWipingSession() async {
+        let svc = FakeService(); svc.failDelete = true
+        let model = AccountSettingsModel(service: svc)
+        await model.load()
+        await model.deleteAccount(DeleteAccountGate(typed: "DELETE"))
+        XCTAssertFalse(svc.deleted)
+        XCTAssertFalse(svc.didSignOut, "a failed delete must not log the donor out of an intact account")
+        XCTAssertFalse(model.signedOut)
+        XCTAssertNotNil(model.actionError)
+        XCTAssertFalse(model.isBusy)
+    }
+
+    func testDeleteLeavesTheShellEvenWhenRemoteLogoutFailsAfterward() async {
+        let svc = FakeService(); svc.failSignOut = true
+        let model = AccountSettingsModel(service: svc)
+        await model.load()
+        await model.deleteAccount(DeleteAccountGate(typed: "DELETE"))
+        XCTAssertTrue(svc.deleted)
+        XCTAssertTrue(model.signedOut, "the account no longer exists, so the donor cannot be left in the shell")
+        XCTAssertNil(model.actionError)
+    }
+
+    func testFailedSignOutStaysInShellWithError() async {
+        let svc = FakeService(); svc.failSignOut = true
+        let model = AccountSettingsModel(service: svc)
+        await model.load()
+        await model.signOut()
+        XCTAssertFalse(model.signedOut)
+        XCTAssertNotNil(model.actionError)
+    }
+
+    func testZipLabelFallsBackWhenMissingOrEmpty() {
+        XCTAssertEqual(AccountProfileSummary(email: "a", accountRole: "DONOR", zip: nil, city: nil, phone: nil).zipLabel, "Not set")
+        XCTAssertEqual(AccountProfileSummary(email: "a", accountRole: "DONOR", zip: "", city: nil, phone: nil).zipLabel, "Not set")
+        XCTAssertEqual(AccountProfileSummary(email: "a", accountRole: "DONOR", zip: "78701", city: nil, phone: nil).zipLabel, "78701")
     }
 }

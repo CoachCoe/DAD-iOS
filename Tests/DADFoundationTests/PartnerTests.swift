@@ -104,6 +104,8 @@ final class PartnerModelTests: XCTestCase {
         var role: PartnerRole = .admin
         var pending = false
         var fail = false
+        var failSpend = false
+        var spendSignedOut = false
         private(set) var invited: [(String, PartnerRole)] = []
         private(set) var removed: [String] = []
         private(set) var pushRegistered = false
@@ -120,7 +122,11 @@ final class PartnerModelTests: XCTestCase {
                 workforceSize: 120, enrolledPercent: 35, updatedAt: Date(), hasLogo: false)
         }
         func initiatives() async throws -> [PartnerInitiative] { [] }
-        func spend() async throws -> [PartnerSpendCategory] { [] }
+        func spend() async throws -> [PartnerSpendCategory] {
+            if spendSignedOut { throw AccountError.signedOut }
+            if failSpend { throw AccountError.unavailable }
+            return []
+        }
         func people() async throws -> PartnerPeople {
             PartnerPeople(enrolled: 42, workforceSize: 120, givenMinor: 0, matchedMinor: 0,
                           avgStreakDays: 0, volunteerMinutes: 0, teams: 0, suppressed: false)
@@ -152,6 +158,29 @@ final class PartnerModelTests: XCTestCase {
         let model = PartnerModel(service: svc)
         await model.load()
         guard case .failed = model.phase else { return XCTFail("expected failed") }
+    }
+
+    func testSecondarySectionFailureIsFlaggedNotShownAsEmpty() async {
+        let svc = FakeService(); svc.failSpend = true
+        let model = PartnerModel(service: svc)
+        await model.load()
+        XCTAssertEqual(model.phase, .ready, "the portal still renders with what did load")
+        XCTAssertTrue(model.sectionsUnavailable)
+        XCTAssertNotNil(model.people)
+        XCTAssertEqual(model.users.count, 1)
+    }
+
+    func testCleanLoadDoesNotFlagSections() async {
+        let model = PartnerModel(service: FakeService())
+        await model.load()
+        XCTAssertFalse(model.sectionsUnavailable)
+    }
+
+    func testLostSessionInASectionFailsTheWholeLoad() async {
+        let svc = FakeService(); svc.spendSignedOut = true
+        let model = PartnerModel(service: svc)
+        await model.load()
+        XCTAssertEqual(model.phase, .failed("Please sign in again."))
     }
 
     func testViewerCannotInviteOrRemove() async {

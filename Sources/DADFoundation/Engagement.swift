@@ -202,8 +202,8 @@ public struct QRPayload: Sendable, Equatable {
     /// attributes to them). Returns nil when the scan is not a DAD invite link.
     public var referralCode: String? {
         guard let components = URLComponents(string: payload),
-              let ref = components.queryItems?.first(where: { $0.name == "ref" })?.value,
-              !ref.isEmpty else { return nil }
-        return ref
+              let ref = components.queryItems?.first(where: { $0.name == "ref" })?.value else { return nil }
+        // A scanned QR is untrusted input headed for sign-up attribution: accept only a well-formed code.
+        return Attribution.sanitized(ref)
     }
 }

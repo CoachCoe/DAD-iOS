@@ -53,6 +53,16 @@ public final class PhoneSignInModel {
     /// instead of requesting a fresh code. Cleared only when returning to the phone screen.
     private var activeHandle: String?
 
+    /// True once a code has been sent and not abandoned, including after a wrong code: the
+    /// screen stays on code entry so the donor retries without requesting a fresh SMS.
+    public var isAwaitingCode: Bool {
+        switch phase {
+        case .enterCode, .verifying: true
+        case .failed: activeHandle != nil
+        default: false
+        }
+    }
+
     private let service: any SignInService
     private let onEstablish: @Sendable (Credentials) async -> Void
 

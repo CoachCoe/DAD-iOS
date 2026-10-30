@@ -20,40 +20,8 @@ struct ProductClient {
 
     init(origin: URL, session: AccountSession) throws {
         guard origin.isBareHTTPSOrigin else { throw AccountError.invalidConfiguration }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 30
-        let transport = URLSessionTransport(
-            configuration: .init(session: URLSession(configuration: configuration))
-        )
-        let auth = NativeProductMiddleware(accessProvider: { try await session.accessToken() })
+        let transport = makeNativeTransport()
+        let auth = NativeHeaders(access: { try await session.accessToken() })
         self.client = Client(serverURL: origin, transport: transport, middlewares: [auth])
-    }
-}
-
-/// Native request shaping for product calls: native client marker, no cookies, no Origin,
-/// per-request bearer resolved from the session, and a bounded response body.
-private struct NativeProductMiddleware: ClientMiddleware {
-    let accessProvider: @Sendable () async throws -> String
-    func intercept(
-        _ request: HTTPRequest,
-        body: HTTPBody?,
-        baseURL: URL,
-        operationID: String,
-        next: @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)
-    ) async throws -> (HTTPResponse, HTTPBody?) {
-        var request = request
-        request.headerFields[.init("X-DAD-Client")!] = "native"
-        request.headerFields[.cookie] = nil
-        request.headerFields[.init("Origin")!] = nil
-        request.headerFields[.authorization] = "Bearer \(try await accessProvider())"
-        let (response, responseBody) = try await next(request, body, baseURL)
-        guard let responseBody else { return (response, nil) }
-        let bytes = try await ArraySlice<UInt8>(collecting: responseBody, upTo: 1_048_576)
-        return (response, HTTPBody(bytes))
     }
 }

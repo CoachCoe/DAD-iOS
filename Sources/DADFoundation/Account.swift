@@ -24,7 +24,10 @@ public struct AccountProfileSummary: Sendable, Equatable {
         self.phone = phone
     }
 
-    public var zipLabel: String { zip?.isEmpty == false ? zip! : "Not set" }
+    public var zipLabel: String {
+        guard let zip, !zip.isEmpty else { return "Not set" }
+        return zip
+    }
 }
 
 // MARK: - Preferences (§6.11)

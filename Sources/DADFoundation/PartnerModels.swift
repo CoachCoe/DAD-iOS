@@ -46,6 +46,8 @@ public final class PartnerModel {
     public private(set) var users: [PartnerUser] = []
     /// A transient action error (invite/remove) shown inline without losing the portal.
     public private(set) var actionError: String?
+    /// True when the overview loaded but at least one secondary section failed to load.
+    public private(set) var sectionsUnavailable = false
 
     private let service: any PartnerService
 
@@ -55,6 +57,19 @@ public final class PartnerModel {
     /// capability gates never open early.
     public var role: PartnerRole { overview?.role ?? .viewer }
 
+    /// Runs one secondary section load. A lost session still fails the whole load; any other
+    /// failure degrades just that section and raises `sectionsUnavailable`, so a failed fetch is
+    /// never shown as a genuinely empty section.
+    private func optional<T: Sendable>(_ call: @Sendable () async throws -> T) async throws -> T? {
+        do { return try await call() }
+        catch AccountError.signedOut { throw AccountError.signedOut }
+        catch is CancellationError { throw CancellationError() }
+        catch {
+            sectionsUnavailable = true
+            return nil
+        }
+    }
+
     public func load() async {
         phase = .loading
         do {
@@ -62,20 +77,21 @@ public final class PartnerModel {
             // pending-approval account throws before any portal data is fetched (P-2).
             let overview = try await service.overview()
             self.overview = overview
-            async let initiatives = service.initiatives()
-            async let spend = service.spend()
-            async let people = service.people()
+            sectionsUnavailable = false
+            async let initiatives = optional { try await self.service.initiatives() }
+            async let spend = optional { try await self.service.spend() }
+            async let people = optional { try await self.service.people() }
             // Users are admin-managed but readable by both roles; load them with the rest.
-            async let users = service.users()
-            self.initiatives = (try? await initiatives) ?? []
-            self.spend = (try? await spend) ?? []
-            self.people = try? await people
-            self.users = (try? await users) ?? []
+            async let users = optional { try await self.service.users() }
+            self.initiatives = try await initiatives ?? []
+            self.spend = try await spend ?? []
+            self.people = try await people
+            self.users = try await users ?? []
             phase = .ready
         } catch is PartnerPendingApproval {
             phase = .pending
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
     }
 
@@ -88,7 +104,7 @@ public final class PartnerModel {
             try await service.inviteUser(email: email, role: role)
             users = (try? await service.users()) ?? users
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
     }
 
@@ -99,7 +115,7 @@ public final class PartnerModel {
             try await service.removeUser(id: id)
             users.removeAll { $0.id == id }
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
     }
 
@@ -112,10 +128,5 @@ public final class PartnerModel {
     /// Clear the push registration on sign-out (§7.5).
     public func unregisterPush() async {
         try? await service.unregisterPushDevice()
-    }
-
-    static func message(_ error: Error) -> String {
-        if let account = error as? AccountError, account == .signedOut { return "Please sign in again." }
-        return "Something went wrong. Please try again."
     }
 }

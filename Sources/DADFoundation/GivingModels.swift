@@ -75,7 +75,7 @@ public final class GivingModel {
             }
             phase = .idle
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
     }
 
@@ -91,7 +91,7 @@ public final class GivingModel {
             recurring = try await service.changeAmount(subscriptionID: id, to: selection.monthlyMinor)
             phase = .idle
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
     }
 
@@ -106,12 +106,7 @@ public final class GivingModel {
             recurring = try await service.cancel(subscriptionID: id, periodEnd: periodEnd)
             phase = .idle
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
-    }
-
-    static func message(_ error: Error) -> String {
-        if let account = error as? AccountError, account == .signedOut { return "Please sign in again." }
-        return "Something went wrong. Please try again."
     }
 }

@@ -61,7 +61,7 @@ public final class EngagementModel {
             snapshot = try await service.snapshot()
             phase = .ready
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
     }
 
@@ -79,13 +79,8 @@ public final class EngagementModel {
                 referral: current.referral
             )
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
-    }
-
-    static func message(_ error: Error) -> String {
-        if let account = error as? AccountError, account == .signedOut { return "Please sign in again." }
-        return "Something went wrong. Please try again."
     }
 }
 

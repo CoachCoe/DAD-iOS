@@ -65,7 +65,7 @@ public final class EventsModel {
             events = try await service.events()
             phase = .ready
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
     }
 
@@ -80,7 +80,7 @@ public final class EventsModel {
             lastOutcome = outcome
             await refresh(eventID: eventID)
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
     }
 
@@ -91,12 +91,14 @@ public final class EventsModel {
             lastOutcome = nil
             await refresh(eventID: eventID)
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
     }
 
     /// Re-fetch one event after a mutation and splice it back into the list in place.
     private func refresh(eventID: String) async {
+        // Best-effort: the mutation already succeeded, so a failed re-fetch leaves the row stale
+        // until the next load rather than reporting a reserve/cancel that worked as an error.
         guard let updated = try? await service.event(id: eventID) else { return }
         if let index = events.firstIndex(where: { $0.id == eventID }) {
             events[index] = updated
@@ -104,11 +106,6 @@ public final class EventsModel {
     }
 
     public func clearOutcome() { lastOutcome = nil }
-
-    static func message(_ error: Error) -> String {
-        if let account = error as? AccountError, account == .signedOut { return "Please sign in again." }
-        return "Something went wrong. Please try again."
-    }
 }
 
 // MARK: - Check-in model (E-8)
@@ -151,15 +148,13 @@ public final class CheckInModel {
             let result = try await service.checkIn(code: code)
             state = .success(alreadyCheckedIn: result.alreadyCheckedIn)
         } catch {
-            state = .failed(EventsModel.message(error))
+            state = .failed(error.userMessage)
         }
     }
 
     public func reset() { state = .idle }
 
     static func timeLabel(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm a"
-        return "at \(formatter.string(from: date))"
+        date.formatted(date: .abbreviated, time: .shortened)
     }
 }

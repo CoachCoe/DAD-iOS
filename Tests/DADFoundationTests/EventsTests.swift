@@ -139,6 +139,7 @@ private actor FakeEventsService: EventsService {
     var checkInResult: CheckInResultValue
     var throwOnReserve: Error?
     var throwOnCheckIn: Error?
+    private(set) var checkInCalls = 0
     /// What `event(id:)` returns after a mutation — lets a test model the waitlist→reserved promotion.
     var refreshed: [String: DonorEvent] = [:]
 
@@ -164,6 +165,7 @@ private actor FakeEventsService: EventsService {
     }
     func cancel(eventID: String) async throws {}
     func checkIn(code: String) async throws -> CheckInResultValue {
+        checkInCalls += 1
         if let error = throwOnCheckIn { throw error }
         return checkInResult
     }
@@ -220,15 +222,22 @@ final class CheckInModelTests: XCTestCase {
     private let window = CheckInWindow(startsAt: date("2026-12-01T18:00:00Z"), endsAt: date("2026-12-01T20:00:00Z"))
 
     func testRejectsBeforeWindowWithoutCallingService() async {
-        let model = CheckInModel(service: FakeEventsService(list: []))
+        let service = FakeEventsService(list: [])
+        let model = CheckInModel(service: service)
         await model.submit(code: "QR123", window: window, now: date("2026-12-01T16:00:00Z"))
-        if case .outsideWindow = model.state {} else { XCTFail("expected outsideWindow (too early)") }
+        guard case .outsideWindow(let reason) = model.state else { return XCTFail("expected outsideWindow (too early)") }
+        XCTAssertTrue(reason.hasPrefix("Check-in opens "))
+        let calls = await service.checkInCalls
+        XCTAssertEqual(calls, 0)
     }
 
     func testRejectsAfterWindow() async {
-        let model = CheckInModel(service: FakeEventsService(list: []))
+        let service = FakeEventsService(list: [])
+        let model = CheckInModel(service: service)
         await model.submit(code: "QR123", window: window, now: date("2026-12-01T21:00:00Z"))
-        if case .outsideWindow = model.state {} else { XCTFail("expected outsideWindow (too late)") }
+        XCTAssertEqual(model.state, .outsideWindow(reason: "Check-in for this event has closed."))
+        let calls = await service.checkInCalls
+        XCTAssertEqual(calls, 0)
     }
 
     func testChecksInInsideWindow() async {

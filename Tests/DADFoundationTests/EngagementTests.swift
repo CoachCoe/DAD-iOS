@@ -104,6 +104,14 @@ final class ReferralQRTests: XCTestCase {
         XCTAssertNil(QRPayload("https://example.com/other").referralCode)
         XCTAssertNil(QRPayload("just some text").referralCode)
     }
+
+    func testReferralCodeRejectsMalformedCodes() {
+        XCTAssertNil(QRPayload("https://dollaraday.org/join?ref=").referralCode)
+        XCTAssertNil(QRPayload("https://dollaraday.org/join?ref=a%20b").referralCode)
+        XCTAssertNil(QRPayload("https://dollaraday.org/join?ref=%3Cscript%3E").referralCode)
+        XCTAssertNil(QRPayload("https://dollaraday.org/join?ref=\(String(repeating: "A", count: 65))").referralCode)
+        XCTAssertEqual(QRPayload("https://dollaraday.org/join?ref=ABC_123-x").referralCode, "ABC_123-x")
+    }
 }
 
 // MARK: - EngagementModel state machine
