@@ -12,6 +12,9 @@ public enum AccountError: Error, Sendable, Equatable {
     case invalidInput
     /// 409 on account deletion: a monthly gift is still set to renew or a checkout is open.
     case deletionBlocked
+    /// 401 on set-password whose body says the credential was wrong: NOT an expired session, so it
+    /// must never trigger the refresh-retry or end the local session.
+    case passwordIncorrect
 }
 
 public struct Credentials: Codable, Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -82,6 +85,8 @@ public actor AccountSession {
         let before = epoch
         let result = try await produce()
         guard before == epoch else { throw AccountError.signedOut }
+        // A caller that gave up (view left, task replaced) must not have a session installed behind it.
+        try Task.checkCancellation()
         try store.save(result)
         credentials = result
         epoch += 1

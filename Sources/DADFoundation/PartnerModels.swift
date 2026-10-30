@@ -64,14 +64,7 @@ public final class PartnerModel {
     /// Plausible-address check for the invite field (same rule as Android): trimmed, at most 254
     /// characters, no whitespace, exactly one `@`, a non-empty local part and a domain of at least
     /// two non-empty dot-separated labels. The server remains the authority on deliverability.
-    public static func isPlausibleEmail(_ raw: String) -> Bool {
-        let email = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard email.count <= 254, !email.contains(where: \.isWhitespace) else { return false }
-        let parts = email.split(separator: "@", omittingEmptySubsequences: false)
-        guard parts.count == 2, !parts[0].isEmpty else { return false }
-        let labels = parts[1].split(separator: ".", omittingEmptySubsequences: false)
-        return labels.count >= 2 && labels.allSatisfy { !$0.isEmpty }
-    }
+    public static func isPlausibleEmail(_ raw: String) -> Bool { CredentialRules.isPlausibleEmail(raw) }
 
     /// Why this user cannot be removed, or nil when removal is allowed: never yourself, and never
     /// the last admin (the partner would be left with nobody able to manage users).
