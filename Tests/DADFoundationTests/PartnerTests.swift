@@ -30,6 +30,7 @@ final class VerifiedFigureTests: XCTestCase {
 
     func testVerifiedCountHiddenWhenUnverified() {
         XCTAssertEqual(VerifiedCount(value: 42, verified: true).label, "42")
+        XCTAssertEqual(VerifiedCount(value: 12_400, verified: true).label, "12,400")
         XCTAssertNil(VerifiedCount(value: 42, verified: false).label)
     }
 }
@@ -51,7 +52,7 @@ final class PartnerOverviewTests: XCTestCase {
         let o = overview(enrolled: 42)
         XCTAssertEqual(o.committed.label, "$5,000")   // verified -> shown
         XCTAssertNil(o.deployed.label)                 // unverified -> hidden, never estimated (§7.3)
-        XCTAssertEqual(o.peopleReached.label, "1200")
+        XCTAssertEqual(o.peopleReached.label, "1,200")
     }
 
     func testSuppressedEnrollmentShowsNoCount() {

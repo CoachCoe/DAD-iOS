@@ -13,10 +13,7 @@ private func launchFlag(_ name: String) -> Bool {
     #endif
 }
 
-private func tokenColor(_ name: String) -> Color {
-    guard let token = DADTokens.color[name], token.count == 7, let value = UInt32(token.dropFirst(), radix: 16) else { return .primary }
-    return Color(red: Double((value >> 16) & 255) / 255, green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255)
-}
+private func tokenColor(_ name: String) -> Color { Color.dad(name) }
 
 private struct AppBackground: ViewModifier {
     @Environment(\.colorScheme) private var scheme

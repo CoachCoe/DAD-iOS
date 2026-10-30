@@ -48,7 +48,7 @@ public struct VerifiedCount: Sendable, Equatable {
         self.value = value
         self.verified = verified
     }
-    public var label: String? { verified ? "\(value)" : nil }
+    public var label: String? { verified ? value.formatted(.number.locale(Locale(identifier: "en_US"))) : nil }
 }
 
 // MARK: - Overview (P-10, §7.3)

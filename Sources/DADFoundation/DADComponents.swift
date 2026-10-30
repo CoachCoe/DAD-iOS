@@ -13,15 +13,9 @@ public extension Color {
     }
 
     init(dadHex hex: String) {
-        // Supports #rrggbb and rgba(r,g,b,a); anything else resolves to .primary via a clear scale.
-        if hex.hasPrefix("#"), hex.count == 7, let value = UInt32(hex.dropFirst(), radix: 16) {
-            self = Color(
-                .sRGB,
-                red: Double((value >> 16) & 0xFF) / 255,
-                green: Double((value >> 8) & 0xFF) / 255,
-                blue: Double(value & 0xFF) / 255,
-                opacity: 1
-            )
+        // Supports #rgb, #rrggbb and rgba(r,g,b,a); anything else resolves to .primary so it is visible.
+        if let rgb = Color.parseHex(hex) {
+            self = rgb
         } else if hex.hasPrefix("rgba("), let parsed = Color.parseRGBA(hex) {
             self = parsed
         } else {
@@ -29,7 +23,22 @@ public extension Color {
         }
     }
 
-    private static func parseRGBA(_ hex: String) -> Color? {
+    /// `#rgb` shorthand expands each digit (e.g. the `card` token `#fff`).
+    static func parseHex(_ hex: String) -> Color? {
+        guard hex.hasPrefix("#") else { return nil }
+        var digits = String(hex.dropFirst())
+        if digits.count == 3 { digits = digits.map { "\($0)\($0)" }.joined() }
+        guard digits.count == 6, let value = UInt32(digits, radix: 16) else { return nil }
+        return Color(
+            .sRGB,
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255,
+            opacity: 1
+        )
+    }
+
+    static func parseRGBA(_ hex: String) -> Color? {
         let inner = hex.dropFirst(5).dropLast()
         let parts = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count == 4,
@@ -85,6 +94,13 @@ public struct DADButtonStyle: ButtonStyle {
             .background(background.opacity(configuration.isPressed ? 0.82 : 1))
             .foregroundStyle(foreground)
             .clipShape(RoundedRectangle(cornerRadius: .dadRadius("pill"), style: .continuous))
+            .overlay {
+                // Secondary buttons sit on same-coloured cards; the outline keeps them visible.
+                if kind == .secondary {
+                    RoundedRectangle(cornerRadius: .dadRadius("pill"), style: .continuous)
+                        .strokeBorder(Color.dad(scheme == .dark ? "ghost-line-dark" : "ghost-line"), lineWidth: 1)
+                }
+            }
             .contentShape(Rectangle())
     }
 }

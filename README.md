@@ -14,11 +14,14 @@ node scripts/prepare-client.mjs
 open DAD.xcodeproj
 ```
 
-Select the shared DAD scheme and an iPhone simulator. The default app uses a clearly
-labeled synthetic account through the same session API as a configured deployment.
+Select the shared DAD scheme and an iPhone simulator. A Debug build with no `DAD_API_ORIGIN` uses a clearly
+labeled synthetic account through the same session API as a configured deployment. Release
+builds compile out every preview double and ignore `--preview-*` launch arguments; an
+unconfigured Release build shows the unavailable state instead of sample data.
 Run `bash scripts/check-ios.sh` for contract verification, Swift unit tests, and simulator
 journeys. `DAD_SIMULATOR_ID`, `DAD_SWIFT_BUILD`, and `DAD_XCODE_BUILD` override the simulator
-and disposable build paths. Unit tests alone: `swift test --scratch-path /tmp/dad-ios-swift`.
+and disposable build paths. Unit tests alone: `swift test --scratch-path /tmp/dad-ios-swift` (add `--disable-sandbox`
+when running inside a tool that already sandboxes processes).
 
 CI executes that same script. The pinned Apple generator plugin is trusted explicitly
 with `-skipPackagePluginValidation`; compilation and tests remain enabled. Xcode's benign
@@ -26,7 +29,7 @@ AppIntents metadata-extraction diagnostic is not suppressed; this app defines no
 
 ## Shared contract and native boundaries
 
-`foundation.lock.json` pins mobile foundation 2.0.0 and its manifest digest. The vendored
+`foundation.lock.json` pins mobile foundation 2.2.0 and its manifest digest. The vendored
 release is verified before generation. `prepare-client.mjs` copies the Swift generator input, null-only Codable adapter, tokens,
 and link policy into ignored generator inputs. Apple's pinned Swift generator produces
 types and a client during the build, scoped to profile, claim, refresh, and logout.
@@ -122,6 +125,8 @@ checklist; they cannot run on the CI simulator:
 - [ ] Performance on a throttled network: dashboards < 2s, checkout < 60s (PRD §10).
 - [ ] Real-device APNs delivery; Apple Pay or the Stripe web handoff end-to-end.
 - [ ] Universal-link + deferred-attribution acceptance on a clean install.
+- [ ] Confirm `App/PrivacyInfo.xcprivacy` (collected data types, UserDefaults reason `CA92.1`) matches the
+      final App Store privacy answers before submission; counsel owns the disclosure wording.
 
 ### Signing (manual, account-held — not committed, not CI-verified)
 
