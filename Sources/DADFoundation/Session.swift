@@ -6,6 +6,12 @@ public enum AccountError: Error, Sendable, Equatable {
     case invalidConfiguration
     case invalidResponse
     case secureStorage(Int32)
+    /// 429: the server is throttling this caller; retry later.
+    case rateLimited
+    /// 422: the server rejected the value as malformed (e.g. a phone number).
+    case invalidInput
+    /// 409 on account deletion: a monthly gift is still set to renew or a checkout is open.
+    case deletionBlocked
 }
 
 public struct Credentials: Codable, Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -44,10 +50,19 @@ public actor AccountSession {
     private var credentials: Credentials?
     private var epoch = 0
     private var flight: (id: UUID, task: Task<Credentials, Error>)?
+    /// Whether stored credentials existed when the session was created. Immutable so the UI can
+    /// decide synchronously between "restoring a session" and "show sign-in" at launch.
+    public nonisolated let restoredCredentials: Bool
 
     public init(api: any AccountAPI, store: any CredentialStore) throws {
-        self.api = api; self.store = store; self.credentials = try store.load()
+        self.api = api; self.store = store
+        let stored = try store.load()
+        self.credentials = stored
+        self.restoredCredentials = stored != nil
     }
+
+    /// True while this session holds credentials (it may still be rejected by the server later).
+    public var isSignedIn: Bool { credentials != nil }
 
     public func claim(token: String) async throws {
         try await install { try await self.api.claim(token: token) }
@@ -57,11 +72,13 @@ public actor AccountSession {
     /// The credential-producing work runs INSIDE the actor so the epoch captured before it
     /// guards the install: a sign-in that resolves after a sign-out does not clobber state,
     /// exactly like `claim`.
-    public func establish(_ produce: @Sendable () async throws -> Credentials) async throws {
+    @discardableResult
+    public func establish(_ produce: @Sendable () async throws -> Credentials) async throws -> Credentials {
         try await install(produce)
     }
 
-    private func install(_ produce: @Sendable () async throws -> Credentials) async throws {
+    @discardableResult
+    private func install(_ produce: @Sendable () async throws -> Credentials) async throws -> Credentials {
         let before = epoch
         let result = try await produce()
         guard before == epoch else { throw AccountError.signedOut }
@@ -69,6 +86,7 @@ public actor AccountSession {
         credentials = result
         epoch += 1
         flight = nil
+        return result
     }
 
     /// A currently-valid access token, refreshing through the single-flight path if needed.
@@ -80,14 +98,25 @@ public actor AccountSession {
     }
 
     public func profile() async throws -> AccountProfile {
+        let api = self.api
+        return try await authorized { try await api.profile(access: $0) }
+    }
+
+    /// Run one authenticated call with a currently-valid access token. The shared recipe for every
+    /// product call: refresh through the single-flight path if expired; on a 401 (the call throws
+    /// `AccountError.signedOut`) force exactly one refresh and retry once; a second 401 ends the
+    /// session locally. A sign-out/switch while the call is in flight (epoch change) or caller
+    /// cancellation discards the result rather than returning it. Only use for requests that the
+    /// server has not processed when it answers 401 (all of them: 401 is rejected before handling).
+    public func authorized<T: Sendable>(_ call: @Sendable (String) async throws -> T) async throws -> T {
         try Task.checkCancellation()
         let before = epoch
         let current = try await usableCredentials()
-        do { return try await checkedProfile(current, epoch: before) }
+        do { return try await checked(call, current, epoch: before) }
         catch AccountError.signedOut {
             guard before == epoch else { throw AccountError.signedOut }
             let next = try await usableCredentials(forceFor: current.access)
-            do { return try await checkedProfile(next, epoch: before) }
+            do { return try await checked(call, next, epoch: before) }
             catch AccountError.signedOut {
                 if before == epoch { try clearLocal() }
                 throw AccountError.signedOut
@@ -95,12 +124,17 @@ public actor AccountSession {
         }
     }
 
-    private func checkedProfile(_ value: Credentials, epoch before: Int) async throws -> AccountProfile {
-        let result = try await api.profile(access: value.access)
+    private func checked<T: Sendable>(_ call: @Sendable (String) async throws -> T, _ value: Credentials, epoch before: Int) async throws -> T {
+        let result = try await call(value.access)
         guard before == epoch else { throw AccountError.signedOut }
         try Task.checkCancellation()
         return result
     }
+
+    /// Drop local credentials without contacting the server (after a confirmed server-side
+    /// account deletion, where the remote session no longer exists). Bumps the epoch so any
+    /// in-flight call or sign-in started before it is discarded.
+    public func discardLocal() throws { try clearLocal() }
 
     private func usableCredentials(forceFor access: String? = nil) async throws -> Credentials {
         guard let current = credentials else { throw AccountError.signedOut }
