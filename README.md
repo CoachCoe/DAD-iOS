@@ -52,12 +52,34 @@ is compiled by default. A Release build with no API origin shows an unavailable 
 with a clear message; it never serves synthetic data. Wired against the API: donor phone + SMS sign-in
 (`beginPhoneSignIn`/`finishPhoneSignIn`, existing accounts only), claim-link sign-in, profile read,
 settings load/save, refresh, logout and account deletion. All authenticated calls go through
-`AccountSession.authorized` (single-flight refresh, one bounded 401 retry, epoch-guarded). Passkey, OIDC,
-email signup/password and partner sign-in are not wired yet (models and previews only). Native entry hooks
+`AccountSession.authorized` (single-flight refresh, one bounded 401 retry, epoch-guarded). Also wired
+(P1b): new-donor email signup (`postDonorSignup`; the emailed link is claimed in-app, tapped or pasted),
+email + password sign-in (`postDonorPasswordSignIn`) and set/change password in Settings
+(`postDonorMePassword`). Built and tested but **switched off until configured**: Sign in with Apple, Google
+and passkeys (see below). Partner sign-in is not wired yet. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next
 destination stay on the web before their one-use proof is consumed.
+
+### Switching on Apple, Google and passkeys
+
+These methods are implemented (Wire conformers, models, UI states, stub-transport tests) but show
+"Not available yet" because the build carries none of the account-held configuration. Nothing here is
+invented or committed; supply, per method:
+
+- **Sign in with Apple:** a signing team, the "Sign in with Apple" capability
+  (`com.apple.developer.applesignin` entitlement) on the app ID, then build setting
+  `DAD_APPLE_SIGNIN_ENABLED=YES`. DAD-Main must also have Apple configured (`oidcSignIn` is 503 otherwise).
+- **Passkeys:** the Associated Domains entitlement `webcredentials:<domain>`, an
+  `apple-app-site-association` file for that domain listing the final bundle ID, and build setting
+  `DAD_PASSKEY_RP_ID=<domain>` (bare hostname, the relying-party ID DAD-Main uses).
+- **Google:** build setting `DAD_GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com` **and** a Google id_token
+  provider. The official SDK is a new dependency, so none is linked; Google stays off (a client ID alone
+  does not enable it) until that decision is made and the provider replaces `UnavailableIDTokenProvider`.
+
+Passkey list/delete are wired and tested in `WirePasswordSettings`; their Settings UI and passkey
+registration (`beginDonorPasskeyRegister`/`finishDonorPasskeyRegister`) follow with the entitlement.
 
 System universal links/passkeys require a final bundle ID, signing team, Associated
 Domains (`applinks:` and `webcredentials:`), and matching DAD-Main association files.
