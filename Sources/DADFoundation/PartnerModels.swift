@@ -53,25 +53,36 @@ public final class PartnerModel {
     public private(set) var pendingRemoval: PartnerUser?
 
     private let service: any PartnerService
-    /// The signed-in partner user's id, so an admin can never remove themselves.
-    public let currentUserID: String?
+    /// The signed-in partner user's id (from the overview, contract 2.3.0), so an admin can never
+    /// remove themselves. Nil until the overview loads.
+    public var currentUserID: String? { overview?.userID }
 
-    public init(service: any PartnerService, currentUserID: String? = nil) {
+    public init(service: any PartnerService) {
         self.service = service
-        self.currentUserID = currentUserID
     }
 
-    /// Plausible-address check for the invite field: one `@`, a non-empty local part and a dotted
-    /// domain, no whitespace. The server remains the authority on deliverability.
+    /// Plausible-address check for the invite field (same rule as Android): trimmed, at most 254
+    /// characters, no whitespace, exactly one `@`, a non-empty local part and a domain of at least
+    /// two non-empty dot-separated labels. The server remains the authority on deliverability.
     public static func isPlausibleEmail(_ raw: String) -> Bool {
         let email = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard email.count <= 254, !email.contains(where: \.isWhitespace) else { return false }
         let parts = email.split(separator: "@", omittingEmptySubsequences: false)
-        guard parts.count == 2, !parts[0].isEmpty, !email.contains(where: \.isWhitespace) else { return false }
+        guard parts.count == 2, !parts[0].isEmpty else { return false }
         let labels = parts[1].split(separator: ".", omittingEmptySubsequences: false)
         return labels.count >= 2 && labels.allSatisfy { !$0.isEmpty }
     }
 
-    public func canRemove(_ user: PartnerUser) -> Bool { role.canManageUsers && user.id != currentUserID }
+    /// Why this user cannot be removed, or nil when removal is allowed: never yourself, and never
+    /// the last admin (the partner would be left with nobody able to manage users).
+    private func removalBlock(for id: String) -> String? {
+        if id == currentUserID { return "You can’t remove yourself." }
+        if let user = users.first(where: { $0.id == id }), user.role == .admin,
+           users.filter({ $0.role == .admin }).count <= 1 { return "You can’t remove the last admin." }
+        return nil
+    }
+
+    public func canRemove(_ user: PartnerUser) -> Bool { role.canManageUsers && removalBlock(for: user.id) == nil }
 
     /// The current role, defaulting to the least-privileged VIEWER until the overview loads, so
     /// capability gates never open early.
@@ -137,7 +148,7 @@ public final class PartnerModel {
     /// Step one of removal: stage the user for the inline confirmation. Nothing is sent yet.
     public func requestRemoval(id: String) {
         guard role.canManageUsers else { actionError = "Only an admin can remove users."; return }
-        guard id != currentUserID else { actionError = "You can’t remove yourself."; return }
+        if let block = removalBlock(for: id) { actionError = block; return }
         actionError = nil
         pendingRemoval = users.first { $0.id == id }
     }
@@ -152,7 +163,7 @@ public final class PartnerModel {
 
     public func removeUser(id: String) async {
         guard role.canManageUsers else { actionError = "Only an admin can remove users."; return }
-        guard id != currentUserID else { actionError = "You can’t remove yourself."; return }
+        if let block = removalBlock(for: id) { actionError = block; return }
         actionError = nil
         do {
             try await service.removeUser(id: id)

@@ -59,6 +59,7 @@ public struct VerifiedCount: Sendable, Equatable {
 public struct PartnerOverview: Sendable, Equatable {
     public let organization: String
     public let description: String
+    public let userID: String
     public let role: PartnerRole
     public let companyCode: String
     public let committed: VerifiedMoney
@@ -71,12 +72,13 @@ public struct PartnerOverview: Sendable, Equatable {
     public let updatedAt: Date?
     public let hasLogo: Bool
 
-    public init(organization: String, description: String, role: PartnerRole, companyCode: String,
+    public init(organization: String, description: String, userID: String, role: PartnerRole, companyCode: String,
                 committed: VerifiedMoney, deployed: VerifiedMoney, deployedPercent: Int,
                 peopleReached: VerifiedCount, employeesEnrolled: Int64?, workforceSize: Int,
                 enrolledPercent: Int?, updatedAt: Date?, hasLogo: Bool) {
         self.organization = organization
         self.description = description
+        self.userID = userID
         self.role = role
         self.companyCode = companyCode
         self.committed = committed
