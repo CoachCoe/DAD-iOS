@@ -35,6 +35,12 @@ final class AnalyticsBatchTests: XCTestCase {
         (0..<n).map { _ in try! AnalyticsRecord(.appOpened) }
     }
 
+    func testBatchRejectsEmptyAndOversizedInput() throws {
+        XCTAssertThrowsError(try AnalyticsBatch([])) { XCTAssertEqual($0 as? AnalyticsBatch.BatchError, .empty) }
+        XCTAssertThrowsError(try AnalyticsBatch(records(101))) { XCTAssertEqual($0 as? AnalyticsBatch.BatchError, .tooLarge) }
+        XCTAssertEqual(try AnalyticsBatch(records(100)).events.count, 100)
+    }
+
     func testChunkRespectsThe100Cap() {
         XCTAssertEqual(AnalyticsBatch.chunk(records(1)).count, 1)
         XCTAssertEqual(AnalyticsBatch.chunk(records(100)).count, 1)

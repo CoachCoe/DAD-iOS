@@ -60,10 +60,13 @@ public final class EventsModel {
     public init(service: any EventsService) { self.service = service }
 
     public func load() async {
+        let prior = phase
         phase = .loading
         do {
             events = try await service.events()
             phase = .ready
+        } catch where error.isCancellation {
+            phase = prior
         } catch {
             phase = .failed(error.userMessage)
         }
@@ -79,6 +82,8 @@ public final class EventsModel {
             let outcome = try await service.reserve(eventID: eventID)
             lastOutcome = outcome
             await refresh(eventID: eventID)
+        } catch where error.isCancellation {
+            return
         } catch {
             actionError = error.userMessage
         }
@@ -90,6 +95,8 @@ public final class EventsModel {
             try await service.cancel(eventID: eventID)
             lastOutcome = nil
             await refresh(eventID: eventID)
+        } catch where error.isCancellation {
+            return
         } catch {
             actionError = error.userMessage
         }
@@ -143,10 +150,13 @@ public final class CheckInModel {
         case .open:
             break
         }
+        let prior = state
         state = .checking
         do {
             let result = try await service.checkIn(code: code)
             state = .success(alreadyCheckedIn: result.alreadyCheckedIn)
+        } catch where error.isCancellation {
+            state = prior
         } catch {
             state = .failed(error.userMessage)
         }

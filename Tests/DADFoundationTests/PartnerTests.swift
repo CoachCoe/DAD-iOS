@@ -106,6 +106,7 @@ final class PartnerModelTests: XCTestCase {
         var pending = false
         var fail = false
         var failSpend = false
+        var overviewError: Error?
         var spendSignedOut = false
         private(set) var invited: [(String, PartnerRole)] = []
         private(set) var removed: [String] = []
@@ -115,6 +116,7 @@ final class PartnerModelTests: XCTestCase {
 
         func overview() async throws -> PartnerOverview {
             if pending { throw PartnerPendingApproval() }
+            if let overviewError { throw overviewError }
             if fail { throw AccountError.signedOut }
             return PartnerOverview(organization: "Acme", description: "d", role: role, companyCode: "AC",
                 committed: VerifiedMoney(amountMinor: 1, verified: true),
@@ -202,6 +204,71 @@ final class PartnerModelTests: XCTestCase {
         await model.inviteUser(email: "b@x.com", role: .viewer)
         XCTAssertEqual(svc.invited.count, 1)
         XCTAssertEqual(svc.invited.first?.0, "b@x.com")
+    }
+
+    func testCancelledLoadKeepsPriorPhaseInsteadOfFailing() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc)
+        await model.load()
+        svc.overviewError = CancellationError()
+        await model.load()
+        XCTAssertEqual(model.phase, .ready)
+    }
+
+    func testInviteRejectsInvalidEmailWithoutCallingService() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc)
+        await model.load()
+        for bad in ["", "nobody", "a@b", "a@@b.com", "a b@x.com", "@x.com", "a@x..com"] {
+            await model.inviteUser(email: bad, role: .viewer)
+            XCTAssertEqual(model.actionError, "Enter a valid email address.", bad)
+        }
+        XCTAssertTrue(svc.invited.isEmpty)
+    }
+
+    func testInviteTrimsAndSendsTheTypedEmail() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc)
+        await model.load()
+        await model.inviteUser(email: "  new@acme.com ", role: .viewer)
+        XCTAssertEqual(svc.invited.first?.0, "new@acme.com")
+        XCTAssertNil(model.actionError)
+    }
+
+    func testPlausibleEmail() {
+        XCTAssertTrue(PartnerModel.isPlausibleEmail("a.b+c@sub.acme.co"))
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("a@b"))
+    }
+
+    func testRemovalNeedsConfirmationAndCanBeCancelled() async {
+        let svc = FakeService()
+        svc.users = [PartnerUser(id: "u1", email: "a@x.com", name: "A", role: .admin),
+                     PartnerUser(id: "u2", email: "v@x.com", name: "V", role: .viewer)]
+        let model = PartnerModel(service: svc, currentUserID: "u1")
+        await model.load()
+        model.requestRemoval(id: "u2")
+        XCTAssertEqual(model.pendingRemoval?.id, "u2")
+        XCTAssertTrue(svc.removed.isEmpty, "staging a removal must not call the service")
+        model.cancelRemoval()
+        await model.confirmRemoval()
+        XCTAssertTrue(svc.removed.isEmpty)
+        model.requestRemoval(id: "u2")
+        await model.confirmRemoval()
+        XCTAssertEqual(svc.removed, ["u2"])
+        XCTAssertNil(model.pendingRemoval)
+        XCTAssertEqual(model.users.map(\.id), ["u1"])
+    }
+
+    func testAdminCannotRemoveThemselves() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc, currentUserID: "u1")
+        await model.load()
+        XCTAssertFalse(model.canRemove(model.users[0]))
+        model.requestRemoval(id: "u1")
+        XCTAssertNil(model.pendingRemoval)
+        await model.removeUser(id: "u1")
+        XCTAssertTrue(svc.removed.isEmpty)
+        XCTAssertEqual(model.actionError, "You can’t remove yourself.")
     }
 
     func testPushRegisterAndUnregister() async {

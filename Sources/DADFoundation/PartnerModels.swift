@@ -49,9 +49,29 @@ public final class PartnerModel {
     /// True when the overview loaded but at least one secondary section failed to load.
     public private(set) var sectionsUnavailable = false
 
-    private let service: any PartnerService
+    /// The user awaiting an inline remove confirmation, if any.
+    public private(set) var pendingRemoval: PartnerUser?
 
-    public init(service: any PartnerService) { self.service = service }
+    private let service: any PartnerService
+    /// The signed-in partner user's id, so an admin can never remove themselves.
+    public let currentUserID: String?
+
+    public init(service: any PartnerService, currentUserID: String? = nil) {
+        self.service = service
+        self.currentUserID = currentUserID
+    }
+
+    /// Plausible-address check for the invite field: one `@`, a non-empty local part and a dotted
+    /// domain, no whitespace. The server remains the authority on deliverability.
+    public static func isPlausibleEmail(_ raw: String) -> Bool {
+        let email = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = email.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, !email.contains(where: \.isWhitespace) else { return false }
+        let labels = parts[1].split(separator: ".", omittingEmptySubsequences: false)
+        return labels.count >= 2 && labels.allSatisfy { !$0.isEmpty }
+    }
+
+    public func canRemove(_ user: PartnerUser) -> Bool { role.canManageUsers && user.id != currentUserID }
 
     /// The current role, defaulting to the least-privileged VIEWER until the overview loads, so
     /// capability gates never open early.
@@ -63,7 +83,7 @@ public final class PartnerModel {
     private func optional<T: Sendable>(_ call: @Sendable () async throws -> T) async throws -> T? {
         do { return try await call() }
         catch AccountError.signedOut { throw AccountError.signedOut }
-        catch is CancellationError { throw CancellationError() }
+        catch where error.isCancellation { throw CancellationError() }
         catch {
             sectionsUnavailable = true
             return nil
@@ -71,6 +91,7 @@ public final class PartnerModel {
     }
 
     public func load() async {
+        let prior = phase
         phase = .loading
         do {
             // Overview first — it carries the role and is the gate for everything else. A
@@ -90,6 +111,8 @@ public final class PartnerModel {
             phase = .ready
         } catch is PartnerPendingApproval {
             phase = .pending
+        } catch where error.isCancellation {
+            phase = prior
         } catch {
             phase = .failed(error.userMessage)
         }
@@ -99,21 +122,43 @@ public final class PartnerModel {
     /// is a no-op that surfaces the gate rather than hitting the network.
     public func inviteUser(email: String, role: PartnerRole) async {
         guard self.role.canManageUsers else { actionError = "Only an admin can invite users."; return }
+        guard Self.isPlausibleEmail(email) else { actionError = "Enter a valid email address."; return }
         actionError = nil
         do {
-            try await service.inviteUser(email: email, role: role)
+            try await service.inviteUser(email: email.trimmingCharacters(in: .whitespacesAndNewlines), role: role)
             users = (try? await service.users()) ?? users
+        } catch where error.isCancellation {
+            return
         } catch {
             actionError = error.userMessage
         }
     }
 
+    /// Step one of removal: stage the user for the inline confirmation. Nothing is sent yet.
+    public func requestRemoval(id: String) {
+        guard role.canManageUsers else { actionError = "Only an admin can remove users."; return }
+        guard id != currentUserID else { actionError = "You can’t remove yourself."; return }
+        actionError = nil
+        pendingRemoval = users.first { $0.id == id }
+    }
+
+    public func cancelRemoval() { pendingRemoval = nil }
+
+    public func confirmRemoval() async {
+        guard let user = pendingRemoval else { return }
+        pendingRemoval = nil
+        await removeUser(id: user.id)
+    }
+
     public func removeUser(id: String) async {
         guard role.canManageUsers else { actionError = "Only an admin can remove users."; return }
+        guard id != currentUserID else { actionError = "You can’t remove yourself."; return }
         actionError = nil
         do {
             try await service.removeUser(id: id)
             users.removeAll { $0.id == id }
+        } catch where error.isCancellation {
+            return
         } catch {
             actionError = error.userMessage
         }

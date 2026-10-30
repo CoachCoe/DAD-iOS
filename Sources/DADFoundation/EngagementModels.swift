@@ -50,16 +50,21 @@ public final class EngagementModel {
 
     public private(set) var phase: Phase = .loading
     public private(set) var snapshot: EngagementSnapshot?
+    /// A transient toggle failure shown inline; the loaded screen and the prior ranking stay put.
+    public private(set) var actionError: String?
 
     private let service: any EngagementService
 
     public init(service: any EngagementService) { self.service = service }
 
     public func load() async {
+        let prior = phase
         phase = .loading
         do {
             snapshot = try await service.snapshot()
             phase = .ready
+        } catch where error.isCancellation {
+            phase = prior
         } catch {
             phase = .failed(error.userMessage)
         }
@@ -69,6 +74,7 @@ public final class EngagementModel {
     /// place so the card re-renders to the opt-in prompt or the restored position.
     public func setRankingOptIn(_ optIn: Bool) async {
         guard let current = snapshot else { return }
+        actionError = nil
         do {
             let ranking = try await service.setRankingOptIn(optIn)
             snapshot = EngagementSnapshot(
@@ -78,8 +84,10 @@ public final class EngagementModel {
                 network: current.network,
                 referral: current.referral
             )
+        } catch where error.isCancellation {
+            return
         } catch {
-            phase = .failed(error.userMessage)
+            actionError = error.userMessage
         }
     }
 }

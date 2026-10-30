@@ -139,6 +139,7 @@ private actor FakeEventsService: EventsService {
     var checkInResult: CheckInResultValue
     var throwOnReserve: Error?
     var throwOnCheckIn: Error?
+    var throwOnList: Error?
     private(set) var checkInCalls = 0
     /// What `event(id:)` returns after a mutation — lets a test model the waitlist→reserved promotion.
     var refreshed: [String: DonorEvent] = [:]
@@ -156,8 +157,12 @@ private actor FakeEventsService: EventsService {
     func setRefreshed(_ event: DonorEvent) { refreshed[event.id] = event }
     func setThrowOnReserve(_ error: Error?) { throwOnReserve = error }
     func setThrowOnCheckIn(_ error: Error?) { throwOnCheckIn = error }
+    func setThrowOnList(_ error: Error?) { throwOnList = error }
 
-    func events() async throws -> [DonorEvent] { list }
+    func events() async throws -> [DonorEvent] {
+        if let error = throwOnList { throw error }
+        return list
+    }
     func event(id: String) async throws -> DonorEvent { refreshed[id] ?? list.first { $0.id == id }! }
     func reserve(eventID: String) async throws -> ReservationOutcome {
         if let error = throwOnReserve { throw error }
@@ -203,6 +208,25 @@ final class EventsModelTests: XCTestCase {
         await model.load()
         await model.cancel(eventID: "e1") // any mutation triggers refresh
         XCTAssertEqual(model.events.first?.status, .reserved)
+    }
+
+    func testCancelledLoadKeepsPriorEventsAndPhase() async {
+        let service = FakeEventsService(list: [makeEvent(id: "e1")])
+        let model = EventsModel(service: service)
+        await model.load()
+        await service.setThrowOnList(CancellationError())
+        await model.load()
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.events.count, 1)
+    }
+
+    func testCancelledReserveIsNotAnActionError() async {
+        let service = FakeEventsService(list: [makeEvent(id: "e1")])
+        await service.setThrowOnReserve(URLError(.cancelled))
+        let model = EventsModel(service: service)
+        await model.load()
+        await model.reserve(eventID: "e1")
+        XCTAssertNil(model.actionError)
     }
 
     func testReserveErrorSurfacesInlineWithoutLosingList() async {

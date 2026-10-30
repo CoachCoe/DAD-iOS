@@ -120,12 +120,18 @@ private struct StubEngagementService: EngagementService {
     let snapshotResult: EngagementSnapshot
     var failSnapshot = false
     var optInResult: RankingStanding = RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil)
+    var snapshotError: Error?
+    var optInError: Error?
 
     func snapshot() async throws -> EngagementSnapshot {
+        if let snapshotError { throw snapshotError }
         if failSnapshot { throw AccountError.signedOut }
         return snapshotResult
     }
-    func setRankingOptIn(_ optIn: Bool) async throws -> RankingStanding { optInResult }
+    func setRankingOptIn(_ optIn: Bool) async throws -> RankingStanding {
+        if let optInError { throw optInError }
+        return optInResult
+    }
 }
 
 private func sampleSnapshot(ranking: RankingStanding) -> EngagementSnapshot {
@@ -164,6 +170,39 @@ final class EngagementModelTests: XCTestCase {
         XCTAssertFalse(model.snapshot!.ranking.isOptedOut)
         await model.setRankingOptIn(false)
         XCTAssertTrue(model.snapshot!.ranking.isOptedOut) // self hidden
+        XCTAssertEqual(model.phase, .ready)
+    }
+
+    func testFailedToggleKeepsScreenAndRankingAndShowsInlineError() async {
+        let ranked = RankingStanding(nationalPercentile: 90, city: "Austin", cityRank: 5)
+        var service = StubEngagementService(snapshotResult: sampleSnapshot(ranking: ranked))
+        service.optInError = AccountError.unavailable
+        let model = EngagementModel(service: service)
+        await model.load()
+        await model.setRankingOptIn(false)
+        XCTAssertEqual(model.phase, .ready, "a failed toggle must not replace the screen with the error state")
+        XCTAssertEqual(model.snapshot?.ranking, ranked, "the toggle reverts to the prior ranking")
+        XCTAssertEqual(model.actionError, "Something went wrong. Please try again.")
+    }
+
+    func testCancelledToggleIsNotAFailure() async {
+        var service = StubEngagementService(snapshotResult: sampleSnapshot(ranking: RankingStanding(nationalPercentile: 90, city: "Austin", cityRank: 5)))
+        service.optInError = CancellationError()
+        let model = EngagementModel(service: service)
+        await model.load()
+        await model.setRankingOptIn(false)
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertNil(model.actionError)
+    }
+
+    func testCancelledLoadKeepsPriorState() async {
+        var service = StubEngagementService(snapshotResult: sampleSnapshot(ranking: RankingStanding(nationalPercentile: 90, city: "Austin", cityRank: 5)))
+        let model = EngagementModel(service: service)
+        await model.load()
+        service.snapshotError = URLError(.cancelled)
+        let cancelled = EngagementModel(service: service)
+        await cancelled.load()
+        if case .failed = cancelled.phase { XCTFail("cancellation must not surface as a failure") }
         XCTAssertEqual(model.phase, .ready)
     }
 }

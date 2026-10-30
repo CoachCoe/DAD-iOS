@@ -101,15 +101,25 @@ public struct AnalyticsBatch: Sendable, Equatable {
 
     public let events: [AnalyticsRecord]
 
-    public init(_ events: [AnalyticsRecord]) {
-        precondition(events.count >= 1 && events.count <= Self.maxEvents, "batch must hold 1...100 events")
+    public enum BatchError: Error, Equatable {
+        case empty
+        case tooLarge
+    }
+
+    public init(_ events: [AnalyticsRecord]) throws {
+        guard !events.isEmpty else { throw BatchError.empty }
+        guard events.count <= Self.maxEvents else { throw BatchError.tooLarge }
         self.events = events
+    }
+
+    private init(validated events: ArraySlice<AnalyticsRecord>) {
+        self.events = Array(events)
     }
 
     /// Split a buffer into wire-legal batches (1...100 each), preserving order.
     public static func chunk(_ records: [AnalyticsRecord]) -> [AnalyticsBatch] {
         stride(from: 0, to: records.count, by: maxEvents).map { start in
-            AnalyticsBatch(Array(records[start..<min(start + maxEvents, records.count)]))
+            AnalyticsBatch(validated: records[start..<min(start + maxEvents, records.count)])
         }
     }
 }
