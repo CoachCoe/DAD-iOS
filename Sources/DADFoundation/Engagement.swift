@@ -37,7 +37,9 @@ public struct Badge: Sendable, Equatable, Hashable, Identifiable {
 
     /// Perk gating (B-4): these three badges unlock invite-only events. Kept as a rule on the
     /// domain, not scattered in the UI, so the gate is testable.
-    public static let perkGatingCodes: Set<String> = ["founding", "milestone_1000", "team_captain"]
+    /// These are the server catalog codes (DAD-Main `badges.go`, PRD Appendix A): F = Founding
+    /// Donor, 1K = 1,000 Days, TC = Team Captain.
+    public static let perkGatingCodes: Set<String> = ["F", "1K", "TC"]
 
     /// Whether holding this (earned) badge unlocks invite-only event access.
     public var unlocksInviteOnlyEvents: Bool { earned && Self.perkGatingCodes.contains(code) }
@@ -58,23 +60,27 @@ public struct BadgeCollection: Sendable, Equatable {
 
 // MARK: - Rankings (K-1..K-3)
 
-/// A donor's standing. Opt-out and absent-data are the same shape (`nil` everywhere) so the
-/// UI can never accidentally render a zero as a rank, and there is never a public name list —
-/// only the viewer's own percentile/city position.
+/// A donor's standing. Opt-out is the explicit server flag (`rankings_opted_out`), distinct from
+/// "opted in but not ranked yet" (null rank with the flag false). The UI never renders a zero as
+/// a rank, and there is never a public name list, only the viewer's own percentile/city position.
 public struct RankingStanding: Sendable, Equatable {
     public let nationalPercentile: Int?
     public let city: String?
     public let cityRank: Int?
+    public let rankingsOptedOut: Bool
 
-    public init(nationalPercentile: Int?, city: String?, cityRank: Int?) {
+    public init(nationalPercentile: Int?, city: String?, cityRank: Int?, rankingsOptedOut: Bool = false) {
         self.nationalPercentile = nationalPercentile
         self.city = city
         self.cityRank = cityRank
+        self.rankingsOptedOut = rankingsOptedOut
     }
 
-    /// Opted out (or no standing computed yet): the rankings card shows the opt-in prompt,
-    /// never a fabricated position.
-    public var isOptedOut: Bool { nationalPercentile == nil }
+    /// The donor chose to be hidden: the card shows the opt-in prompt, never a position.
+    public var isOptedOut: Bool { rankingsOptedOut }
+
+    /// Opted in but the server has no standing for them yet (not the same as opted out).
+    public var isNotRankedYet: Bool { !rankingsOptedOut && nationalPercentile == nil }
 
     /// "Top 5% nationally" — only when a percentile exists. Percentile is the *top* share,
     /// so an 95th-percentile donor is "Top 5%".

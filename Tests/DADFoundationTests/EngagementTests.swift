@@ -6,27 +6,35 @@ import XCTest
 
 final class BadgeTests: XCTestCase {
     func testEarnedAndLockedAccessibilityLabelsCarryState() {
-        let earned = Badge(code: "founding", title: "Founding Donor", rule: "Join in year one", perk: "Invite-only events", earned: true)
-        let locked = Badge(code: "streak_30", title: "30-Day Streak", rule: "Give 30 days running", perk: "—", earned: false)
+        let earned = Badge(code: "F", title: "Founding Donor", rule: "Join in year one", perk: "Invite-only events", earned: true)
+        let locked = Badge(code: "7", title: "One Week", rule: "Reach a 7-day streak", perk: "—", earned: false)
         // State is in the text, never colour alone.
         XCTAssertEqual(earned.accessibilityLabel, "Founding Donor, earned")
-        XCTAssertEqual(locked.accessibilityLabel, "30-Day Streak, locked. Give 30 days running")
+        XCTAssertEqual(locked.accessibilityLabel, "One Week, locked. Reach a 7-day streak")
     }
 
     func testPerkGatingUnlocksOnlyForEarnedGatingBadges() {
-        XCTAssertTrue(Badge(code: "founding", title: "", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents)
-        XCTAssertTrue(Badge(code: "team_captain", title: "", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents)
+        XCTAssertTrue(Badge(code: "F", title: "", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents)
+        XCTAssertTrue(Badge(code: "TC", title: "", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents)
         // Earned but not a gating badge → no unlock.
-        XCTAssertFalse(Badge(code: "streak_30", title: "", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents)
+        XCTAssertFalse(Badge(code: "7", title: "", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents)
         // Gating badge but not earned → no unlock.
-        XCTAssertFalse(Badge(code: "founding", title: "", rule: "", perk: "", earned: false).unlocksInviteOnlyEvents)
+        XCTAssertFalse(Badge(code: "F", title: "", rule: "", perk: "", earned: false).unlocksInviteOnlyEvents)
+    }
+
+    func testPerkGatingUsesServerCatalogCodes() {
+        XCTAssertEqual(Badge.perkGatingCodes, ["F", "1K", "TC"])
+        for code in ["founding", "milestone_1000", "team_captain", "7", "REF3"] {
+            XCTAssertFalse(Badge(code: code, title: "", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents, code)
+        }
+        XCTAssertTrue(Badge(code: "1K", title: "1,000 Days", rule: "", perk: "", earned: true).unlocksInviteOnlyEvents)
     }
 
     func testCollectionSummaryAndInviteOnlyAccess() {
         let collection = BadgeCollection(badges: [
-            Badge(code: "founding", title: "Founding", rule: "", perk: "", earned: true),
-            Badge(code: "streak_30", title: "Streak", rule: "", perk: "", earned: true),
-            Badge(code: "milestone_1000", title: "1000", rule: "", perk: "", earned: false),
+            Badge(code: "F", title: "Founding", rule: "", perk: "", earned: true),
+            Badge(code: "7", title: "Streak", rule: "", perk: "", earned: true),
+            Badge(code: "1K", title: "1000", rule: "", perk: "", earned: false),
         ])
         XCTAssertEqual(collection.earnedCount, 2)
         XCTAssertEqual(collection.total, 3)
@@ -36,8 +44,8 @@ final class BadgeTests: XCTestCase {
 
     func testNoInviteOnlyAccessWhenGatingBadgesLocked() {
         let collection = BadgeCollection(badges: [
-            Badge(code: "founding", title: "", rule: "", perk: "", earned: false),
-            Badge(code: "streak_30", title: "", rule: "", perk: "", earned: true),
+            Badge(code: "F", title: "", rule: "", perk: "", earned: false),
+            Badge(code: "7", title: "", rule: "", perk: "", earned: true),
         ])
         XCTAssertFalse(collection.hasInviteOnlyAccess)
     }
@@ -47,10 +55,24 @@ final class BadgeTests: XCTestCase {
 
 final class RankingTests: XCTestCase {
     func testOptedOutShowsNoPosition() {
-        let standing = RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil)
+        let standing = RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil, rankingsOptedOut: true)
         XCTAssertTrue(standing.isOptedOut)
         XCTAssertNil(standing.nationalLabel)
         XCTAssertNil(standing.cityLabel)
+    }
+
+    func testOptedInButUnrankedIsNotOptedOut() {
+        let standing = RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil, rankingsOptedOut: false)
+        XCTAssertFalse(standing.isOptedOut)
+        XCTAssertTrue(standing.isNotRankedYet)
+        XCTAssertNil(standing.nationalLabel)
+        let hidden = RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil, rankingsOptedOut: true)
+        XCTAssertTrue(hidden.isOptedOut)
+        XCTAssertFalse(hidden.isNotRankedYet)
+    }
+
+    func testOptedOutWinsEvenWithStalePercentile() {
+        XCTAssertTrue(RankingStanding(nationalPercentile: 90, city: "Austin", cityRank: 2, rankingsOptedOut: true).isOptedOut)
     }
 
     func testPercentileRendersAsTopShare() {
@@ -140,7 +162,7 @@ final class ReferralQRTests: XCTestCase {
 private struct StubEngagementService: EngagementService {
     let snapshotResult: EngagementSnapshot
     var failSnapshot = false
-    var optInResult: RankingStanding = RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil)
+    var optInResult: RankingStanding = RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil, rankingsOptedOut: true)
     var snapshotError: Error?
     var optInError: Error?
 
@@ -158,7 +180,7 @@ private struct StubEngagementService: EngagementService {
 private func sampleSnapshot(ranking: RankingStanding) -> EngagementSnapshot {
     EngagementSnapshot(
         impact: ImpactTotals(givenMinor: 30000, initiativesFunded: 2, eventsVolunteered: 1),
-        badges: BadgeCollection(badges: [Badge(code: "founding", title: "Founding", rule: "", perk: "", earned: true)]),
+        badges: BadgeCollection(badges: [Badge(code: "F", title: "Founding", rule: "", perk: "", earned: true)]),
         ranking: ranking,
         network: NetworkSummary(activeCount: 4, annualizedMinor: 48000, anonymousActive: 1),
         referral: ReferralInfo(code: "SHAWN42", linkCount: 2, irlCount: 2)
@@ -184,7 +206,7 @@ final class EngagementModelTests: XCTestCase {
     func testOptingOutReplacesRankingWithNoPosition() async {
         let service = StubEngagementService(
             snapshotResult: sampleSnapshot(ranking: RankingStanding(nationalPercentile: 90, city: "Austin", cityRank: 5)),
-            optInResult: RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil)
+            optInResult: RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil, rankingsOptedOut: true)
         )
         let model = EngagementModel(service: service)
         await model.load()

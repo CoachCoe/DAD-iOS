@@ -261,16 +261,16 @@ private actor PreviewEngagement: EngagementService {
     private func currentRanking() -> RankingStanding {
         optedIn
             ? RankingStanding(nationalPercentile: 92, city: "Austin", cityRank: 4)
-            : RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil)
+            : RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil, rankingsOptedOut: true)
     }
 
     func snapshot() async throws -> EngagementSnapshot {
         EngagementSnapshot(
             impact: ImpactTotals(givenMinor: 124_000, initiativesFunded: 3, eventsVolunteered: 2),
             badges: BadgeCollection(badges: [
-                Badge(code: "founding", title: "Founding Donor", rule: "Join in year one", perk: "Invite-only events", earned: true),
-                Badge(code: "streak_30", title: "30-Day Streak", rule: "Give 30 days running", perk: "—", earned: true),
-                Badge(code: "milestone_1000", title: "$1,000 Given", rule: "Give $1,000 lifetime", perk: "Invite-only events", earned: false),
+                Badge(code: "F", title: "Founding Donor", rule: "Start a monthly gift before January 2027, or join the website waitlist", perk: "Founding Donor Dinner and founding events", earned: true),
+                Badge(code: "7", title: "One Week", rule: "Reach a 7-day streak", perk: "—", earned: true),
+                Badge(code: "1K", title: "1,000 Days", rule: "Reach a 1,000-day streak", perk: "Invite-only milestone events", earned: false),
             ]),
             ranking: currentRanking(),
             network: NetworkSummary(activeCount: 6, annualizedMinor: 72_000, anonymousActive: 2),
@@ -457,7 +457,8 @@ private actor PreviewPartner: PartnerService {
     func overview() async throws -> PartnerOverview {
         if pending { throw PartnerPendingApproval() }
         return PartnerOverview(
-            organization: "Acme Corp", description: "Doing good together.", role: role, companyCode: "ACME",
+            organization: "Acme Corp", description: "Doing good together.",
+            userID: role == .admin ? "u1" : "u2", role: role, companyCode: "ACME",
             committed: VerifiedMoney(amountMinor: 5_000_000, verified: true),
             deployed: VerifiedMoney(amountMinor: 3_000_000, verified: false), // unverified -> hidden (§7.3)
             deployedPercent: 60,
@@ -806,6 +807,9 @@ private struct EngagementHome: View {
                 } else {
                     if let national = snapshot.ranking.nationalLabel {
                         Text(national).accessibilityIdentifier("ranking-national")
+                    } else if snapshot.ranking.isNotRankedYet {
+                        Text("Not ranked yet.").font(.footnote).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("ranking-unranked")
                     }
                     if let city = snapshot.ranking.cityLabel { Text(city).font(.footnote).foregroundStyle(.secondary) }
                     Button("Hide my ranking") { Task { await model.setRankingOptIn(false) } }
@@ -1043,9 +1047,9 @@ struct DADApp: App {
         if launchFlag("--preview-partner-pending") {
             PartnerPortal(model: PartnerModel(service: PreviewPartner(pending: true)))
         } else if launchFlag("--preview-partner-viewer") {
-            PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer), currentUserID: "u2"))
+            PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer)))
         } else if launchFlag("--preview-partner") {
-            PartnerPortal(model: PartnerModel(service: PreviewPartner(), currentUserID: "u1"))
+            PartnerPortal(model: PartnerModel(service: PreviewPartner()))
         } else {
             PartnerLanding()
         }
