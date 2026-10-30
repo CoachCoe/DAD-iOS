@@ -29,7 +29,7 @@ AppIntents metadata-extraction diagnostic is not suppressed; this app defines no
 
 ## Shared contract and native boundaries
 
-`foundation.lock.json` pins mobile foundation 2.2.0 and its manifest digest. The vendored
+`foundation.lock.json` pins mobile foundation 2.3.0 and its manifest digest. The vendored
 release is verified before generation. `prepare-client.mjs` copies the Swift generator input, null-only Codable adapter, tokens,
 and link policy into ignored generator inputs. Apple's pinned Swift generator produces
 types and a client during the build, scoped to profile, claim, refresh, and logout.
@@ -49,7 +49,8 @@ cleanup; errors propagate rather than claiming a confirmed remote revocation.
 Set Xcode build settings `DAD_API_ORIGIN` and `DAD_PUBLIC_ORIGIN` to the direct HTTPS API
 origin and public website origin for a real environment. No production hostname or secret
 is compiled by default. An existing live session can read the profile; a plain account
-claim link can establish one. UI sign-in forms/passkeys are PRD work. Native entry hooks
+claim link can establish one. Sign-in screens (phone, passkey, OIDC) exist as models and previews, but
+the real-session service behind them is not wired yet; only profile, claim, refresh, and logout are bound. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next
@@ -57,7 +58,8 @@ destination stay on the web before their one-use proof is consumed.
 
 System universal links/passkeys require a final bundle ID, signing team, Associated
 Domains (`applinks:` and `webcredentials:`), and matching DAD-Main association files.
-The preview ID `org.dad.foundation.preview` is not a registered production identity.
+The app ships under `org.dad.foundation` (Release) and `org.dad.foundation.debug` (Debug); see
+"Bundle identifier" below. Neither is registered with a signing team or Associated Domains yet.
 Camera, push registration, and Wallet have integration protocols; this foundation does
 not request those permissions or configure provider accounts. A reachable staging API
 and real-device/provider acceptance remain separate from synthetic tests.
@@ -90,13 +92,14 @@ The test runner removes the private proof fixtures after either success or failu
 ## Release readiness (App Store)
 
 **In-app account deletion (required).** The settings screen offers in-app account deletion
-(§6.12): it calls `POST /donor/me/delete` (the server removes personal data and keeps the
-legally-required gift records) and then wipes the local session through `AccountSession`'s
-logout path. The action is gated behind a typed-word confirmation, so it cannot fire by
-accident. This satisfies App Store Review Guideline 5.1.1(v) (apps with account creation must
-let users delete their account from within the app). Disclose the retained gift records in the
-App Store "Account Deletion" question: personal data is deleted; aggregate/receipt records
-required by law are retained.
+(§6.12) behind a typed-word confirmation, and the flow wipes the local session through
+`AccountSession`'s logout path. The real-session service is not wired: only the preview
+conformer implements `deleteAccount()`, and `WireAPI` does not bind `POST /donor/me/delete`
+yet. Until that call is bound, deletion does not remove server-side data, so App Store Review
+Guideline 5.1.1(v) is not yet satisfied. Binding it (and adding it to the generator
+allow-list) is a release blocker. Once bound, disclose in the App Store "Account Deletion"
+question that personal data is deleted while aggregate/receipt records required by law are
+retained.
 
 **Privacy disclosure (App Store Privacy "nutrition label").** The app collects: email and phone
 (account), approximate location via ZIP (streak day boundary, nearby events), and gift history.
