@@ -1,11 +1,11 @@
 {
-  "version": "2.3.0",
+  "version": "2.4.0",
   "source_repository": "CoachCoe/DAD-Main",
-  "source_revision": "ac83b73a94eeb4ce4f7b38168b948559944bdcdd",
+  "source_revision": "73d348d38794bda6972ecdda7051c270db6fe777",
   "files": {
-    "openapi.json": "287c75570418aa4c0da13a6bf8f8ccd2c635e59af96b72f69e16c42347e1b1e7",
-    "mobile.openapi.json": "a844091dc01545513fd85cb4941f41747345749d1b835085400d4aeccc6c7a21",
-    "swift.openapi.json": "d5190b7878f4e99aef3575a37e3b33ff4269fb996380b3d635ec36a5054eed38",
+    "openapi.json": "9f3f245512fe8261b8cefecc4f2391bc6a5dbeb5ce8f07e23a2bc5825bd634dc",
+    "mobile.openapi.json": "8ff870469dad79ff6e40e2db1c5bb69f1c6e8346d2ff12a4be3d442fe5802738",
+    "swift.openapi.json": "dbeff618fb17aef57af0a64e1a32c13bc926ad954f45c959fbd894082c154916",
     "DADNullValue.swift": "548fa25336cde385a181b16fb959ee3f5b652c2cff4bb870068fe760a0908028",
     "tokens.json": "8f9b86ede46ba830fb991667a191e1b3ebdf13712a06d27a1276275c938efac0",
     "links.json": "aaca7eecd05353d0085493062a6adbabddf6004fadf79defa01f33cef7623ce0",
