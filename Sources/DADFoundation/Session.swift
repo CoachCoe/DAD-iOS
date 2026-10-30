@@ -50,13 +50,33 @@ public actor AccountSession {
     }
 
     public func claim(token: String) async throws {
+        try await install { try await self.api.claim(token: token) }
+    }
+
+    /// Install credentials produced by a completed sign-in (phone/passkey/OIDC/password).
+    /// The credential-producing work runs INSIDE the actor so the epoch captured before it
+    /// guards the install: a sign-in that resolves after a sign-out does not clobber state,
+    /// exactly like `claim`.
+    public func establish(_ produce: @Sendable () async throws -> Credentials) async throws {
+        try await install(produce)
+    }
+
+    private func install(_ produce: @Sendable () async throws -> Credentials) async throws {
         let before = epoch
-        let result = try await api.claim(token: token)
+        let result = try await produce()
         guard before == epoch else { throw AccountError.signedOut }
         try store.save(result)
         credentials = result
         epoch += 1
         flight = nil
+    }
+
+    /// A currently-valid access token, refreshing through the single-flight path if needed.
+    /// Product clients call this per request to authorize a native call; throws `.signedOut`
+    /// when there is no usable session.
+    public func accessToken() async throws -> String {
+        try Task.checkCancellation()
+        return try await usableCredentials().access
     }
 
     public func profile() async throws -> AccountProfile {

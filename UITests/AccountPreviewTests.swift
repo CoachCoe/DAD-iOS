@@ -1,6 +1,6 @@
 import XCTest
 
-final class AccountPreviewTests: XCTestCase {
+@MainActor final class AccountPreviewTests: XCTestCase {
     func testAccountPreviewLoads() {
         let app = XCUIApplication()
         app.launch()

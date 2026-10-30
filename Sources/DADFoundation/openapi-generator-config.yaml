@@ -4,7 +4,96 @@ generate:
 accessModifier: internal
 filter:
   operations:
-    - profile
-    - refresh
+    # --- Session & auth (app shell, Phase A/B) ---
+    - login
     - logout
+    - logoutAll
+    - refresh
     - claim
+    - sessions
+    - revokeSession
+    - revokeOtherSessions
+    - oidcSignIn
+    - beginPhoneSignIn
+    - finishPhoneSignIn
+    - beginDonorPasskeySignIn
+    - finishDonorPasskeySignIn
+    - beginDonorPasskeyRegister
+    - finishDonorPasskeyRegister
+    - donorPasskeys
+    - deleteDonorPasskey
+    # --- Profile & account (Phase B/C) ---
+    - profile
+    - saveProfile
+    - requestEmailChange
+    - confirmEmailChange
+    - savePreferences
+    - saveSharing
+    - sharing
+    - deleteAccount
+    - registerPushDevice
+    - unregisterPushDevice
+    # --- Donor giving core (Phase C) ---
+    - dashboard
+    - gifts
+    - recurring
+    - changeAmount
+    - cancelRecurring
+    - amountOptions
+    - paymentMethod
+    - beginPaymentUpdate
+    - receipt
+    - annualSummary
+    # --- Engagement: streak, network, badges, referral, initiatives (Phase C/D) ---
+    - donorBadges
+    - donorNetwork
+    - conversions
+    - referralCode
+    - todayInitiative
+    - publishedInitiative
+    - publishedInitiatives
+    - initiativeSpend
+    # --- Wallet passes (Phase D) ---
+    - walletProviders
+    - applePass
+    - googlePass
+    # --- Events (Phase E) ---
+    - donorEvents
+    - donorEventDetail
+    - inviteOnlyEvents
+    - reserveEvent
+    - cancelEvent
+    - checkInEvent
+    - eventDetail
+    - eventCalendar
+    # --- Employee / matching (Phase D/F) ---
+    - employeeEnroll
+    - employeeJoinTeam
+    - employeeTeam
+    - employeeTeams
+    - employeeOurPeople
+    - employeeWorkforce
+    # --- Partner portal (Phase F, P-*/EM-*); partner push is the v2.2 addition ---
+    - partnerRequestSignIn
+    - partnerAcceptInvite
+    - partnerSignOut
+    - partnerOverview
+    - partnerInitiatives
+    - partnerSpend
+    - partnerUsers
+    - partnerInviteUser
+    - partnerRemoveUser
+    - partnerSaveProfile
+    - partnerLogo
+    - partnerSaveLogo
+    - partnerReport
+    - partnerExports
+    - partnerRetainedReport
+    - partnerCompanyCode
+    - applicationStatus
+    - partnerRegisterPushDevice
+    - partnerUnregisterPushDevice
+    # --- Analytics ingest (Phase G) ---
+    - ingestAnalytics
+    # --- Health ---
+    - live

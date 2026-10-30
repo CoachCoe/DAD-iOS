@@ -130,6 +130,7 @@ final class FoundationTests: XCTestCase {
             XCTAssertNil(router.route(URL(string: value)!), value)
         }
         XCTAssertEqual(router.notification(path: "/account/payment-method"), .paymentMethod)
+        XCTAssertEqual(router.notification(path: "/account/gifts"), .gifts)
         XCTAssertNil(router.notification(path: "https://public.test/account/dashboard"))
         XCTAssertEqual(router.route(URL(string: "https://public.test/r/friend?via=irl")!), .web(URL(string: "https://public.test/r/friend?via=irl")!))
         var gate = NavigationGate()

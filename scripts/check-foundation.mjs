@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const hash = (contents) => createHash("sha256").update(contents).digest("hex");
-const files = ["DADTokens.kt", "DADTokens.swift", "links.json", "mobile.openapi.json", "openapi.json", "tokens.json", "tokens.ts"];
+const files = ["DADNullValue.swift", "DADTokens.kt", "DADTokens.swift", "links.json", "mobile.openapi.json", "openapi.json", "swift.openapi.json", "tokens.json", "tokens.ts"];
 
 export async function verifyFoundation(root) {
   const lock = JSON.parse(await readFile(resolve(root, "foundation.lock.json"), "utf8"));

@@ -4,7 +4,7 @@ permissions:
   contents: read
 jobs:
   contract:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, dad, linux]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -12,8 +12,11 @@ jobs:
           node-version: '24'
       - run: node scripts/check-foundation.mjs
       - run: node --test scripts/check-foundation.test.mjs
+      - name: Foundation drift (advisory)
+        run: node scripts/check-foundation-drift.mjs
+      - run: node --test scripts/check-foundation-drift.test.mjs
   ios:
-    runs-on: macos-26
+    runs-on: [self-hosted, dad, macos]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

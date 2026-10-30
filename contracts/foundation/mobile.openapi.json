@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "description": "The DAD (Dynamic Aid Delivery) donor API, serving the web app, the donor iOS/Android app, and the staff back office.\n\n## Clients and authentication\n- **Browsers** authenticate with HttpOnly cookies. Every mutation must carry the exact configured `Origin`; this is the CSRF defense. The API sends no CORS headers.\n- **The donor app** sends `X-DAD-Client: native` on every request, never sends `Origin` or cookies, and authenticates with `Authorization: Bearer <access token>`. A request with Origin or cookies is a browser request whatever else it carries. Sign in by calling POST /donor/login, opening the emailed `/account/claim#token=…` link in the app, and sending the fragment's token to POST /donor/claim as a native request, which returns a 15-minute access token and a rotating refresh token. Exchange the refresh token at POST /donor/refresh when the access token expires or a request answers 401; send one refresh at a time and keep only the newest tokens. Routes that admit the app list `native` in `x-clients`, and POST /donor/refresh and the push-device routes admit nothing else; giving, referral capture, partner signup, and every staff route are web-only.\n- Staff routes are browser-only and never accept bearer tokens. The back office runs on its own host (`DONOR_STAFF_ORIGIN`): staff mutations require that exact `Origin`, and donor and public mutations require the public one, so neither site can act on the other.\n\n## Rate limits\nMutations are rate limited per client address and class (`x-rate-limit`): auth 10/min, visitor 60/min, account 30/min, staff 60/min, with bursts up to the same size. Exceeding one answers 429 with `Retry-After`. Reads are not rate limited by the API.\n\n## Conventions\n- Errors are always `application/json` `{\"detail\": \"…\"}` with the status below; the detail is safe to display. A 503 for a feature the deployment has not configured adds a stable `code` and should not be retried. Unknown routes and malformed record IDs answer 404, wrong methods 405 with `Allow`.\n- Request bodies are one JSON object with exactly the documented fields (unknown fields, trailing data, NUL characters, and `null` for a defaulted field are 422), at most 256 KiB unless stated (larger is 413).\n- Money is integer USD cents in fields ending `_minor`; the API shows the same numbers on every client.\n- Timestamps are RFC 3339 strings, UTC, possibly with fractional seconds (`2026-10-06T14:03:00Z`, `…+00:00` in gift records). Dates are `YYYY-MM-DD`.\n- Lists page by `offset`, 50 rows per page; a response's `next_offset` (or `next_<list>_offset`) is the next page's offset, or null on the last page.\n- Commands that reach the payment processor or deliver email require an `Idempotency-Key`; retry with the same key after a timeout or 503.\n- Every response is `Cache-Control: no-store` except published content.\n"
+    "description": "The DAD (Dynamic Aid Delivery) donor API, serving the web app, the donor iOS/Android app, and the staff back office.\n\n## Clients and authentication\n- **Browsers** authenticate with HttpOnly cookies. Every mutation must carry the exact configured `Origin`; this is the CSRF defense. The API sends no CORS headers.\n- **The donor app** sends `X-DAD-Client: native` on every request, never sends `Origin` or cookies, and authenticates with `Authorization: Bearer <access token>`. A request with Origin or cookies is a browser request whatever else it carries. Sign in by calling POST /donor/login, opening the emailed `/account/claim#token=…` link in the app, and sending the fragment's token to POST /donor/claim as a native request, which returns a 15-minute access token and a rotating refresh token. Exchange the refresh token at POST /donor/refresh when the access token expires or a request answers 401; send one refresh at a time and keep only the newest tokens. Routes that admit the app list `native` in `x-clients`, and POST /donor/refresh and the push-device routes admit nothing else; giving, referral capture, partner applications, and every staff route are web-only.\n- **Partner portal** users are separate from donors (P-5). They sign in by calling POST /donor/partner/sign-in and opening the emailed `/partner/accept#token=…` link, whose token POST /donor/partner/accept-invite exchanges for a 12-hour session: an HttpOnly cookie for a browser, or a bearer token for a native request, sent like the donor app's.\n- Staff routes are browser-only and never accept bearer tokens. The back office runs on its own host (`DONOR_STAFF_ORIGIN`): staff mutations require that exact `Origin`, and donor and public mutations require the public one, so neither site can act on the other.\n\n## Rate limits\nMutations are rate limited per client address and class (`x-rate-limit`): auth 10/min, visitor 60/min, account 30/min, staff 60/min, with bursts up to the same size. Exceeding one answers 429 with `Retry-After`. Reads are not rate limited by the API.\n\n## Conventions\n- Errors are always `application/json` `{\"detail\": \"…\"}` with the status below; the detail is safe to display. A 503 for a feature the deployment has not configured adds a stable `code` and should not be retried. Unknown routes and malformed record IDs answer 404, wrong methods 405 with `Allow`.\n- Request bodies are one JSON object with exactly the documented fields (unknown fields, trailing data, NUL characters, and `null` for a defaulted field are 422), at most 256 KiB unless stated (larger is 413).\n- Money is integer USD cents in fields ending `_minor`; the API shows the same numbers on every client.\n- Timestamps are RFC 3339 strings, UTC, possibly with fractional seconds (`2026-10-06T14:03:00Z`, `…+00:00` in gift records). Dates are `YYYY-MM-DD`.\n- Lists page by `offset`, 50 rows per page; a response's `next_offset` (or `next_<list>_offset`) is the next page's offset, or null on the last page.\n- Commands that reach the payment processor or deliver email require an `Idempotency-Key`; retry with the same key after a timeout or 503.\n- Every response is `Cache-Control: no-store` except published content.\n"
   },
   "servers": [
     {
@@ -49,6 +49,149 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/analytics/events": {
+      "post": {
+        "operationId": "ingestAnalytics",
+        "summary": "Record analytics events",
+        "description": "Ingests a batch of §9 analytics events from any platform into the shared append-only stream. Authenticated-or-anonymous: a valid donor session attributes the events, otherwise they are recorded anonymously (events before sign-in are expected). The platform source is the native client's `X-DAD-Platform` header, or WEB for a browser. The whole batch is rejected (422) if any event has an unknown name or an invalid property payload. Batch size is capped at 100.",
+        "tags": [
+          "Public"
+        ],
+        "security": [],
+        "x-rate-limit": "analytics",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "events": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "description": "A §9 taxonomy event name.",
+                          "enum": [
+                            "app_opened",
+                            "role_selected",
+                            "signup_started",
+                            "signup_completed",
+                            "attribution_captured",
+                            "gift_started",
+                            "gift_completed",
+                            "gift_failed",
+                            "gift_recovered",
+                            "gift_lapsed",
+                            "amount_changed",
+                            "gift_cancelled",
+                            "account_deleted",
+                            "invite_shared",
+                            "irl_code_shown",
+                            "referral_converted",
+                            "badge_earned",
+                            "milestone_reached",
+                            "rankings_toggled",
+                            "volunteer_opted_in",
+                            "event_viewed",
+                            "event_reserved",
+                            "event_waitlisted",
+                            "event_checked_in",
+                            "team_created",
+                            "team_joined",
+                            "partner_signup_submitted",
+                            "partner_approved",
+                            "partner_report_exported",
+                            "push_opened"
+                          ]
+                        },
+                        "occurred_at": {
+                          "type": "string",
+                          "format": "date-time",
+                          "description": "Client event time (RFC 3339). Rejected if missing or implausibly in the future."
+                        },
+                        "properties": {
+                          "type": "object",
+                          "description": "Typed payload for the events that carry one: attribution_captured requires {source: link|IRL|company}, invite_shared requires {channel}, push_opened requires {type}. All other events take no properties.",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "journey_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "occurred_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "events"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The batch was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "integer",
+                      "description": "Number of events stored."
+                    }
+                  },
+                  "required": [
+                    "accepted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -788,6 +931,88 @@
       }
     },
     "/donor/me/profile": {
+      "post": {
+        "operationId": "saveProfile",
+        "summary": "Save identity profile fields",
+        "description": "Replaces the donor's self-service identity fields. `timezone` is derived from `zip` (US ZIP to IANA zone) and is never accepted from the client; `account_role` is immutable and cannot be set here. A field sent empty clears its stored value; a blank `zip` clears the derived `timezone` with it. 422 for an invalid ZIP, phone, or city.",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "zip": {
+                    "type": "string",
+                    "description": "US ZIP (`12345` or `12345-6789`). Empty clears the ZIP and derived timezone.",
+                    "pattern": "^$|^[0-9]{5}(-[0-9]{4})?$"
+                  },
+                  "city": {
+                    "type": "string",
+                    "description": "Display city. Empty clears it.",
+                    "maxLength": 80
+                  },
+                  "phone": {
+                    "type": "string",
+                    "description": "E.164 phone, e.g. `+14155550123`. Empty clears it.",
+                    "pattern": "^$|^\\+[1-9][0-9]{1,14}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
       "get": {
         "operationId": "profile",
         "summary": "Profile and notification preferences",
@@ -822,11 +1047,85 @@
         }
       }
     },
+    "/donor/me/delete": {
+      "post": {
+        "operationId": "deleteAccount",
+        "summary": "Delete this donor account",
+        "description": "Erases the donor's personal data and signs them out everywhere. Personal fields and personal records (passkeys, social sign-in links, notification preferences, sessions and push registrations) are removed; the gift and billing ledger is retained for legal and tax records and carries no personal data. The deletion is irreversible. A browser's session cookie is cleared in the response. Refused with 409 while a monthly gift is still set to renew, or a checkout is still open, so a deleted account is never charged.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "The account was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "headers": {
+              "Set-Cookie": {
+                "description": "Browser requests only: clears the session cookie.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/donor/me/preferences": {
       "post": {
         "operationId": "savePreferences",
-        "summary": "Save notification preferences",
-        "description": "Replaces every notification choice at once. 409 when `version` is stale: re-read the profile and retry.",
+        "summary": "Save preferences",
+        "description": "Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. 409 when `version` is stale: re-read the profile and retry.",
         "tags": [
           "Donor"
         ],
@@ -869,6 +1168,43 @@
                     "type": "boolean"
                   },
                   "push_streak_milestone": {
+                    "type": "boolean"
+                  },
+                  "push_streak_lapsed": {
+                    "type": "boolean"
+                  },
+                  "push_badge_earned": {
+                    "type": "boolean"
+                  },
+                  "push_event_nearby": {
+                    "type": "boolean"
+                  },
+                  "push_event_reminder": {
+                    "type": "boolean"
+                  },
+                  "push_event_promoted": {
+                    "type": "boolean"
+                  },
+                  "rankings_opted_out": {
+                    "type": "boolean"
+                  },
+                  "network_visible": {
+                    "type": "boolean"
+                  },
+                  "volunteer": {
+                    "type": "boolean"
+                  },
+                  "volunteer_interests": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 60
+                    },
+                    "maxItems": 20,
+                    "uniqueItems": true
+                  },
+                  "push_gift_processed": {
                     "type": "boolean"
                   }
                 },
@@ -1691,13 +2027,16 @@
                   "amount_minor": {
                     "type": "integer",
                     "format": "int64",
-                    "minimum": 100,
-                    "maximum": 99999999
+                    "description": "The monthly charge in integer USD cents: a whole number of dollars a day from $1 to $30, times 30 (3000 to 90000 in steps of 3000).",
+                    "minimum": 3000,
+                    "maximum": 90000,
+                    "multipleOf": 3000
                   },
                   "previous_minor": {
                     "type": "integer",
                     "format": "int64",
-                    "minimum": 100,
+                    "description": "The amount the next renewal would charge, which may predate the daily rule.",
+                    "minimum": 1,
                     "maximum": 99999999
                   },
                   "effective_at": {
@@ -1723,267 +2062,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AmountChange"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          },
-          "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
-          },
-          "415": {
-            "$ref": "#/components/responses/UnsupportedMediaType"
-          },
-          "422": {
-            "$ref": "#/components/responses/Unprocessable"
-          },
-          "429": {
-            "$ref": "#/components/responses/TooManyRequests"
-          },
-          "503": {
-            "$ref": "#/components/responses/Unavailable"
-          }
-        }
-      }
-    },
-    "/donor/me/recurring/pause": {
-      "get": {
-        "operationId": "pauseOptions",
-        "summary": "Pause offer: 1, 2, or 3 skipped renewals with exact dates",
-        "description": "Served from the subscription as last synced from Stripe by verified webhooks and recurring commands; it never calls Stripe. The matching POST checks current Stripe state and answers 409 when the offer no longer matches it. 409 here when the stored billing dates are inconsistent.",
-        "tags": [
-          "Recurring"
-        ],
-        "security": [
-          {
-            "cookieAuth": []
-          },
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PauseOptions"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          },
-          "503": {
-            "$ref": "#/components/responses/Unavailable"
-          }
-        }
-      },
-      "post": {
-        "operationId": "pauseRecurring",
-        "summary": "Pause renewals",
-        "description": "Idempotent. Echo the values the matching GET returned; 409 when they no longer match current billing. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.",
-        "tags": [
-          "Recurring"
-        ],
-        "security": [
-          {
-            "cookieAuth": []
-          },
-          {
-            "bearerAuth": []
-          }
-        ],
-        "x-rate-limit": "account",
-        "x-clients": [
-          "browser",
-          "native"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "subscription_id": {
-                    "type": "string",
-                    "format": "uuid"
-                  },
-                  "months": {
-                    "type": "integer",
-                    "format": "int32",
-                    "minimum": 1,
-                    "maximum": 3
-                  },
-                  "starts_at": {
-                    "type": "string",
-                    "format": "date-time"
-                  },
-                  "resumes_at": {
-                    "type": "string",
-                    "format": "date-time"
-                  }
-                },
-                "required": [
-                  "subscription_id",
-                  "months",
-                  "starts_at",
-                  "resumes_at"
-                ],
-                "additionalProperties": false
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PauseResult"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/Forbidden"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          },
-          "413": {
-            "$ref": "#/components/responses/PayloadTooLarge"
-          },
-          "415": {
-            "$ref": "#/components/responses/UnsupportedMediaType"
-          },
-          "422": {
-            "$ref": "#/components/responses/Unprocessable"
-          },
-          "429": {
-            "$ref": "#/components/responses/TooManyRequests"
-          },
-          "503": {
-            "$ref": "#/components/responses/Unavailable"
-          }
-        }
-      }
-    },
-    "/donor/me/recurring/resume": {
-      "get": {
-        "operationId": "resumeOptions",
-        "summary": "Resume offer",
-        "description": "Served from the subscription as last synced from Stripe by verified webhooks and recurring commands; it never calls Stripe. The matching POST checks current Stripe state and answers 409 when the offer no longer matches it.",
-        "tags": [
-          "Recurring"
-        ],
-        "security": [
-          {
-            "cookieAuth": []
-          },
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResumeOptions"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "503": {
-            "$ref": "#/components/responses/Unavailable"
-          }
-        }
-      },
-      "post": {
-        "operationId": "resumeRecurring",
-        "summary": "Resume a pause early",
-        "description": "Idempotent. Echo the values the matching GET returned; 409 when they no longer match current billing. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.",
-        "tags": [
-          "Recurring"
-        ],
-        "security": [
-          {
-            "cookieAuth": []
-          },
-          {
-            "bearerAuth": []
-          }
-        ],
-        "x-rate-limit": "account",
-        "x-clients": [
-          "browser",
-          "native"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "pause_id": {
-                    "type": "string",
-                    "format": "uuid"
-                  },
-                  "next_renewal": {
-                    "type": "string",
-                    "format": "date-time"
-                  }
-                },
-                "required": [
-                  "pause_id",
-                  "next_renewal"
-                ],
-                "additionalProperties": false
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Resumption"
                 }
               }
             }
@@ -2225,6 +2303,256 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/phone/sign-in/options": {
+      "post": {
+        "operationId": "beginPhoneSignIn",
+        "summary": "Send a phone sign-in code",
+        "description": "Sends a one-time SMS code to a donor's phone. The response is always `{\"sent\": true}` and never reveals whether the phone has an account. 503 with this method unavailable when the deployment has no SMS provider configured.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "type": "string",
+                    "description": "E.164 phone, e.g. +14155550123.",
+                    "pattern": "^\\+[1-9][0-9]{1,14}$"
+                  }
+                },
+                "required": [
+                  "phone"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A code was requested (sent only if the phone matches an account).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sent": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "sent"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/phone/sign-in": {
+      "post": {
+        "operationId": "finishPhoneSignIn",
+        "summary": "Finish a phone sign-in",
+        "description": "Verifies the SMS code and signs the donor in. 401 covers a wrong, expired, or over-tried code and a phone with no account alike, so none reveals whether an account exists. 503 when no SMS provider is configured.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "phone": {
+                    "type": "string",
+                    "pattern": "^\\+[1-9][0-9]{1,14}$"
+                  },
+                  "code": {
+                    "type": "string",
+                    "description": "The 6-digit code from the SMS.",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "device_name": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "Native requests only, optional. Ignored for browser requests."
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "IOS",
+                      "ANDROID"
+                    ],
+                    "description": "Native requests only, optional. Ignored for browser requests."
+                  }
+                },
+                "required": [
+                  "phone",
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SignedIn"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/oidc/{provider}/sign-in": {
+      "post": {
+        "operationId": "oidcSignIn",
+        "summary": "Sign in with Apple or Google",
+        "description": "Verifies a provider id_token and signs in the donor it belongs to. The identity is matched by a prior link, else by the token's verified email against an existing account (which records the link). 401 covers an unverifiable token and a verified identity with no matching account alike; account creation happens in the giving flow, not here. 503 when the provider is not configured.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "apple",
+                "google"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id_token": {
+                    "type": "string",
+                    "description": "The provider's id_token (JWT) from the native or web sign-in SDK.",
+                    "minLength": 1,
+                    "maxLength": 8192
+                  },
+                  "device_name": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "Native requests only, optional. Ignored for browser requests."
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "IOS",
+                      "ANDROID"
+                    ],
+                    "description": "Native requests only, optional. Ignored for browser requests."
+                  }
+                },
+                "required": [
+                  "id_token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SignedIn"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -2585,6 +2913,2765 @@
           }
         }
       }
+    },
+    "/events/{event_id}": {
+      "get": {
+        "operationId": "eventDetail",
+        "summary": "A published event's detail page (E-3)",
+        "tags": [
+          "Events"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A malformed ID is 404, like an unknown or draft one."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventView"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/events/{event_id}/calendar.ics": {
+      "get": {
+        "operationId": "eventCalendar",
+        "summary": "Download a published event as an .ics calendar file (E-6)",
+        "tags": [
+          "Events"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A malformed, unknown, draft, or invite-only id is 404."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An iCalendar document.",
+            "content": {
+              "text/calendar": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/initiatives/{initiative_id}/spend": {
+      "get": {
+        "operationId": "initiativeSpend",
+        "summary": "Published initiative spend by category",
+        "tags": [
+          "Initiatives"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "initiative_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A malformed ID is 404, like an unknown one."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitiativeSpend"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/today-initiative": {
+      "get": {
+        "operationId": "todayInitiative",
+        "summary": "The donor's initiative of the day",
+        "tags": [
+          "Initiatives"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodayInitiative"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/events": {
+      "get": {
+        "operationId": "donorEvents",
+        "summary": "Upcoming events in and near the donor's city (E-2)",
+        "tags": [
+          "Events"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventView"
+                      }
+                    }
+                  },
+                  "required": [
+                    "events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/events/check-in": {
+      "post": {
+        "operationId": "checkInEvent",
+        "summary": "Check in at an event by scanning its QR token (E-8)",
+        "tags": [
+          "Events"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "description": "The event's QR check-in token."
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckInResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Checks the signed-in donor in from the QR code shown at the venue (E-8). Accepted only between the event's start and end, and only for a donor holding a reserved seat, not a waitlist place; 422 otherwise. A second scan succeeds with `already_checked_in`."
+      }
+    },
+    "/donor/me/events/invite-only": {
+      "get": {
+        "operationId": "inviteOnlyEvents",
+        "summary": "Invite-only events the donor can see (E-5)",
+        "tags": [
+          "Events"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EventView"
+                      }
+                    }
+                  },
+                  "required": [
+                    "events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/events/{event_id}": {
+      "get": {
+        "operationId": "donorEventDetail",
+        "summary": "A donor's view of one event, enforcing the E-5 gate",
+        "tags": [
+          "Events"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/events/{event_id}/reserve": {
+      "post": {
+        "operationId": "reserveEvent",
+        "summary": "Reserve a spot (or join the waitlist) at an event (E-4)",
+        "tags": [
+          "Events"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Refused with 409 once the event has started or been cancelled, or before booking opens to this donor: Team Captains may reserve from 48 hours before booking_opens_at, everyone else from it."
+      }
+    },
+    "/donor/me/events/{event_id}/cancel": {
+      "post": {
+        "operationId": "cancelEvent",
+        "summary": "Cancel a reservation; promotes the waitlist head (E-4/E-9)",
+        "tags": [
+          "Events"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/network": {
+      "get": {
+        "operationId": "donorNetwork",
+        "summary": "The donor's referral network (N-1..N-3)",
+        "tags": [
+          "Network"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/badges": {
+      "get": {
+        "operationId": "donorBadges",
+        "summary": "The donor's badge wall",
+        "tags": [
+          "Badges"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadgeList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "All 24 badges in catalog order with the donor's earned state. Earned badges show in color; an unearned one shows greyed with its `rule` (B-1). Badges are earned when the donor's facts change and stay earned (B-2)."
+      }
+    },
+    "/donor/partner/sign-in": {
+      "post": {
+        "operationId": "partnerRequestSignIn",
+        "summary": "Email a partner portal sign-in link",
+        "description": "503 `EMAIL_UNCONFIGURED` when the deployment has no email. Never reveals whether the address belongs to a partner user. Each enabled user of an approved partner with this email receives a single-use link that expires after 15 minutes; at most one a minute and five an hour are sent per user.",
+        "tags": [
+          "Partner"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "maxLength": 320
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted, whether or not the address belongs to a partner user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/accept-invite": {
+      "post": {
+        "operationId": "partnerAcceptInvite",
+        "summary": "Exchange an emailed partner sign-in link for a session",
+        "tags": [
+          "Partner"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "invite": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "invite"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "type": "string",
+                      "description": "Native requests only."
+                    },
+                    "signed_in": {
+                      "type": "boolean",
+                      "description": "Browser requests only."
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "The link (`/partner/accept#token=…`) comes from an approval, an invitation, or POST /donor/partner/sign-in. It is single-use: approval and invitation links expire after 7 days, requested links after 15 minutes. A browser receives an HttpOnly session cookie and `signed_in`; the app, sending a native request, receives the bearer `session` instead."
+      }
+    },
+    "/donor/partner/overview": {
+      "get": {
+        "operationId": "partnerOverview",
+        "summary": "Partner dashboard overview tiles",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "organization": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "The organization's description, as its administrators wrote it (§7.2)."
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "ADMIN",
+                        "VIEWER"
+                      ]
+                    },
+                    "company_code": {
+                      "type": "string"
+                    },
+                    "committed_minor": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "deployed_minor": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "deployed_percent": {
+                      "type": "integer"
+                    },
+                    "people_reached": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "employees_enrolled": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "int64"
+                    },
+                    "workforce_size": {
+                      "type": "integer"
+                    },
+                    "enrolled_percent": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "updated_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "has_logo": {
+                      "type": "boolean"
+                    },
+                    "committed_verified": {
+                      "type": "boolean"
+                    },
+                    "deployed_verified": {
+                      "type": "boolean"
+                    },
+                    "people_reached_verified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "organization",
+                    "description",
+                    "role",
+                    "company_code",
+                    "committed_minor",
+                    "deployed_minor",
+                    "deployed_percent",
+                    "people_reached",
+                    "employees_enrolled",
+                    "workforce_size",
+                    "enrolled_percent",
+                    "updated_at",
+                    "has_logo",
+                    "committed_verified",
+                    "deployed_verified",
+                    "people_reached_verified"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Every figure is published and verified; nothing is estimated. Employee enrollment is null while fewer than 5 employees are linked (EM-3), and its percentage also without a workforce size. `updated_at` is when any figure last changed, null before a published initiative. `role` is the caller's own (ADMIN or VIEWER)."
+      }
+    },
+    "/donor/partner/initiatives": {
+      "get": {
+        "operationId": "partnerInitiatives",
+        "summary": "Partner's published initiatives",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "initiatives": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "ACTIVE",
+                              "COMPLETE"
+                            ]
+                          },
+                          "region": {
+                            "type": "string"
+                          },
+                          "county_count": {
+                            "type": "integer"
+                          },
+                          "committed_minor": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "deployed_minor": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "metrics": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "label": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "integer",
+                                  "format": "int64"
+                                },
+                                "unit": {
+                                  "type": "string",
+                                  "enum": [
+                                    "USD_CENTS",
+                                    "PEOPLE",
+                                    "INITIATIVES",
+                                    "PARTNERS"
+                                  ]
+                                },
+                                "verified_on": {
+                                  "type": "string",
+                                  "format": "date"
+                                }
+                              },
+                              "required": [
+                                "label",
+                                "value",
+                                "unit",
+                                "verified_on"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "spend": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "category": {
+                                  "type": "string"
+                                },
+                                "amount_minor": {
+                                  "type": "integer",
+                                  "format": "int64"
+                                }
+                              },
+                              "required": [
+                                "category",
+                                "amount_minor"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "summary",
+                          "status",
+                          "region",
+                          "county_count",
+                          "committed_minor",
+                          "deployed_minor",
+                          "metrics",
+                          "spend",
+                          "updated_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "initiatives"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Published co-initiatives, active first, each with every published verified headline metric in display order, its spend by category, and when its figures last changed."
+      }
+    },
+    "/donor/partner/spend": {
+      "get": {
+        "operationId": "partnerSpend",
+        "summary": "Partner spend by category",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "categories": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string"
+                          },
+                          "amount_minor": {
+                            "type": "integer",
+                            "format": "int64"
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "amount_minor"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "categories"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/users": {
+      "get": {
+        "operationId": "partnerUsers",
+        "summary": "List partner portal users",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "email": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "email",
+                          "name",
+                          "role"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "users"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "partnerInviteUser",
+        "summary": "Invite a partner portal user",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "name",
+                  "role"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invited": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "invited"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Admin only. Emails the person a single-use invitation link that expires after 7 days. Re-inviting an existing user refreshes their role and re-enables them. Refused with 409 when the email already has a donor or staff login, or signs in to another partner organization (one email, one role)."
+      }
+    },
+    "/donor/partner/exports": {
+      "get": {
+        "operationId": "partnerExports",
+        "summary": "Previous report exports",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "exports": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "committed_minor": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "deployed_minor": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "people_reached": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "exported_by": {
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "downloadable": {
+                            "type": "boolean"
+                          },
+                          "people_reached_verified": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "committed_minor",
+                          "deployed_minor",
+                          "people_reached",
+                          "exported_by",
+                          "created_at",
+                          "downloadable",
+                          "people_reached_verified"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "exports"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/report.pdf": {
+      "get": {
+        "operationId": "partnerReport",
+        "summary": "Download the branded impact report",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branded impact report PDF",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/company-code.svg": {
+      "get": {
+        "operationId": "partnerCompanyCode",
+        "summary": "Company code QR code",
+        "description": "The IRL version of the partner's company code (EM-1): a QR code of `/c/{company code}` on the public site, which saves the code before an employee gives. Any partner role. 404 before the partner has a code.",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/users/{userID}/remove": {
+      "post": {
+        "operationId": "partnerRemoveUser",
+        "summary": "Remove a partner portal user",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "userID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "removed": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "removed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/sign-out": {
+      "post": {
+        "operationId": "partnerSignOut",
+        "summary": "Sign out of the partner portal",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "signed_out": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "signed_out"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/employer": {
+      "post": {
+        "operationId": "employeeEnroll",
+        "summary": "Link to an employer by company code",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "company_code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "company_code"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "organization": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "organization"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/team": {
+      "get": {
+        "operationId": "employeeTeam",
+        "summary": "The donor's employer and team",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "partner_id": {
+                      "type": "string"
+                    },
+                    "organization": {
+                      "type": "string"
+                    },
+                    "team_id": {
+                      "type": "string"
+                    },
+                    "team_name": {
+                      "type": "string"
+                    },
+                    "leaderboard": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TeamLeaderboardRow"
+                      }
+                    }
+                  },
+                  "required": [
+                    "partner_id",
+                    "organization",
+                    "leaderboard"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "The signed-in donor's employer and team, and their company's team leaderboard (EM-5, teams with fewer than 5 members left out). An unlinked donor gets empty fields."
+      },
+      "post": {
+        "operationId": "employeeJoinTeam",
+        "summary": "Join or create a team",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "team_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "team_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/our-people": {
+      "get": {
+        "operationId": "employeeOurPeople",
+        "summary": "Our People aggregate (k-anonymised)",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enrolled": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "workforce_size": {
+                      "type": "integer"
+                    },
+                    "given_minor": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "matched_minor": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "avg_streak_days": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "volunteer_minutes": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "teams": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "suppressed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "enrolled",
+                    "workforce_size",
+                    "given_minor",
+                    "matched_minor",
+                    "avg_streak_days",
+                    "volunteer_minutes",
+                    "teams",
+                    "suppressed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Totals for the partner's linked employees (P-13): giving net of refunds, this calendar year's match owed (`matched_minor`), average current streak in days, volunteer minutes from event check-ins, and the number of teams. While fewer than 5 employees are linked every figure is 0 and `suppressed` is true (EM-3); individuals are never returned."
+      }
+    },
+    "/donor/partner/teams": {
+      "get": {
+        "operationId": "employeeTeams",
+        "summary": "Team leaderboard (teams under 5 suppressed)",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "teams": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TeamLeaderboardRow"
+                      }
+                    }
+                  },
+                  "required": [
+                    "teams"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "The company team leaderboard (EM-5), ranked by combined active giving (annualized pledges of members whose gift is current). Teams with fewer than 5 members are left out."
+      }
+    },
+    "/donor/partner/workforce": {
+      "post": {
+        "operationId": "employeeWorkforce",
+        "summary": "Update workforce size",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "workforce_size": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "workforce_size"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "saved": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "saved"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/profile": {
+      "post": {
+        "operationId": "partnerSaveProfile",
+        "summary": "Update organization profile",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "organization": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "organization",
+                  "description"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "saved": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "saved"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Replaces the organization's name and description (§7.2). Partner administrators only; viewers get 403. Both are trimmed; the name must be 1 to 200 characters and the description at most 4000."
+      }
+    },
+    "/donor/partner/reports/{report_id}/report.pdf": {
+      "get": {
+        "operationId": "partnerRetainedReport",
+        "summary": "Download an immutable retained export owned by this partner",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Branded impact report PDF",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/donor/partner/logo": {
+      "get": {
+        "operationId": "partnerLogo",
+        "summary": "Read the organization logo",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The logo as a PNG",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "partnerSaveLogo",
+        "summary": "Upload or remove a partner logo (admin only)",
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "data_url": {
+                    "type": "string",
+                    "maxLength": 350000,
+                    "description": "Base64 PNG/JPEG, at most 256 KiB and 512 by 512 pixels. Empty explicitly removes the logo. Stored as PNG without metadata."
+                  }
+                },
+                "required": [
+                  "data_url"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "saved": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "saved"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "description": "Shown on the partner dashboard and included in new PDF reports. Partner administrators only; viewers get 403."
+      }
+    },
+    "/initiatives": {
+      "get": {
+        "operationId": "publishedInitiatives",
+        "summary": "Published initiatives",
+        "description": "Active initiatives first. Cacheable for a minute.",
+        "tags": [
+          "Initiatives"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublicInitiative"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/initiatives/{slug}": {
+      "get": {
+        "operationId": "publishedInitiative",
+        "summary": "One published initiative",
+        "tags": [
+          "Initiatives"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A draft or unknown slug is 404."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicInitiative"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/events/{event_id}/calendar.ics": {
+      "get": {
+        "operationId": "donorEventCalendar",
+        "summary": "Download an authorized event as an .ics calendar file, including invite-only events",
+        "tags": [
+          "Events"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "A malformed, unknown, draft, cancelled, or unauthorized event is 404."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An iCalendar document.",
+            "content": {
+              "text/calendar": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/push-device": {
+      "post": {
+        "operationId": "partnerRegisterPushDevice",
+        "summary": "Partner app: Register this installation for app notifications",
+        "description": "Native requests only. Records the push token of the app installation behind the calling session, replacing any token the session held. Register at every launch, since platforms rotate tokens. A token another session holds, the donor's or anyone's, moves to this session: it names one installation. The token is removed when the session is signed out, revoked, or ends, so sign-in again means registering again. Notifications carry generic text, a `category` (`REFERRAL_CONVERTED`, `STREAK_AT_RISK`, or `STREAK_MILESTONE`) and an app `path` to open, never names or amounts; fetch details through the API. 503 with `PUSH_UNCONFIGURED` when this deployment does not deliver to the platform. 401 for a browser session's credential.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "IOS",
+                      "ANDROID"
+                    ]
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 1024,
+                    "description": "For iOS, the APNs device token as hex (either case); for Android, the FCM registration token."
+                  },
+                  "environment": {
+                    "type": "string",
+                    "enum": [
+                      "SANDBOX",
+                      "PRODUCTION"
+                    ],
+                    "default": "PRODUCTION",
+                    "description": "iOS only: the APNs environment that issued the token (SANDBOX for development builds). Omit for Android."
+                  }
+                },
+                "required": [
+                  "platform",
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The session's registration after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushRegistration"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/push-device/unregister": {
+      "post": {
+        "operationId": "partnerUnregisterPushDevice",
+        "summary": "Partner app: Stop app notifications to this installation",
+        "description": "Native requests only. Removes the calling session's push token, if any; the session stays signed in.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "partnerCookieAuth": []
+          },
+          {
+            "partnerBearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "native"
+        ],
+        "responses": {
+          "200": {
+            "description": "The session's registration after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushRegistration"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/partner/application-status": {
+      "get": {
+        "operationId": "applicationStatus",
+        "summary": "Read the status of the application named by a private receipt",
+        "tags": [
+          "Partners"
+        ],
+        "security": [
+          {
+            "applicationCookieAuth": []
+          },
+          {
+            "applicationBearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Application status only; no contact information or staff notes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/signup": {
+      "post": {
+        "operationId": "postDonorSignup",
+        "summary": "/donor/signup",
+        "description": "503 `EMAIL_UNCONFIGURED` when the deployment has no email. Never reveals whether the address exists. The link (`/account/claim#token=…`) is single-use and expires after 15 minutes; the app should handle it as a universal/app link and call POST /donor/claim.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "zip": {
+                    "type": "string"
+                  },
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "email",
+                  "zip",
+                  "city"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted, whether or not the address has an account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/password/sign-in": {
+      "post": {
+        "operationId": "postDonorPasswordSignIn",
+        "summary": "/donor/password/sign-in",
+        "description": "Verifies the SMS code and signs the donor in. 401 covers a wrong, expired, or over-tried code and a phone with no account alike, so none reveals whether an account exists. 503 when no SMS provider is configured.",
+        "tags": [
+          "Account"
+        ],
+        "security": [],
+        "x-rate-limit": "auth",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string",
+                    "maxLength": 72
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SignedIn"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/password": {
+      "post": {
+        "operationId": "postDonorMePassword",
+        "summary": "/donor/me/password",
+        "description": "Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. 409 when `version` is stale: re-read the profile and retry.",
+        "tags": [
+          "Donor"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "current_password": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 72
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "saved": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "saved"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2611,6 +5698,28 @@
         "in": "header",
         "name": "Stripe-Signature",
         "description": "Stripe webhook signature over the raw request body."
+      },
+      "partnerCookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "dad_partner_session",
+        "description": "Partner portal session: HttpOnly, Secure on HTTPS, SameSite=Lax, 12 hours. Set by POST /donor/partner/accept-invite for browser requests. Mutations also require the exact configured `Origin`. Never a donor or staff session."
+      },
+      "partnerBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Partner app session token, from POST /donor/partner/accept-invite sent as a native request. It lasts 12 hours. Accepted only on native requests (`X-DAD-Client: native`, no `Origin`, no `Cookie`), like bearerAuth. Never accepted for donor or staff routes."
+      },
+      "applicationCookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "dad_application_receipt",
+        "description": "A 30-day receipt scoped only to the submitted application status; it does not authenticate a partner user."
+      },
+      "applicationBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The 32-byte base64url application receipt supplied at submission. Native requests only."
       }
     },
     "responses": {
@@ -2709,6 +5818,43 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "SignedIn": {
+        "description": "Signed in.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "description": "Browser request: the session is set only as the `dad_donor_session` cookie.",
+                  "properties": {
+                    "signed_in": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "signed_in"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "$ref": "#/components/schemas/NativeSession",
+                  "description": "Native request."
+                }
+              ]
+            }
+          }
+        },
+        "headers": {
+          "Set-Cookie": {
+            "description": "Browser requests only.",
+            "schema": {
+              "type": "string"
             }
           }
         }
@@ -2942,6 +6088,31 @@
                     "type": "null"
                   }
                 ]
+              },
+              "rank": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Ranking"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The donor's own ranking (S-4), or null when unranked."
+              },
+              "network": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/NetworkCard"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The donor's active-network headline (I-2), or null when they have no active referrals."
+              },
+              "impact": {
+                "$ref": "#/components/schemas/ImpactSummary"
               }
             },
             "required": [
@@ -2950,7 +6121,10 @@
               "mode",
               "referrals",
               "state",
-              "streak"
+              "streak",
+              "rank",
+              "network",
+              "impact"
             ],
             "additionalProperties": false
           }
@@ -3006,7 +6180,7 @@
         "properties": {
           "at_risk": {
             "type": "boolean",
-            "description": "A renewal failed and is inside its 14-day grace period."
+            "description": "A renewal failed and is inside its 7-day grace period."
           },
           "current": {
             "type": "integer",
@@ -3018,12 +6192,162 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "ladder": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreakLadder"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Day-based streak card (PRD S-2/S-3); absent when there is no streak."
           }
         },
         "required": [
           "at_risk",
           "current",
           "grace_ends_at"
+        ],
+        "additionalProperties": false
+      },
+      "StreakLadder": {
+        "type": "object",
+        "properties": {
+          "days": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_milestone": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_milestone": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "days_to_next": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "bar": {
+            "type": "array",
+            "items": {
+              "type": "boolean"
+            }
+          }
+        },
+        "required": [
+          "days",
+          "last_milestone",
+          "next_milestone",
+          "days_to_next",
+          "bar"
+        ],
+        "additionalProperties": false
+      },
+      "Ranking": {
+        "type": "object",
+        "properties": {
+          "national_percentile": {
+            "type": "integer",
+            "description": "Top-percentile bucket; 1 = top 1%."
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "city_rank": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "computed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "national_percentile",
+          "city",
+          "city_rank",
+          "computed_at"
+        ],
+        "additionalProperties": false
+      },
+      "NetworkCard": {
+        "type": "object",
+        "description": "Dashboard headline for the donor's referral network (I-2).",
+        "properties": {
+          "active_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of still-active donors the donor brought in."
+          },
+          "annualized_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Combined annualized giving of those active donors (monthly pledge x 12), in minor units."
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_count",
+          "annualized_minor",
+          "currency"
+        ],
+        "additionalProperties": false
+      },
+      "ImpactSummary": {
+        "type": "object",
+        "description": "The donor's own impact totals (I-1, I-3).",
+        "properties": {
+          "given_minor": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Total given since joining, net of refunds; null while it is being recomputed."
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "USD"
+            ]
+          },
+          "initiatives_funded": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct initiatives the donor has been shown (A-4)."
+          },
+          "events_volunteered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events the donor checked in at."
+          }
+        },
+        "required": [
+          "given_minor",
+          "currency",
+          "initiatives_funded",
+          "events_volunteered"
         ],
         "additionalProperties": false
       },
@@ -3035,6 +6359,39 @@
             "format": "email"
           },
           "public_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "account_role": {
+            "type": "string",
+            "enum": [
+              "DONOR",
+              "PARTNER"
+            ],
+            "description": "The principal's role, fixed at account creation and immutable."
+          },
+          "zip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IANA zone derived from the ZIP; drives day-level streak state in the donor's own day."
+          },
+          "phone": {
             "type": [
               "string",
               "null"
@@ -3054,9 +6411,48 @@
             "type": "boolean",
             "description": "App notification when a declined monthly payment puts the donor's giving streak at risk. Starts on."
           },
+          "push_streak_lapsed": {
+            "type": "boolean",
+            "description": "App notification when the donor's giving streak has lapsed after the grace period on a failed monthly payment. Starts on."
+          },
           "push_streak_milestone": {
             "type": "boolean",
-            "description": "App notification when the donor's giving streak reaches 3 or 6 months, a year, or each further year. Starts on."
+            "description": "App notification when the donor's giving streak reaches an R1 day milestone. Starts on."
+          },
+          "push_badge_earned": {
+            "type": "boolean",
+            "description": "App notification when the donor earns a new badge. Starts on."
+          },
+          "push_event_nearby": {
+            "type": "boolean",
+            "description": "App notification when an event is published near a volunteer (E-1). Sent only while `volunteer` is on."
+          },
+          "push_event_reminder": {
+            "type": "boolean",
+            "description": "App notification 24 hours and 2 hours before an event the donor reserved."
+          },
+          "push_event_promoted": {
+            "type": "boolean",
+            "description": "App notification when the donor moves off an event waitlist."
+          },
+          "rankings_opted_out": {
+            "type": "boolean",
+            "description": "When true the donor is excluded from national/city rankings and from everyone's ranking denominator. Default off (ranked)."
+          },
+          "network_visible": {
+            "type": "boolean",
+            "description": "When true the donor appears by name in their referrer's invitee list; otherwise they are counted anonymously (N-3). On by default: visibility is opt-out (§10)."
+          },
+          "volunteer": {
+            "type": "boolean",
+            "description": "When true the donor is in the volunteer pool and receives event alerts (E-1). Default off."
+          },
+          "volunteer_interests": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Event interests the donor picked when opting in as a volunteer (E-1); empty when none chosen."
           },
           "version": {
             "type": "integer",
@@ -3065,18 +6461,37 @@
           },
           "consent_version": {
             "type": "string"
+          },
+          "push_gift_processed": {
+            "type": "boolean",
+            "description": "App notification when a verified gift is processed. Starts on."
           }
         },
         "required": [
           "email",
           "public_name",
+          "account_role",
+          "zip",
+          "city",
+          "timezone",
+          "phone",
           "referral_emails",
           "marketing_emails",
           "push_referral_converted",
           "push_streak_at_risk",
           "push_streak_milestone",
+          "rankings_opted_out",
+          "network_visible",
+          "volunteer",
+          "volunteer_interests",
           "version",
-          "consent_version"
+          "consent_version",
+          "push_streak_lapsed",
+          "push_badge_earned",
+          "push_event_nearby",
+          "push_event_reminder",
+          "push_event_promoted",
+          "push_gift_processed"
         ],
         "additionalProperties": false
       },
@@ -3526,17 +6941,6 @@
             "description": "Subscription attempt ID used by recurring commands.",
             "format": "uuid"
           },
-          "pause": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PauseWindow"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The confirmed pause, or null when none is in effect or scheduled."
-          },
           "period_end": {
             "type": "string",
             "format": "date-time"
@@ -3556,29 +6960,9 @@
           "amount_minor",
           "currency",
           "id",
-          "pause",
           "period_end",
           "status",
           "stops_at"
-        ],
-        "additionalProperties": false
-      },
-      "PauseWindow": {
-        "type": "object",
-        "description": "Renewals from starts_at are skipped until giving resumes at resumes_at.",
-        "properties": {
-          "resumes_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "starts_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": [
-          "resumes_at",
-          "starts_at"
         ],
         "additionalProperties": false
       },
@@ -3669,215 +7053,6 @@
           "confirmed",
           "effective_at",
           "previous_minor",
-          "request_id"
-        ],
-        "additionalProperties": false
-      },
-      "PauseOptions": {
-        "type": "object",
-        "properties": {
-          "options": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PauseOption"
-            }
-          },
-          "pause": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PauseView"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "state": {
-            "type": "string"
-          },
-          "subscription_id": {
-            "type": "string",
-            "format": "uuid"
-          }
-        },
-        "required": [
-          "options",
-          "pause",
-          "state"
-        ],
-        "additionalProperties": false
-      },
-      "PauseOption": {
-        "type": "object",
-        "properties": {
-          "months": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 1,
-            "maximum": 3
-          },
-          "resumes_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "starts_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": [
-          "months",
-          "resumes_at",
-          "starts_at"
-        ],
-        "additionalProperties": false
-      },
-      "PauseView": {
-        "type": "object",
-        "properties": {
-          "confirmed": {
-            "type": "boolean"
-          },
-          "months": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "request_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "resumes_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "starts_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "required": [
-          "confirmed",
-          "months",
-          "request_id",
-          "resumes_at",
-          "starts_at"
-        ],
-        "additionalProperties": false
-      },
-      "PauseResult": {
-        "type": "object",
-        "properties": {
-          "pause": {
-            "$ref": "#/components/schemas/PauseView"
-          }
-        },
-        "required": [
-          "pause"
-        ],
-        "additionalProperties": false
-      },
-      "ResumeOptions": {
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "state": {
-                "type": "string",
-                "const": "unavailable"
-              }
-            },
-            "required": [
-              "state"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "next_renewal": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "original_resume": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "pause_id": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "state": {
-                "type": "string",
-                "const": "ready",
-                "description": "An offer to resume at the next renewal."
-              }
-            },
-            "required": [
-              "next_renewal",
-              "original_resume",
-              "pause_id",
-              "state"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "confirmed": {
-                "type": "boolean"
-              },
-              "next_renewal": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "pause_id": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "request_id": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "state": {
-                "type": "string",
-                "const": "saved",
-                "description": "A resumption already requested."
-              }
-            },
-            "required": [
-              "confirmed",
-              "next_renewal",
-              "pause_id",
-              "request_id",
-              "state"
-            ],
-            "additionalProperties": false
-          }
-        ]
-      },
-      "Resumption": {
-        "type": "object",
-        "properties": {
-          "confirmed": {
-            "type": "boolean"
-          },
-          "next_renewal": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "pause_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "request_id": {
-            "type": "string",
-            "format": "uuid"
-          }
-        },
-        "required": [
-          "confirmed",
-          "next_renewal",
-          "pause_id",
           "request_id"
         ],
         "additionalProperties": false
@@ -4054,6 +7229,563 @@
           "options"
         ],
         "additionalProperties": false
+      },
+      "EventView": {
+        "type": "object",
+        "description": "One event as a donor sees it (E-3).",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "VOLUNTEER",
+              "COMMUNITY",
+              "INVITE_ONLY"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "venue": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ends_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "capacity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of spots; 0 means uncapped."
+          },
+          "spots_left": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int32"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Spots remaining (capacity minus reserved), floored at 0; null when uncapped."
+          },
+          "reservation_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "RESERVED",
+                  "WAITLISTED"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The signed-in donor's own status for this event; null on an anonymous read or no active reservation."
+          },
+          "invitation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "\"Invitation earned at ...\" for an INVITE_ONLY event unlocked by a badge perk (E-5); null otherwise."
+          },
+          "report_issue_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "mailto link to report an issue about this event to DAD (E-10); null when no support email is configured."
+          },
+          "cancelled": {
+            "type": "boolean",
+            "description": "The event was cancelled; it can no longer be reserved and every place was released."
+          },
+          "booking_opens_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When reservations open to everyone; null when they opened at publication."
+          },
+          "early_booking": {
+            "type": "boolean",
+            "description": "True while the signed-in donor, a Team Captain, may reserve before booking opens to everyone (B-3). Always false on the public read."
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "type",
+          "description",
+          "venue",
+          "address",
+          "city",
+          "starts_at",
+          "ends_at",
+          "capacity",
+          "spots_left",
+          "reservation_status",
+          "invitation_note",
+          "report_issue_url",
+          "cancelled",
+          "booking_opens_at",
+          "early_booking"
+        ],
+        "additionalProperties": false
+      },
+      "InitiativeSpend": {
+        "type": "object",
+        "properties": {
+          "initiative_id": {
+            "type": "string"
+          },
+          "total_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpendCategory"
+            }
+          }
+        },
+        "required": [
+          "initiative_id",
+          "total_minor",
+          "categories"
+        ],
+        "additionalProperties": false
+      },
+      "SpendCategory": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "category",
+          "amount_minor"
+        ],
+        "additionalProperties": false
+      },
+      "TodayInitiative": {
+        "type": "object",
+        "properties": {
+          "initiative_id": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "The kind of work, e.g. PROGRAM."
+          },
+          "started_on": {
+            "type": "string",
+            "format": "date"
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TodayMetric"
+            }
+          },
+          "distinct_shown": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "initiative_id",
+          "slug",
+          "title",
+          "summary",
+          "region",
+          "location",
+          "type",
+          "started_on",
+          "metrics",
+          "distinct_shown"
+        ],
+        "additionalProperties": false
+      },
+      "TodayMetric": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "USD_CENTS",
+              "PEOPLE",
+              "INITIATIVES",
+              "PARTNERS"
+            ]
+          },
+          "verified_on": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "value",
+          "unit",
+          "verified_on"
+        ],
+        "additionalProperties": false
+      },
+      "CheckInResult": {
+        "type": "object",
+        "description": "The outcome of a QR check-in (E-8).",
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "checked_in": {
+            "type": "boolean"
+          },
+          "already_checked_in": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "event_id",
+          "checked_in",
+          "already_checked_in"
+        ],
+        "additionalProperties": false
+      },
+      "ReservationResult": {
+        "type": "object",
+        "description": "The outcome of a reserve or cancel (E-4).",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "RESERVED",
+              "WAITLISTED",
+              "CANCELLED"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "NetworkSummary": {
+        "type": "object",
+        "description": "The donor's referral-network view (N-1..N-3).",
+        "properties": {
+          "active_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "annualized_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_milestone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetworkMilestone"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null once every referral tier is reached."
+          },
+          "invitees": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkInvitee"
+            }
+          },
+          "anonymous_active": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active referrals who did not opt in to being named; counted but not listed."
+          }
+        },
+        "required": [
+          "active_count",
+          "annualized_minor",
+          "next_milestone",
+          "invitees",
+          "anonymous_active"
+        ],
+        "additionalProperties": false
+      },
+      "NetworkMilestone": {
+        "type": "object",
+        "description": "The next referral tier the donor has not yet reached (N-2).",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "target": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "remaining": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "label",
+          "target",
+          "remaining"
+        ],
+        "additionalProperties": false
+      },
+      "NetworkInvitee": {
+        "type": "object",
+        "description": "One opted-in person the donor brought in (N-3).",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "First name + last initial, as the invitee chose to display it."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the invitee is still giving."
+          }
+        },
+        "required": [
+          "name",
+          "active"
+        ],
+        "additionalProperties": false
+      },
+      "BadgeList": {
+        "type": "object",
+        "properties": {
+          "badges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BadgeView"
+            }
+          }
+        },
+        "required": [
+          "badges"
+        ],
+        "additionalProperties": false
+      },
+      "BadgeView": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string",
+            "description": "How the badge is earned, shown on an unearned badge (B-1)."
+          },
+          "perk": {
+            "type": "string"
+          },
+          "earned": {
+            "type": "boolean"
+          },
+          "earned_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "artwork": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "title",
+          "rule",
+          "perk",
+          "earned",
+          "artwork"
+        ],
+        "additionalProperties": false
+      },
+      "TeamLeaderboardRow": {
+        "type": "object",
+        "properties": {
+          "team_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "active_givers": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "annualized_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "avg_streak_days": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "volunteer_minutes": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "team_id",
+          "name",
+          "active_givers",
+          "annualized_minor",
+          "avg_streak_days",
+          "volunteer_minutes"
+        ],
+        "additionalProperties": false
+      },
+      "PublicInitiative": {
+        "type": "object",
+        "description": "A published initiative.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "COMPLETE"
+            ]
+          },
+          "started_on": {
+            "type": "string",
+            "format": "date",
+            "description": "When it started, or is planned to start when in the future"
+          },
+          "partner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The approved partner's name, or null when none is linked"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "summary",
+          "type",
+          "location",
+          "status",
+          "started_on",
+          "partner"
+        ],
+        "additionalProperties": false
+      },
+      "ApplicationStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "organization",
+          "status"
+        ],
+        "properties": {
+          "organization": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "APPROVED",
+              "REJECTED"
+            ]
+          }
+        }
       }
     },
     "parameters": {
