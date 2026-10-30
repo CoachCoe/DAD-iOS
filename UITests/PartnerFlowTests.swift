@@ -5,7 +5,7 @@ import XCTest
 /// cases: verified-or-hidden Overview figures (§7.3), admin-vs-viewer capability gating (§7.2),
 /// the <5 suppression path (EM-3 — exercised in unit tests; here the unsuppressed preview shows
 /// figures), and the pending-approval gate (P-2).
-final class PartnerFlowTests: XCTestCase {
+@MainActor final class PartnerFlowTests: XCTestCase {
     func testAdminPortalRendersVerifiedFiguresAndCanManage() {
         let app = XCUIApplication()
         app.launchArguments = ["--preview-partner"]

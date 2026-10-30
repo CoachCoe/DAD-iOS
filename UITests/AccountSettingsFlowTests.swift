@@ -4,7 +4,7 @@ import XCTest
 /// account-deletion flow iOS was missing. Launches straight into the signed-in settings screen
 /// via a dedicated preview arg. Covers: renders profile + toggles, the delete-account confirm
 /// gate stays disabled until the exact word is typed (§6.12), and sign-out leaves the shell.
-final class AccountSettingsFlowTests: XCTestCase {
+@MainActor final class AccountSettingsFlowTests: XCTestCase {
     func testSettingsRendersProfileAndToggles() {
         let app = XCUIApplication()
         app.launchArguments = ["--preview-settings"]
