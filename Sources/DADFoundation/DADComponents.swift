@@ -72,15 +72,22 @@ public extension View {
 public struct DADButtonStyle: ButtonStyle {
     public enum Kind { case primary, secondary }
     private let kind: Kind
+    private let fillsWidth: Bool
     @Environment(\.colorScheme) private var scheme
-    public init(_ kind: Kind = .primary) { self.kind = kind }
+    @Environment(\.isEnabled) private var isEnabled
+    /// `fillsWidth: false` sizes the button to its label, for actions that sit inside a row.
+    public init(_ kind: Kind = .primary, fillsWidth: Bool = true) {
+        self.kind = kind
+        self.fillsWidth = fillsWidth
+    }
 
     public func makeBody(configuration: Configuration) -> some View {
         let background: Color
         let foreground: Color
         switch kind {
         case .primary:
-            background = .dad("brand")
+            // `brand` (#ff4a22) under paper text is 3.19:1, below AA 4.5:1; `brand-ink` is 5.04:1.
+            background = .dad("brand-ink")
             foreground = .dad("paper")
         case .secondary:
             background = .dad(scheme == .dark ? "ink" : "card")
@@ -89,7 +96,7 @@ public struct DADButtonStyle: ButtonStyle {
         return configuration.label
             .font(.body.weight(.semibold))
             .frame(minHeight: 44)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: fillsWidth ? .infinity : nil)
             .padding(.horizontal, .dadSpace("4"))
             .background(background.opacity(configuration.isPressed ? 0.82 : 1))
             .foregroundStyle(foreground)
@@ -102,6 +109,7 @@ public struct DADButtonStyle: ButtonStyle {
                 }
             }
             .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.45)
     }
 }
 
