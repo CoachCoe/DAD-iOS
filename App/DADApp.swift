@@ -362,6 +362,9 @@ private actor PreviewGiving: GivingService {
     func beginPayment() async throws -> PaymentPath {
         .webCheckoutHandoff(URL(string: "https://give.example.org/setup")!)
     }
+    func amountOffer() async throws -> AmountOffer? { nil }
+    func paymentMethod() async throws -> PaymentMethodState { PaymentMethodState(kind: .none) }
+    func beginGift() async throws -> PaymentPath { .webCheckoutHandoff(URL(string: "https://give.example.org/donate")!) }
 }
 #endif
 

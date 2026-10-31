@@ -15,6 +15,12 @@ public enum AccountError: Error, Sendable, Equatable {
     /// 401 on set-password whose body says the credential was wrong: NOT an expired session, so it
     /// must never trigger the refresh-retry or end the local session.
     case passwordIncorrect
+    /// 403 on a giving command: giving is not available for this account.
+    case forbidden
+    /// 409 on a giving command: billing changed since the screen last read it; refresh, then retry.
+    case conflict
+    /// 503 carrying a `code`: this deployment has deliberately not configured payments. Not transient.
+    case paymentsUnavailable
 }
 
 public struct Credentials: Codable, Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
