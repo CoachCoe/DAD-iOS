@@ -23,6 +23,26 @@ const strip = (node) => {
 };
 strip(spec.components.schemas);
 if (stripped < 1) throw new Error("Subscription.status enum not found");
+// Event enums are open sets too (DAD-Main documents that clients must tolerate unknown values): the
+// kind, the donor's reservation status and the reservation result status decode as plain strings.
+let eventEnums = 0;
+for (const [schema, field] of [["EventView", "type"], ["EventView", "reservation_status"], ["ReservationResult", "status"]]) {
+  const property = spec.components.schemas[schema]?.properties?.[field];
+  if (!property?.enum) throw new Error(`${schema}.${field} enum not found`);
+  delete property.enum;
+  eventEnums += 1;
+}
+const stripEventCopies = (node) => {
+  if (Array.isArray(node)) return node.forEach(stripEventCopies);
+  if (node === null || typeof node !== "object") return;
+  for (const field of ["reservation_status"]) {
+    const property = node.properties?.[field];
+    if (property?.enum?.includes("WAITLISTED")) delete property.enum;
+  }
+  Object.values(node).forEach(stripEventCopies);
+};
+stripEventCopies(spec.components.schemas);
+if (eventEnums < 3) throw new Error("Event enums not found");
 await writeFile("Sources/DADFoundation/openapi.json", `${JSON.stringify(spec, null, 2)}\n`);
 const config = await readFile("Sources/DADFoundation/openapi-generator-config.yaml", "utf8");
 if (!config.includes("operations:")) throw new Error("Client scope must be explicit");

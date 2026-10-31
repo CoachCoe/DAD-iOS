@@ -1,7 +1,7 @@
 {
-  "version": "2.6.1",
+  "version": "2.7.0",
   "source_repository": "CoachCoe/DAD-Main",
-  "source_revision": "3e5fb56fab8198103de3b8ed2b74b1ad0c9c4821",
-  "release_tag": "mobile-foundation-v2.6.1",
-  "manifest_sha256": "a2dcdce6f808c498130fd677c979ccecbe2fc03cc226ab7f9f447e3472fbcda1"
+  "source_revision": "d0b4d2be84ea5f37052b5cda556ea033cfe851ce",
+  "release_tag": "mobile-foundation-v2.7.0",
+  "manifest_sha256": "88a149ef2b9ec490a48cb4087a86c62604274aeb61c5c83365538e625bdf6bfd"
 }
