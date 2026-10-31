@@ -4,8 +4,9 @@ import OpenAPIRuntime
 /// Real donor-home reads over the generated client: `dashboard`, `todayInitiative`, `gifts`, `receipt`
 /// and `annualSummary`, each authorized through the session (single refresh + one retry on 401).
 ///
-/// Status mapping (the contract documents no 429 or 403 on these GETs, but the server's global
-/// rate limiter and app guard can still answer them): 401 -> signed out; 429 -> rate limited;
+/// Status mapping (contract 2.5.0 documents 429 on these GETs as `.tooManyRequests`; the body is not
+/// guaranteed and `Retry-After` may be absent, so neither is read; 403 from the app guard is not
+/// documented and falls to unavailable): 401 -> signed out; 429 -> rate limited;
 /// 404 on today's initiative -> nil (nothing in rotation); 422/404/409 on a gift read -> invalid
 /// input / unavailable; everything else -> unavailable. A body that does not decode is unavailable.
 public struct WireDashboard: DashboardService {
@@ -28,6 +29,7 @@ public struct WireDashboard: DashboardService {
                 case .case2(let value): return .ready(Self.map(value))
                 }
             case .unauthorized: throw AccountError.signedOut
+            case .tooManyRequests: throw AccountError.rateLimited
             case .undocumented(let status, _): throw Self.undocumented(status)
             default: throw AccountError.unavailable
             }
@@ -48,6 +50,7 @@ public struct WireDashboard: DashboardService {
                     })
             case .notFound: return nil
             case .unauthorized: throw AccountError.signedOut
+            case .tooManyRequests: throw AccountError.rateLimited
             case .undocumented(let status, _): throw Self.undocumented(status)
             default: throw AccountError.unavailable
             }
@@ -69,6 +72,7 @@ public struct WireDashboard: DashboardService {
                     nextOffset: page.next_offset.map { Int(clamping: $0) })
             case .unauthorized: throw AccountError.signedOut
             case .unprocessableContent: throw AccountError.invalidInput
+            case .tooManyRequests: throw AccountError.rateLimited
             case .undocumented(let status, _): throw Self.undocumented(status)
             default: throw AccountError.unavailable
             }
@@ -86,6 +90,7 @@ public struct WireDashboard: DashboardService {
             case .notFound: throw AccountError.invalidInput
             case .unauthorized: throw AccountError.signedOut
             case .unprocessableContent: throw AccountError.invalidInput
+            case .tooManyRequests: throw AccountError.rateLimited
             case .undocumented(let status, _): throw Self.undocumented(status)
             default: throw AccountError.unavailable
             }
@@ -105,6 +110,7 @@ public struct WireDashboard: DashboardService {
             case .notFound: throw AccountError.invalidInput
             case .unauthorized: throw AccountError.signedOut
             case .unprocessableContent: throw AccountError.invalidInput
+            case .tooManyRequests: throw AccountError.rateLimited
             case .undocumented(let status, _): throw Self.undocumented(status)
             default: throw AccountError.unavailable
             }

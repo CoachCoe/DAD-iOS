@@ -25,6 +25,7 @@ public struct WireAccountSettings: AccountSettingsService {
             switch try await client.profile(.init()) {
             case .ok(let response): return try Self.snapshot(response.body.json)
             case .unauthorized: throw AccountError.signedOut
+            case .tooManyRequests: throw AccountError.rateLimited
             default: throw AccountError.unavailable
             }
         }
