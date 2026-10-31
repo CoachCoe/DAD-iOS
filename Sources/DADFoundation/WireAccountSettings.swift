@@ -33,14 +33,7 @@ public struct WireAccountSettings: AccountSettingsService {
     }
 
     public func savePreferences(_ p: AccountPreferences) async throws -> AccountSettingsSnapshot {
-        let body = Operations.savePreferences.Input.Body.jsonPayload(
-            version: Int32(clamping: p.version), referral_emails: p.referralEmails, marketing_emails: p.marketingEmails,
-            push_referral_converted: p.pushReferralConverted, push_streak_at_risk: p.pushStreakAtRisk,
-            push_streak_milestone: p.pushStreakMilestone, push_streak_lapsed: p.pushStreakLapsed,
-            push_badge_earned: p.pushBadgeEarned, push_event_nearby: p.pushEventNearby,
-            push_event_reminder: p.pushEventReminder, push_event_promoted: p.pushEventPromoted,
-            rankings_opted_out: p.rankingsOptedOut, network_visible: p.networkVisible, volunteer: p.volunteer,
-            push_gift_processed: p.pushGiftProcessed)
+        let body = Self.preferencesBody(p)
         return try await product.perform { client in
             switch try await client.savePreferences(.init(body: .json(body))) {
             case .ok(let response): return try Self.snapshot(response.body.json)
@@ -80,7 +73,18 @@ public struct WireAccountSettings: AccountSettingsService {
         }
     }
 
-    private static func snapshot(_ p: Components.Schemas.Profile) throws -> AccountSettingsSnapshot {
+    static func preferencesBody(_ p: AccountPreferences) -> Operations.savePreferences.Input.Body.jsonPayload {
+        .init(
+            version: Int32(clamping: p.version), referral_emails: p.referralEmails, marketing_emails: p.marketingEmails,
+            push_referral_converted: p.pushReferralConverted, push_streak_at_risk: p.pushStreakAtRisk,
+            push_streak_milestone: p.pushStreakMilestone, push_streak_lapsed: p.pushStreakLapsed,
+            push_badge_earned: p.pushBadgeEarned, push_event_nearby: p.pushEventNearby,
+            push_event_reminder: p.pushEventReminder, push_event_promoted: p.pushEventPromoted,
+            rankings_opted_out: p.rankingsOptedOut, network_visible: p.networkVisible, volunteer: p.volunteer,
+            push_gift_processed: p.pushGiftProcessed)
+    }
+
+    static func snapshot(_ p: Components.Schemas.Profile) throws -> AccountSettingsSnapshot {
         AccountSettingsSnapshot(
             profile: AccountProfileSummary(email: p.email, accountRole: p.account_role.rawValue, zip: p.zip, city: p.city, phone: p.phone),
             preferences: AccountPreferences(

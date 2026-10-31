@@ -66,6 +66,7 @@ private final class AccountModel {
     private(set) var givingKit: GivingKit?
     /// Events (list, reserve, cancel, check-in, calendar): real `WireEvents` or the scripted stub; nil in previews.
     private(set) var eventsService: (any EventsService)?
+    private(set) var engagementService: (any EngagementService)?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -114,8 +115,10 @@ private final class AccountModel {
                     : launchFlag("--stub-gift-active") ? .active : .none
                 let eventScenario: StubBackend.EventsScenario = launchFlag("--stub-events-ungated") ? .ungated
                     : launchFlag("--stub-events-fail-first") ? .failFirst : .standard
+                let engagementScenario: StubBackend.EngagementScenario = launchFlag("--stub-rankings-fail-toggle") ? .rankingToggleFails
+                    : launchFlag("--stub-no-public-name") ? .noPublicName : launchFlag("--stub-badges-down") ? .badgesDown : .standard
                 let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"), scenario: scenario, gift: gift,
-                                                    events: eventScenario,
+                                                    events: eventScenario, engagement: engagementScenario,
                                                     signedIn: launchFlag("--stub-signed-in"),
                                                     onLocalWipe: { DefaultsAttributionStore().clear() })
                 session = services.session
@@ -125,6 +128,7 @@ private final class AccountModel {
                 passwordSettings = services.passwords
                 dashboardService = services.dashboard
                 eventsService = services.events
+                engagementService = services.engagement
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 state = .loading
             } catch { session = nil; state = .unavailable }
@@ -178,6 +182,7 @@ private final class AccountModel {
                 dashboardService = try WireDashboard(origin: origin, session: built)
                 givingKit = GivingKit(service: try WireGiving(origin: origin, session: built))
                 eventsService = try WireEvents(origin: origin, session: built)
+                engagementService = try WireEngagement(origin: origin, session: built)
                 session = built
             }
         } catch {
@@ -266,6 +271,7 @@ private struct DonorLanding: View {
     var dashboard: (any DashboardService)?
     var giving: GivingKit?
     var events: (any EventsService)?
+    var engagement: (any EngagementService)?
     var onSignedOut: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -296,7 +302,7 @@ private struct DonorLanding: View {
                 Button("Settings", action: onSettings)
                     .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
             }
-            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, onSignedOut: onSignedOut) }
+            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, engagement: engagement, onSignedOut: onSignedOut) }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
@@ -390,7 +396,7 @@ private actor PreviewEngagement: EngagementService {
 
     private func currentRanking() -> RankingStanding {
         optedIn
-            ? RankingStanding(nationalPercentile: 92, city: "Austin", cityRank: 4)
+            ? RankingStanding(nationalPercentile: 2, city: "Austin", cityRank: 4)
             : RankingStanding(nationalPercentile: nil, city: nil, cityRank: nil, rankingsOptedOut: true)
     }
 
@@ -398,19 +404,27 @@ private actor PreviewEngagement: EngagementService {
         EngagementSnapshot(
             impact: ImpactTotals(givenMinor: 124_000, initiativesFunded: 3, eventsVolunteered: 2),
             badges: BadgeCollection(badges: [
-                Badge(code: "F", title: "Founding Donor", rule: "Start a monthly gift before January 2027, or join the website waitlist", perk: "Founding Donor Dinner and founding events", earned: true),
-                Badge(code: "7", title: "One Week", rule: "Reach a 7-day streak", perk: "—", earned: true),
-                Badge(code: "1K", title: "1,000 Days", rule: "Reach a 1,000-day streak", perk: "Invite-only milestone events", earned: false),
+                Badge(code: "F", title: "Founding Donor", rule: "Start a monthly gift before January 2027, or join the website waitlist", perk: Badge.perkCopy(forKey: "FOUNDING_EVENTS"), earned: true),
+                Badge(code: "7", title: "One Week", rule: "Reach a 7-day streak", perk: "", earned: true),
+                Badge(code: "1K", title: "1,000 Days", rule: "Reach a 1,000-day streak", perk: Badge.perkCopy(forKey: "MILESTONE_EVENTS"), earned: false),
             ]),
             ranking: currentRanking(),
             network: NetworkSummary(activeCount: 6, annualizedMinor: 72_000, anonymousActive: 2),
-            referral: ReferralInfo(code: "SHAWN42", linkCount: 4, irlCount: 2)
+            referral: ReferralInfo(code: "SHAWN42", linkCount: 4, irlCount: 2,
+                                   conversions: [Conversion(convertedAt: Date().addingTimeInterval(-86_400), kind: .link)])
         )
     }
 
     func setRankingOptIn(_ optIn: Bool) async throws -> RankingStanding {
         optedIn = optIn
         return currentRanking()
+    }
+
+    func choosePublicName(_ name: String) async throws {}
+
+    func initiativeSpend(id: String) async throws -> InitiativeSpendSummary {
+        InitiativeSpendSummary(initiativeID: id, totalMinor: 125_000, slices: [
+            SpendSlice(category: "Food", amountMinor: 90_000), SpendSlice(category: "Delivery", amountMinor: 35_000)])
     }
 }
 #endif
@@ -861,111 +875,6 @@ private struct PasswordSection: View {
     }
 }
 
-/// Engagement home (PRD A-*, I-*, R-*, N-*, B-*, K-*): lifetime impact totals, the badges
-/// grid (earned/locked, state in text not colour), the rankings card with its opt-out toggle,
-/// the referral network rollup, and the invite/IRL entry. Bound to `EngagementModel`.
-private struct EngagementHome: View {
-    @State var model: EngagementModel
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Your impact").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            switch model.phase {
-            case .loading:
-                ProgressView().accessibilityIdentifier("engagement-loading")
-            case let .failed(message):
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(message).foregroundStyle(Color.dad("fail"))
-                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
-                }
-            case .ready:
-                if let snapshot = model.snapshot {
-                    if let error = model.actionError {
-                        Text(error).font(.footnote).foregroundStyle(Color.dad("fail"))
-                            .accessibilityIdentifier("engagement-action-error")
-                    }
-                    content(snapshot)
-                }
-            }
-        }
-        .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("engagement-home")
-        .task { await model.load() }
-    }
-
-    @ViewBuilder private func content(_ snapshot: EngagementSnapshot) -> some View {
-        DADCard {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Lifetime given").font(.footnote).foregroundStyle(.secondary)
-                Text(snapshot.impact.givenLabel).font(.title.bold()).accessibilityIdentifier("impact-given")
-                Text("\(snapshot.impact.initiativesFunded) initiatives · \(snapshot.impact.eventsVolunteered) events")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-
-        // Badges — earned/locked conveyed by text, never colour alone.
-        VStack(alignment: .leading, spacing: 8) {
-            Text(snapshot.badges.summaryLabel).font(.headline).accessibilityIdentifier("badge-summary")
-            ForEach(snapshot.badges.badges) { badge in
-                HStack(spacing: 10) {
-                    Image(systemName: badge.earned ? "checkmark.seal.fill" : "lock.fill")
-                        .foregroundStyle(badge.earned ? Color.dad("brand-ink") : .secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(badge.title).fontWeight(badge.earned ? .semibold : .regular)
-                        Text(badge.earned ? "Earned" : badge.rule).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(badge.accessibilityLabel)
-            }
-        }
-
-        // Rankings — opt-out hides the position entirely (K-2/K-3), never a name list.
-        DADCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Rankings").font(.headline).accessibilityAddTraits(.isHeader)
-                if snapshot.ranking.isOptedOut {
-                    Text("You're not shown in rankings.").font(.footnote).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("ranking-optedout")
-                    Button("Show my ranking") { Task { await model.setRankingOptIn(true) } }
-                        .buttonStyle(DADButtonStyle(.secondary))
-                } else {
-                    if let national = snapshot.ranking.nationalLabel {
-                        Text(national).accessibilityIdentifier("ranking-national")
-                    } else if snapshot.ranking.isNotRankedYet {
-                        Text("Not ranked yet.").font(.footnote).foregroundStyle(.secondary)
-                            .accessibilityIdentifier("ranking-unranked")
-                    }
-                    if let city = snapshot.ranking.cityLabel { Text(city).font(.footnote).foregroundStyle(.secondary) }
-                    Button("Hide my ranking") { Task { await model.setRankingOptIn(false) } }
-                        .buttonStyle(DADButtonStyle(.secondary))
-                }
-            }
-        }
-
-        // Network rollup (opt-in visibility: anonymous invitees counted, never named).
-        DADCard {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Your network").font(.headline).accessibilityAddTraits(.isHeader)
-                Text("\(snapshot.network.activeCount) active · \(snapshot.network.annualizedLabel)")
-                if snapshot.network.hasAnonymous {
-                    Text("\(snapshot.network.anonymousActive) choose to stay anonymous")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-
-        // Invite / IRL (share message + code; full-screen QR + scan live behind the share seam).
-        DADCard {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Invite friends").font(.headline).accessibilityAddTraits(.isHeader)
-                Text("Your code: \(snapshot.referral.code)").accessibilityIdentifier("referral-code")
-                Text("\(snapshot.referral.totalConverted) have joined through you").font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
 /// Sign-in method picker (PRD §5.1). Phone and email + password are always wired; Apple, Google and
 /// passkeys light up only when their build configuration is present (`SignInCapabilities`) and are
 /// otherwise visibly disabled with a plain-text reason. "Create an account" starts email signup (D-2).
@@ -1317,7 +1226,8 @@ struct DADApp: App {
     private var donorLanding: some View {
         DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
                      onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
-                     dashboard: model.dashboardService, giving: model.givingKit, events: model.eventsService, onSignedOut: { Task { await model.load() } })
+                     dashboard: model.dashboardService, giving: model.givingKit, events: model.eventsService,
+                     engagement: model.engagementService, onSignedOut: { Task { await model.load() } })
     }
 
     @ViewBuilder private var partnerRoot: some View {

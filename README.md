@@ -60,9 +60,8 @@ and passkeys (see below). Also wired (P2, donor home reads): the dashboard (`das
 30-day bar and next milestone, rank line, total given, network, referral totals; `preparing` and the
 null/unknown figures are shown as such, never as zero), today's initiative (`todayInitiative`, 404 = nothing
 in rotation), paged gift history (`gifts`, 50 a page, capped at 500 rows in memory) with a per-gift record
-(`receipt`) and the calendar-year total (`annualSummary`). Still on in-memory previews and not wired:
-engagement (badges, rankings opt-out, network, referral),
-the partner portal, push registration and analytics upload. Partner sign-in is not wired yet. Native entry hooks
+(`receipt`) and the calendar-year total (`annualSummary`). Engagement is wired too (see Engagement). Still on
+in-memory previews and not wired: the partner portal, push registration and analytics upload. Partner sign-in is not wired yet. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next
@@ -172,6 +171,27 @@ Real `WireEvents` over the generated client, behind `EventsService`: the list (`
   preference and is not part of this screen.
 - **Test stub.** `--stub-backend --stub-signed-in` serves five scripted events (`--stub-events-ungated`
   hides the invite-only one, `--stub-events-fail-first` fails the first list read).
+
+## Engagement (P5)
+
+Real `WireEngagement` behind `EngagementService`, opened from the donor home ("See your impact"):
+lifetime impact and rank from `dashboard`, the 24-badge grid (`donorBadges`; earned / locked and the perk are
+stated in text, perk gating follows the server catalog codes F / 1K / TC), the referral network
+(`donorNetwork`: invitees by first name and last initial, anonymous count, next milestone), the invite
+(`sharing` + `conversions`) and the rankings choice (`profile` + `savePreferences`, explicit
+`rankings_opted_out`; the card flips at once and reverts with an inline notice if the save fails). Today's
+initiative card opens the spend drill-in (`initiativeSpend`, A-3).
+
+- **Unknown is not zero.** Each section the server did not give shows "can't be shown right now" (or "—"); an
+  unreadable section never becomes an empty grid, a zero or "not ranked".
+- **Rank label.** `national_percentile` is already the top bucket, so 2 reads "Top 2% nationally".
+- **Invite links** are `<DAD_PUBLIC_ORIGIN>/r/<code>` (the route the web app and the router serve), the QR adds
+  `?via=irl` and is drawn locally with CoreImage. With no configured public origin there is no link, never an
+  invented one. A donor with no public name gets a prompt to choose one (`saveSharing`).
+- **Not covered.** The `referralCode` SVG op is unused (the QR is local). Contract enum `Conversion.kind` is
+  generated as an open string (`prepare-client.mjs` fails if it is not found).
+- **Test stub.** `--stub-backend --stub-signed-in` serves badges, network, sharing, conversions and a spend
+  (`--stub-rankings-fail-toggle`, `--stub-no-public-name`, `--stub-badges-down`).
 
 ## Real backend acceptance
 

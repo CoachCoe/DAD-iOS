@@ -14,7 +14,7 @@ public struct Badge: Sendable, Equatable, Hashable, Identifiable {
     public let title: String
     /// How this badge is earned — shown beneath a locked badge so the rule is never colour-only.
     public let rule: String
-    /// What the badge unlocks (perk gating copy), e.g. "invite-only events".
+    /// What the badge unlocks (perk gating copy), e.g. "invite-only events"; empty when it unlocks nothing.
     public let perk: String
     public let earned: Bool
     public let earnedAt: Date?
@@ -30,10 +30,27 @@ public struct Badge: Sendable, Equatable, Hashable, Identifiable {
         self.earnedAt = earnedAt
     }
 
+    public var hasPerk: Bool { !perk.isEmpty }
+
+    /// Perk copy for the server's perk key (PRD B-3). The key is an open set: an unknown, non-empty key still
+    /// says the badge carries a perk rather than hiding it, and an empty key means no perk.
+    public static func perkCopy(forKey key: String) -> String {
+        switch key {
+        case "": return ""
+        case "FOUNDING_EVENTS": return "Invite-only founding events"
+        case "MILESTONE_EVENTS": return "Invite-only milestone events"
+        case "TEAM_CAPTAIN": return "Invite-only events, a DAD merch item, 48-hour early event booking and opt-in name listing on initiative pages"
+        default: return "Unlocks a member perk"
+        }
+    }
+
     /// A text-only statement of state, so the grid conveys earned/locked without colour.
     public var accessibilityLabel: String {
         earned ? "\(title), earned" : "\(title), locked. \(rule)"
     }
+
+    /// The state statement plus the perk, for the grid row that reads as one element.
+    public var accessibilitySummary: String { hasPerk ? "\(accessibilityLabel). Perk: \(perk)" : accessibilityLabel }
 
     /// Perk gating (B-4): these three badges unlock invite-only events. Kept as a rule on the
     /// domain, not scattered in the UI, so the gate is testable.
@@ -82,11 +99,12 @@ public struct RankingStanding: Sendable, Equatable {
     /// Opted in but the server has no standing for them yet (not the same as opted out).
     public var isNotRankedYet: Bool { !rankingsOptedOut && nationalPercentile == nil }
 
-    /// "Top 5% nationally" — only when a percentile exists. Percentile is the *top* share,
-    /// so an 95th-percentile donor is "Top 5%".
+    /// "Top 2% nationally" — only when a percentile exists. The server's `national_percentile` is already
+    /// the *top* bucket (1 = top 1%, 2 = top 2%), so it is shown as is, never as `100 - p`. Clamped to
+    /// 1...100 so a stray value cannot read "Top 0%" or "Top -3%".
     public var nationalLabel: String? {
         guard let p = nationalPercentile else { return nil }
-        return "Top \(max(1, 100 - p))% nationally"
+        return "Top \(min(100, max(1, p)))% nationally"
     }
 
     /// "#3 in Austin" — only when both a city and a rank exist.
@@ -133,47 +151,114 @@ public struct SpendSlice: Sendable, Equatable, Identifiable {
 
 // MARK: - Network (N-1..N-3)
 
+/// One opted-in person the donor brought in (N-3): first name and last initial, and whether they still give.
+public struct NetworkInvitee: Sendable, Equatable, Hashable, Identifiable {
+    public let name: String
+    public let active: Bool
+    public var id: String { name }
+    public init(name: String, active: Bool) { self.name = name; self.active = active }
+    public var statusLabel: String { active ? "Active" : "Not giving now" }
+}
+
+/// Progress toward the next network tier (N-2), e.g. "8 more to unlock Team Captain".
+public struct NetworkMilestone: Sendable, Equatable {
+    public let label: String
+    public let target: Int
+    public let remaining: Int
+    public init(label: String, target: Int, remaining: Int) { self.label = label; self.target = target; self.remaining = remaining }
+    public var progressLabel: String { "\(remaining) more to reach \(label)" }
+}
+
 /// The donor's referral network rollup. Opt-in visibility (N-3): `anonymousActive` are the
 /// invitees who did not opt into being shown, counted but never named.
 public struct NetworkSummary: Sendable, Equatable {
     public let activeCount: Int
     public let annualizedMinor: Int
     public let anonymousActive: Int
-    public init(activeCount: Int, annualizedMinor: Int, anonymousActive: Int) {
+    public let invitees: [NetworkInvitee]
+    public let nextMilestone: NetworkMilestone?
+    public init(activeCount: Int, annualizedMinor: Int, anonymousActive: Int, invitees: [NetworkInvitee] = [],
+                nextMilestone: NetworkMilestone? = nil) {
         self.activeCount = activeCount
         self.annualizedMinor = annualizedMinor
         self.anonymousActive = anonymousActive
+        self.invitees = invitees
+        self.nextMilestone = nextMilestone
     }
     public var annualizedLabel: String { "\(formatUSDMinor(annualizedMinor))/yr" }
     public var hasAnonymous: Bool { anonymousActive > 0 }
 }
 
+/// How a referral reached the donor's first gift.
+public enum ConversionKind: Sendable, Equatable {
+    case link, irl
+    /// A channel this build does not know (the server's set is open).
+    case other
+    public init(wire: String) {
+        switch wire.uppercased() {
+        case "LINK": self = .link
+        case "IRL": self = .irl
+        default: self = .other
+        }
+    }
+    public var label: String {
+        switch self {
+        case .link: return "Invite link"
+        case .irl: return "In person"
+        case .other: return "Invite"
+        }
+    }
+}
+
+/// A referral's first gift (R-3). It carries nothing about the referred donor.
+public struct Conversion: Sendable, Equatable, Identifiable {
+    public let convertedAt: Date
+    public let kind: ConversionKind
+    public var id: String { "\(convertedAt.timeIntervalSince1970)-\(kind.label)" }
+    public init(convertedAt: Date, kind: ConversionKind) { self.convertedAt = convertedAt; self.kind = kind }
+}
+
 // MARK: - Referral / IRL (R-1..R-4)
 
 /// The data behind the invite + IRL screens. Splits link vs. in-real-life attributed giving
-/// and builds the invite URL + QR payload a donor shares.
+/// and builds the invite URL + QR payload a donor shares. The counts and the conversions list are nil
+/// when the server did not give them: unknown is never shown as zero.
 public struct ReferralInfo: Sendable, Equatable {
     public let code: String
-    public let linkCount: Int
-    public let irlCount: Int
+    public let linkCount: Int?
+    public let irlCount: Int?
+    /// Newest first, at most 20 (the server's page); nil when that read failed.
+    public let conversions: [Conversion]?
+    public let hasMoreConversions: Bool
 
-    public init(code: String, linkCount: Int, irlCount: Int) {
+    public init(code: String, linkCount: Int?, irlCount: Int?, conversions: [Conversion]? = nil, hasMoreConversions: Bool = false) {
         self.code = code
         self.linkCount = linkCount
         self.irlCount = irlCount
+        self.conversions = conversions
+        self.hasMoreConversions = hasMoreConversions
     }
 
-    public var totalConverted: Int { linkCount + irlCount }
+    /// Nil unless both counts are known.
+    public var totalConverted: Int? {
+        guard let linkCount, let irlCount else { return nil }
+        return linkCount + irlCount
+    }
 
-    /// The shareable invite URL carrying this donor's code (R-1). The host is the configured
-    /// public origin (`DAD_PUBLIC_ORIGIN`), the same one the deep-link router trusts, so the QR
-    /// and the router agree. Nil when no valid origin is configured.
-    public func inviteURL(host: String? = PublicOrigin.configured()) -> URL? {
-        guard let host else { return nil }
-        var components = URLComponents(string: host)
-        components?.path = "/join"
-        components?.queryItems = [URLQueryItem(name: "ref", value: code)]
-        return components?.url
+    /// The shareable invite URL carrying this donor's code (R-1): `<public origin>/r/<code>`, the
+    /// referral route the web app and the deep-link router (`links.json` `referral_prefix`) serve. The
+    /// host is the configured public origin (`DAD_PUBLIC_ORIGIN`), the same one the router trusts.
+    /// Nil when no valid origin is configured or the code is not a well-formed one.
+    public func inviteURL(host: String? = PublicOrigin.configured()) -> URL? { url(host: host, inPerson: false) }
+
+    /// The in-person (QR) link: the invite URL tagged `via=irl` so a scan is attributed as IRL (R-1, R-4).
+    public func irlURL(host: String? = PublicOrigin.configured()) -> URL? { url(host: host, inPerson: true) }
+
+    private func url(host: String?, inPerson: Bool) -> URL? {
+        guard let host, let safe = Attribution.sanitized(code), var components = URLComponents(string: host) else { return nil }
+        components.path = "/r/\(safe)"
+        components.queryItems = inPerson ? [URLQueryItem(name: "via", value: "irl")] : nil
+        return components.url
     }
 
     /// The prefilled share-sheet message (R-1).
@@ -182,6 +267,17 @@ public struct ReferralInfo: Sendable, Equatable {
         guard let link = inviteURL(host: host)?.absoluteString else { return base }
         return "\(base) \(link)"
     }
+}
+
+/// Spend by category for one initiative (A-3): totals only (PRD §5.2), never a per-donor line-item ledger.
+public struct InitiativeSpendSummary: Sendable, Equatable {
+    public let initiativeID: String
+    public let totalMinor: Int
+    public let slices: [SpendSlice]
+    public init(initiativeID: String, totalMinor: Int, slices: [SpendSlice]) {
+        self.initiativeID = initiativeID; self.totalMinor = totalMinor; self.slices = slices
+    }
+    public var totalLabel: String { formatUSDMinor(totalMinor) }
 }
 
 /// The app's configured public HTTPS origin (Info.plist `DADPublicOrigin`, from the
@@ -228,12 +324,15 @@ public struct QRPayload: Sendable, Equatable {
         return QRPayload(trimmed)
     }
 
-    /// Extract the `ref` code from a scanned invite URL (R-4: scanning another's IRL code
-    /// attributes to them). Returns nil when the scan is not a DAD invite link.
+    /// Extract the referral code from a scanned invite URL (R-4: scanning another's IRL code
+    /// attributes to them): `/r/<code>` (what the app and web share) or a legacy `?ref=<code>`.
+    /// Returns nil when the scan is not a DAD invite link.
     public var referralCode: String? {
-        guard let components = URLComponents(string: payload),
-              let ref = components.queryItems?.first(where: { $0.name == "ref" })?.value else { return nil }
+        guard let components = URLComponents(string: payload) else { return nil }
+        let parts = components.path.split(separator: "/").map(String.init)
         // A scanned QR is untrusted input headed for sign-up attribution: accept only a well-formed code.
+        if parts.count == 2, parts[0] == "r" { return Attribution.sanitized(parts[1]) }
+        guard let ref = components.queryItems?.first(where: { $0.name == "ref" })?.value else { return nil }
         return Attribution.sanitized(ref)
     }
 }

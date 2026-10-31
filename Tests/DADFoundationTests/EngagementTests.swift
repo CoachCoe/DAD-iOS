@@ -76,9 +76,10 @@ final class RankingTests: XCTestCase {
     }
 
     func testPercentileRendersAsTopShare() {
+        // The server's `national_percentile` is already the top bucket (1 = top 1%), so 95 reads "Top 95%".
         let standing = RankingStanding(nationalPercentile: 95, city: "Austin", cityRank: 3)
         XCTAssertFalse(standing.isOptedOut)
-        XCTAssertEqual(standing.nationalLabel, "Top 5% nationally")
+        XCTAssertEqual(standing.nationalLabel, "Top 95% nationally")
         XCTAssertEqual(standing.cityLabel, "#3 in Austin")
     }
 
@@ -105,15 +106,16 @@ final class ReferralQRTests: XCTestCase {
     func testInviteURLAndShareMessageCarryCode() {
         let referral = ReferralInfo(code: "SHAWN42", linkCount: 3, irlCount: 1)
         XCTAssertEqual(referral.totalConverted, 4)
-        XCTAssertEqual(referral.inviteURL()?.absoluteString, "https://dollaraday.org/join?ref=SHAWN42")
-        XCTAssertTrue(referral.shareMessage().contains("ref=SHAWN42"))
+        XCTAssertEqual(referral.inviteURL()?.absoluteString, "https://dollaraday.org/r/SHAWN42")
+        XCTAssertEqual(referral.irlURL()?.absoluteString, "https://dollaraday.org/r/SHAWN42?via=irl")
+        XCTAssertTrue(referral.shareMessage().contains("/r/SHAWN42"))
     }
 
     func testInviteURLUsesTheInjectedOrigin() {
         let referral = ReferralInfo(code: "SHAWN42", linkCount: 0, irlCount: 0)
         XCTAssertEqual(referral.inviteURL(host: "https://staging.example.org")?.absoluteString,
-                       "https://staging.example.org/join?ref=SHAWN42")
-        XCTAssertTrue(referral.shareMessage(host: "https://staging.example.org").hasSuffix("https://staging.example.org/join?ref=SHAWN42"))
+                       "https://staging.example.org/r/SHAWN42")
+        XCTAssertTrue(referral.shareMessage(host: "https://staging.example.org").hasSuffix("https://staging.example.org/r/SHAWN42"))
         XCTAssertNil(referral.inviteURL(host: nil))
         XCTAssertFalse(referral.shareMessage(host: nil).contains("http"))
     }
@@ -175,6 +177,14 @@ private struct StubEngagementService: EngagementService {
         if let optInError { throw optInError }
         return optInResult
     }
+    var nameError: Error?
+    var spendResult: InitiativeSpendSummary = InitiativeSpendSummary(initiativeID: "i", totalMinor: 0, slices: [])
+    var spendError: Error?
+    func choosePublicName(_ name: String) async throws { if let nameError { throw nameError } }
+    func initiativeSpend(id: String) async throws -> InitiativeSpendSummary {
+        if let spendError { throw spendError }
+        return spendResult
+    }
 }
 
 private func sampleSnapshot(ranking: RankingStanding) -> EngagementSnapshot {
@@ -193,8 +203,8 @@ final class EngagementModelTests: XCTestCase {
         let model = EngagementModel(service: StubEngagementService(snapshotResult: sampleSnapshot(ranking: RankingStanding(nationalPercentile: 90, city: "Austin", cityRank: 5))))
         await model.load()
         XCTAssertEqual(model.phase, .ready)
-        XCTAssertEqual(model.snapshot?.badges.earnedCount, 1)
-        XCTAssertEqual(model.snapshot?.ranking.nationalLabel, "Top 10% nationally")
+        XCTAssertEqual(model.snapshot?.badges?.earnedCount, 1)
+        XCTAssertEqual(model.snapshot?.ranking?.nationalLabel, "Top 90% nationally")
     }
 
     func testLoadFailureSurfacesSignedOut() async {
@@ -210,9 +220,9 @@ final class EngagementModelTests: XCTestCase {
         )
         let model = EngagementModel(service: service)
         await model.load()
-        XCTAssertFalse(model.snapshot!.ranking.isOptedOut)
+        XCTAssertEqual(model.snapshot?.ranking?.isOptedOut, false)
         await model.setRankingOptIn(false)
-        XCTAssertTrue(model.snapshot!.ranking.isOptedOut) // self hidden
+        XCTAssertEqual(model.snapshot?.ranking?.isOptedOut, true) // self hidden
         XCTAssertEqual(model.phase, .ready)
     }
 

@@ -20,6 +20,15 @@ struct DonorHomeView: View {
     private let service: any DashboardService
     private let giving: GivingKit?
     private let events: (any EventsService)?
+    private let engagement: (any EngagementService)?
+    @State private var showEngagement: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--stub-open-engagement")   // screenshot/UITest aid, DEBUG only
+        #else
+        false
+        #endif
+    }()
+    @State private var spendTarget: SpendTarget?
     @State private var showEvents: Bool = {
         #if DEBUG
         ProcessInfo.processInfo.arguments.contains("--stub-open-events")   // screenshot/UITest aid, DEBUG only
@@ -37,10 +46,12 @@ struct DonorHomeView: View {
     }()
     @State private var giftModel: GivingModel?
 
-    init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil, onSignedOut: @escaping () -> Void) {
+    init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil,
+         engagement: (any EngagementService)? = nil, onSignedOut: @escaping () -> Void) {
         self.service = service
         self.giving = giving
         self.events = events
+        self.engagement = engagement
         self.onSignedOut = onSignedOut
         _model = State(initialValue: DashboardModel(service: service))
         _giftModel = State(initialValue: giving?.makeModel())
@@ -71,8 +82,19 @@ struct DonorHomeView: View {
             case .ready(.ready(let dashboard)):
                 DashboardCards(dashboard: dashboard)
             }
-            InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } })
+            InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } },
+                           onSpend: engagement == nil ? nil : { id, title in spendTarget = SpendTarget(id: id, title: title) })
             if let giftModel { GiftSummaryCard(model: giftModel, onManage: { showGift = true }) }
+            if engagement != nil {
+                DADCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Badges, rankings & network").font(.headline).accessibilityAddTraits(.isHeader)
+                        Text("Your badges, standing, referral network and invite link.").font(.footnote)
+                        Button("See your impact") { showEngagement = true }
+                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-engagement")
+                    }
+                }.accessibilityElement(children: .contain).accessibilityIdentifier("engagement-card")
+            }
             if events != nil {
                 DADCard {
                     VStack(alignment: .leading, spacing: 8) {
@@ -97,6 +119,18 @@ struct DonorHomeView: View {
                           onSignedOut: { showGift = false; onSignedOut() })
             }
         }
+        .sheet(isPresented: $showEngagement) {
+            if let engagement {
+                EngagementHome(model: EngagementModel(service: engagement), onClose: { showEngagement = false },
+                               onSignedOut: { showEngagement = false; onSignedOut() })
+            }
+        }
+        .sheet(item: $spendTarget) { target in
+            if let engagement {
+                InitiativeSpendScreen(model: InitiativeSpendModel(service: engagement, initiativeID: target.id), title: target.title,
+                                      onClose: { spendTarget = nil }, onSignedOut: { spendTarget = nil; onSignedOut() })
+            }
+        }
         .sheet(isPresented: $showEvents) {
             if let events {
                 EventsScreen(model: EventsModel(service: events), service: events, onClose: { showEvents = false },
@@ -108,6 +142,8 @@ struct DonorHomeView: View {
         }
     }
 }
+
+private struct SpendTarget: Identifiable { let id: String; let title: String }
 
 /// The donor's monthly gift at a glance (G-7..G-9); "Manage gift" opens the full gift screen. It reads
 /// the same `GivingModel` as that screen, so a cancel or change shows here the moment it succeeds.
@@ -222,6 +258,8 @@ private struct DashboardCards: View {
 private struct InitiativeCard: View {
     let phase: DashboardModel.InitiativePhase
     let onRetry: () -> Void
+    /// A-3: opens the initiative's spend by category; nil when the engagement service is not wired.
+    var onSpend: ((String, String) -> Void)?
 
     var body: some View {
         DADCard {
@@ -250,6 +288,10 @@ private struct InitiativeCard: View {
                     }
                     Text(TodayInitiative.attributionNote).font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("initiative-note")
+                    if let onSpend {
+                        Button("See every dollar this initiative has spent") { onSpend(initiative.id, initiative.title) }
+                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-spend")
+                    }
                 }
             }
         }.accessibilityElement(children: .contain).accessibilityIdentifier("initiative-card")
