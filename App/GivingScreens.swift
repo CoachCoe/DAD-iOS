@@ -127,6 +127,7 @@ struct GiftScreen: View {
     @ViewBuilder private var loaded: some View {
         status
         if case .active = model.recurring { stepper }
+        if case .none = model.recurring { startSection }
         if model.recurring.subscriptionID != nil { paymentSection }
         feedback
         if case .active = model.recurring { cancelSection }
@@ -142,8 +143,6 @@ struct GiftScreen: View {
                     Text("You don’t have a monthly gift yet.").font(.headline).accessibilityIdentifier("gift-none")
                     Text("You’ll finish on a secure page hosted by our payment provider. This app never handles your card details.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Button("Start a monthly gift") { Task { await model.startGift() } }
-                        .buttonStyle(DADButtonStyle(.primary)).disabled(model.isBusy).accessibilityIdentifier("start-gift")
                 }
             }
         case .preparing:
@@ -188,7 +187,28 @@ struct GiftScreen: View {
 
     // MARK: amount
 
+    /// Pick the daily amount, then start the gift: the chosen amount is what checkout is created for.
+    private var startSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            amountCard
+            DADStreakBar(filled: min(model.selection.dailyDollars, 30))
+            Button("Start a monthly gift") { Task { await model.startGift() } }
+                .buttonStyle(DADButtonStyle(.primary)).disabled(model.isBusy).accessibilityIdentifier("start-gift")
+        }
+    }
+
     private var stepper: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            amountCard
+            DADStreakBar(filled: min(model.selection.dailyDollars, 30))
+            Button("Save gift") { Task { await model.applySelection() } }
+                .buttonStyle(DADButtonStyle(.primary))
+                .disabled(model.isBusy)
+                .accessibilityIdentifier("save-gift")
+        }
+    }
+
+    private var amountCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             DADCard {
                 VStack(alignment: .leading, spacing: 12) {
@@ -205,11 +225,6 @@ struct GiftScreen: View {
                     }
                 }
             }
-            DADStreakBar(filled: min(model.selection.dailyDollars, 30))
-            Button("Save gift") { Task { await model.applySelection() } }
-                .buttonStyle(DADButtonStyle(.primary))
-                .disabled(model.isBusy)
-                .accessibilityIdentifier("save-gift")
         }
     }
 

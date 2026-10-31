@@ -32,12 +32,12 @@ public protocol GivingService: Sendable {
     func paymentMethod() async throws -> PaymentMethodState
     /// Begin a payment-method update; returns which path to present.
     func beginPayment() async throws -> PaymentPath
-    /// Begin a new gift through the hosted checkout; returns which path to present.
-    func beginGift() async throws -> PaymentPath
+    /// Begin a new gift of `amountMinor` (integer cents a month) through the hosted checkout.
+    func beginGift(amountMinor: Int) async throws -> PaymentPath
 }
 
 /// A hosted page the app has been asked to show (Stripe-hosted card setup, or the website's
-/// giving page). The app only opens it; it never sees card data.
+/// Stripe Checkout page). The app only opens it; it never sees card data.
 public struct HostedHandoff: Sendable, Equatable, Identifiable {
     public enum Purpose: Sendable, Equatable { case startGift, updatePayment }
     public let id = UUID()
@@ -182,7 +182,8 @@ public final class GivingModel {
             phase = .failed("You already have a gift.")
             return
         }
-        await begin(.startGift) { try await self.service.beginGift() }
+        let amount = selection.monthlyMinor
+        await begin(.startGift) { try await self.service.beginGift(amountMinor: amount) }
     }
 
     /// Update the card through the hosted payment-method page.
@@ -239,8 +240,13 @@ public final class GivingModel {
             }
             phase = .idle
         } catch {
-            if case AccountError.invalidConfiguration = error {
-                phase = .failed("Starting a gift from the app isn’t available in this build yet.")
+            if purpose == .startGift, case AccountError.conflict = error {
+                // A gift or an open checkout already exists (or the key was used for another amount): pull
+                // the server's truth in and say so.
+                await fail(error, rereadOnConflict: true)
+                phase = .failed("You already have a monthly gift or a checkout in progress. We’ve refreshed it; please review.")
+            } else if purpose == .startGift, case AccountError.paymentsUnavailable = error {
+                phase = .failed("Giving isn’t available right now. Please try again later.")
             } else {
                 await fail(error)
             }

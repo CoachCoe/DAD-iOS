@@ -122,11 +122,19 @@ The donor home shows a "Your monthly gift" card; "Manage gift" opens the gift sc
 - **Commands are idempotent.** Each command carries a version 4 `Idempotency-Key`; a retry after a timeout,
   429 or 503 reuses the key, and a success or a definitive refusal (403/409/422) retires it. Buttons are
   disabled while a request is in flight.
-- **Starting a NEW gift is a website handoff, not a server-issued checkout.** Contract 2.5.0 has no native
-  operation that mints a hosted checkout for a signed-in donor (`beginCheckout` is web-only and email-keyed), so
-  "Start a monthly gift" opens `<DADPublicOrigin>/donate`. The chosen amount is not carried over. With no public
-  origin configured the screen says starting a gift is not available in this build yet. A server-issued
-  checkout session (and a return link) needs a DAD-Main operation plus Associated Domains; see the wiring plan.
+- **Starting a gift is native** (contract 2.6.0). The donor picks a daily amount ($1-$30) and "Start a monthly gift"
+  calls `startRecurringCheckout` (`POST /donor/me/recurring/checkout`, bearer plus the native client header,
+  body `{amount_minor}` = the chosen amount, with an `Idempotency-Key` under the same reuse/retire rules as the other
+  commands). The returned Stripe-hosted `url` opens in the same in-app Safari view. Closing it starts the bounded
+  re-read of `GET /donor/me/recurring`; the return page does not prove payment, only the server's state does.
+  409 (gift already active, checkout still open, or key reused for another amount) re-reads and tells the donor;
+  503 with `PAYMENTS_UNCONFIGURED` shows "Giving isn't available right now". There is no `/donate` website fallback.
+- **Return-to-app link (optional).** Checkout returns to `<DONOR_NATIVE_RETURN_ORIGIN>/app/return`. For that link to
+  reopen the app you need Associated Domains (`applinks:<return host>`) and `/app/return` in the
+  apple-app-site-association `components` (see DAD-Main `docs/operations.md`). Without it the donor closes the
+  Safari view and the re-read picks the gift up.
+- **`Subscription.status` is an open set.** The contract enumerates six values but Stripe can also send `paused`,
+  `trialing`, ...; `prepare-client.mjs` strips that enum (like `Problem.code`) so an unknown value decodes as a string.
 - **Account deletion and gifts.** A deletion refused with 409 ("monthly gift still renews / checkout open")
   now offers "Cancel my monthly gift", which opens the real cancel flow; deleting again then goes through.
 - Not covered: pause/resume (not in the contract), Apple Pay in-app (gated on the nonprofit decision), and the

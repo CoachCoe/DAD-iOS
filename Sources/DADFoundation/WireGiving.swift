@@ -30,22 +30,19 @@ final class IdempotencyLedger: @unchecked Sendable {
 /// configured (do not retry); any other 503/413/415/undocumented status or a body that does not
 /// decode -> unavailable. Cancellation propagates untouched so the model keeps its prior state.
 ///
-/// Starting a NEW gift: contract 2.5.0 has no native operation that mints a hosted checkout for a
-/// signed-in donor (`beginCheckout` is web-only, guest, email-keyed). `beginGift` therefore hands off
-/// to the website's giving page on the configured public origin; see the README for the DAD-Main gap.
+/// Starting a NEW gift (contract 2.6.0): `startRecurringCheckout` mints a Stripe-hosted Checkout
+/// session for the signed-in donor and the amount they chose; the app opens the returned `https` url
+/// in the secure browser view and then re-reads `recurring` (the return page does not prove payment).
 public struct WireGiving: GivingService {
     private let product: ProductClient
-    private let publicOrigin: URL?
     private let ledger: IdempotencyLedger
 
-    /// `publicOrigin` is the website origin (`DADPublicOrigin`); without it starting a gift reports
-    /// `invalidConfiguration` and the screen says so, while every other operation still works.
-    public init(origin: URL, session: AccountSession, publicOrigin: URL?) throws {
-        self.init(product: try ProductClient(origin: origin, session: session), publicOrigin: publicOrigin)
+    public init(origin: URL, session: AccountSession) throws {
+        self.init(product: try ProductClient(origin: origin, session: session))
     }
 
-    init(product: ProductClient, publicOrigin: URL?, ledger: IdempotencyLedger = IdempotencyLedger()) {
-        self.product = product; self.publicOrigin = publicOrigin; self.ledger = ledger
+    init(product: ProductClient, ledger: IdempotencyLedger = IdempotencyLedger()) {
+        self.product = product; self.ledger = ledger
     }
 
     public func recurring() async throws -> RecurringState {
@@ -169,10 +166,26 @@ public struct WireGiving: GivingService {
         }
     }
 
-    public func beginGift() async throws -> PaymentPath {
-        guard let publicOrigin, publicOrigin.isBareHTTPSOrigin,
-              let url = URL(string: "/donate", relativeTo: publicOrigin)?.absoluteURL else { throw AccountError.invalidConfiguration }
-        return .webCheckoutHandoff(url)
+    public func beginGift(amountMinor: Int) async throws -> PaymentPath {
+        guard GiftAmount(monthlyMinor: amountMinor) != nil else { throw AccountError.invalidInput }
+        // One key per distinct amount: a retry of the same choice reuses it (the server returns the same
+        // session), a different choice is a different checkout.
+        return try await command("gift-checkout:\(amountMinor)") { key in
+            try await self.call { client -> PaymentPath in
+                let body = Operations.startRecurringCheckout.Input.Body.jsonPayload(amount_minor: Int64(amountMinor))
+                switch try await client.startRecurringCheckout(.init(headers: .init(Idempotency_hyphen_Key: key), body: .json(body))) {
+                case .created(let response): return .webCheckoutHandoff(try Self.hostedURL(try response.body.json.url))
+                case .unauthorized: throw AccountError.signedOut
+                case .forbidden: throw AccountError.forbidden
+                case .conflict: throw AccountError.conflict
+                case .unprocessableContent: throw AccountError.invalidInput
+                case .tooManyRequests: throw AccountError.rateLimited
+                case .serviceUnavailable(let response): throw Self.unavailable(response)
+                case .undocumented(let status, _): throw Self.undocumented(status)
+                default: throw AccountError.unavailable
+                }
+            }
+        }
     }
 
     // MARK: - helpers

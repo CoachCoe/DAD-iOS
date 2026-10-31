@@ -29,11 +29,12 @@ import XCTest
         await model.load()
         XCTAssertEqual(model.recurring, .none)
 
+        model.setDaily(4)
         await model.startGift()
-        XCTAssertEqual(model.handoff?.url, URL(string: "https://stub.invalid/donate"))
+        XCTAssertEqual(model.handoff?.url, URL(string: "https://stub.invalid/pay/checkout"))
         services.completeHandoff(.startGift)
         await model.handoffFinished()
-        XCTAssertEqual(model.recurring.amountMinor, 3000)
+        XCTAssertEqual(model.recurring.amountMinor, 12000, "the gift is for the amount the donor chose")
         XCTAssertEqual(model.notice, "Your gift is set up.")
 
         model.setDaily(10)

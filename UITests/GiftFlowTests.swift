@@ -25,17 +25,22 @@ import XCTest
         XCTAssertEqual(app.staticTexts["gift-summary"].label, "No monthly gift yet.")
         openGift(app)
         XCTAssertTrue(app.staticTexts["gift-none"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["gift-daily"].label, "$1/day")
+        app.buttons["Increase gift"].tap()
+        app.buttons["Increase gift"].tap()
+        XCTAssertEqual(app.staticTexts["gift-daily"].label, "$3/day")
         app.buttons["start-gift"].tap()
 
         XCTAssertTrue(app.otherElements["hosted-page-stub"].waitForExistence(timeout: 10), "the hosted page opens")
         app.buttons["stub-complete"].tap()
         XCTAssertTrue(app.staticTexts["gift-monthly"].waitForExistence(timeout: 20), "the gift appears once the server reflects it")
-        XCTAssertEqual(app.staticTexts["gift-monthly"].label, "$30/month")
+        // The stub backend activates the gift for the amount the checkout request carried.
+        XCTAssertEqual(app.staticTexts["gift-monthly"].label, "$90/month")
         XCTAssertEqual(app.staticTexts["gift-notice"].label, "Your gift is set up.")
 
         app.buttons["gift-close"].tap()
         XCTAssertTrue(app.staticTexts["gift-summary"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["gift-summary"].label.hasPrefix("$30/month · renews"), app.staticTexts["gift-summary"].label)
+        XCTAssertTrue(app.staticTexts["gift-summary"].label.hasPrefix("$90/month · renews"), app.staticTexts["gift-summary"].label)
     }
 
     func testClosingTheHostedPageWithoutPayingLeavesNoGift() {

@@ -170,9 +170,7 @@ private final class AccountModel {
                 settingsService = settings
                 passwordSettings = try WirePasswordSettings(origin: origin, session: built)
                 dashboardService = try WireDashboard(origin: origin, session: built)
-                givingKit = GivingKit(service: try WireGiving(
-                    origin: origin, session: built,
-                    publicOrigin: (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String).flatMap(URL.init(string:))))
+                givingKit = GivingKit(service: try WireGiving(origin: origin, session: built))
                 session = built
             }
         } catch {
@@ -373,7 +371,7 @@ private actor PreviewGiving: GivingService {
     }
     func amountOffer() async throws -> AmountOffer? { nil }
     func paymentMethod() async throws -> PaymentMethodState { PaymentMethodState(kind: .none) }
-    func beginGift() async throws -> PaymentPath { .webCheckoutHandoff(URL(string: "https://give.example.org/donate")!) }
+    func beginGift(amountMinor: Int) async throws -> PaymentPath { .webCheckoutHandoff(URL(string: "https://give.example.org/checkout")!) }
 }
 #endif
 

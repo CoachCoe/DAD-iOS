@@ -27,7 +27,10 @@ private final class GivingDouble: GivingService, @unchecked Sendable {
     var cancelScript = Script<RecurringState>(.none)
     var paymentScript = Script<PaymentMethodState>(PaymentMethodState(kind: .none))
     var beginPaymentScript = Script<PaymentPath>(.webCheckoutHandoff(URL(string: "https://pay.test/setup")!))
-    var beginGiftScript = Script<PaymentPath>(.webCheckoutHandoff(URL(string: "https://dad.test/donate")!))
+    var beginGiftScript = Script<PaymentPath>(.webCheckoutHandoff(URL(string: "https://dad.test/checkout")!))
+    private let sentLock = NSLock()
+    private var sent: [Int] = []
+    var giftAmountsSent: [Int] { sentLock.withLock { sent } }
     var gate: Gate?
     func recurring() async throws -> RecurringState { try recurringScript.next() }
     func amountOffer() async throws -> AmountOffer? { try offerScript.next() }
@@ -41,7 +44,10 @@ private final class GivingDouble: GivingService, @unchecked Sendable {
     }
     func paymentMethod() async throws -> PaymentMethodState { try paymentScript.next() }
     func beginPayment() async throws -> PaymentPath { try beginPaymentScript.next() }
-    func beginGift() async throws -> PaymentPath { try beginGiftScript.next() }
+    func beginGift(amountMinor: Int) async throws -> PaymentPath {
+        sentLock.withLock { sent.append(amountMinor) }
+        return try beginGiftScript.next()
+    }
 }
 
 private let end = Date(timeIntervalSince1970: 1_795_132_800)
@@ -338,7 +344,7 @@ final class GivingFlowModelTests: XCTestCase {
         let m = model(service, attempts: 5)
         await m.load()
         await m.startGift()
-        XCTAssertEqual(m.handoff?.url, URL(string: "https://dad.test/donate"))
+        XCTAssertEqual(m.handoff?.url, URL(string: "https://dad.test/checkout"))
         XCTAssertEqual(m.handoff?.purpose, .startGift)
         await m.handoffFinished()
         XCTAssertNil(m.handoff)
@@ -359,12 +365,35 @@ final class GivingFlowModelTests: XCTestCase {
         XCTAssertEqual(m.recurring, .none)
     }
 
-    func testStartGiftUnavailableInThisBuildIsExplainedNotGeneric() async {
+    func testStartGiftSendsTheAmountTheDonorChose() async {
         let service = GivingDouble()
-        service.beginGiftScript = Script([.failure(AccountError.invalidConfiguration)])
+        let m = model(service)
+        await m.load()
+        m.setDaily(7)
+        await m.startGift()
+        XCTAssertEqual(service.giftAmountsSent, [21000], "$7/day is 21000 cents a month")
+        XCTAssertNotNil(m.handoff)
+    }
+
+    func testStartGiftPaymentsUnconfiguredSaysGivingIsUnavailable() async {
+        let service = GivingDouble()
+        service.beginGiftScript = Script([.failure(AccountError.paymentsUnavailable)])
         let m = model(service)
         await m.startGift()
-        XCTAssertEqual(m.phase, .failed("Starting a gift from the app isn’t available in this build yet."))
+        XCTAssertEqual(m.phase, .failed("Giving isn’t available right now. Please try again later."))
+        XCTAssertNil(m.handoff)
+    }
+
+    func testStartGiftConflictRereadsAndTellsTheDonor() async {
+        let service = GivingDouble()
+        service.recurringScript = Script([.success(.none), .success(active(6000))])
+        service.beginGiftScript = Script([.failure(AccountError.conflict)])
+        let m = model(service)
+        await m.load()
+        await m.startGift()
+        XCTAssertEqual(service.recurringScript.count, 2, "re-read after the conflict")
+        XCTAssertEqual(m.recurring.amountMinor, 6000)
+        XCTAssertEqual(m.phase, .failed("You already have a monthly gift or a checkout in progress. We’ve refreshed it; please review."))
         XCTAssertNil(m.handoff)
     }
 

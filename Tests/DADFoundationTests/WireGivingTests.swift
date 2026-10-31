@@ -11,6 +11,7 @@ private let effectiveText = "2026-11-20T00:00:00Z"
 func recurringJSON(amount: Int = 15000, stopsAt: String? = nil, status: String = "active") -> String {
     #"{"mode":"test","state":"ready","observed_at":"2026-10-31T12:00:00Z","subscription":{"amount_minor":\#(amount),"currency":"USD","id":"\#(subID)","period_end":"\#(periodEndText)","status":"\#(status)","stops_at":\#(stopsAt.map { "\"\($0)\"" } ?? "null")}}"#
 }
+let checkoutJSON = #"{"url":"https://checkout.stripe.com/c/pay/cs_1","session_id":"cs_1","expires_at":"2026-11-01T12:00:00Z"}"#
 let noRecurringJSON = #"{"mode":"test","state":"ready","subscription":null}"#
 func amountOptionsJSON(next: Int = 15000, change: String = "null") -> String {
     #"{"state":"ready","subscription_id":"\#(subID)","amount_minor":\#(next),"effective_at":"\#(effectiveText)","change":\#(change)}"#
@@ -22,10 +23,10 @@ func amountChangeJSON(amount: Int = 30000, previous: Int = 15000, confirmed: Boo
 final class WireGivingTests: XCTestCase {
     private typealias Rig = (service: WireGiving, session: AccountSession, store: MemoryStore)
 
-    private func make(_ transport: ScriptedTransport, publicOrigin: URL? = URL(string: "https://dad.test")) throws -> Rig {
+    private func make(_ transport: ScriptedTransport) throws -> Rig {
         let store = MemoryStore(Credentials(access: "tok", refresh: "ref", expiresAt: .distantFuture))
         let session = try AccountSession(api: WireAPI(origin: testOrigin, transport: transport), store: store)
-        return (WireGiving(product: ProductClient(origin: testOrigin, transport: transport, session: session), publicOrigin: publicOrigin),
+        return (WireGiving(product: ProductClient(origin: testOrigin, transport: transport, session: session)),
                 session, store)
     }
 
@@ -420,21 +421,85 @@ final class WireGivingTests: XCTestCase {
         XCTAssertEqual(idempotencyKey(transport.seen[0]), idempotencyKey(transport.seen[1]))
     }
 
-    // MARK: start a gift (web handoff)
+    // MARK: start a gift (native checkout)
 
-    func testBeginGiftHandsOffToTheWebsiteGivingPageWithoutTouchingTheNetwork() async throws {
-        let transport = ScriptedTransport { _, _ in (.ok, "{}") }
+    func testBeginGiftPostsTheChosenAmountWithKeyAndReturnsTheHostedURL() async throws {
+        let transport = ScriptedTransport { _, _ in (.created, checkoutJSON) }
         let rig = try make(transport)
-        let path = try await rig.service.beginGift()
-        XCTAssertEqual(path, .webCheckoutHandoff(URL(string: "https://dad.test/donate")!))
-        XCTAssertTrue(transport.seen.isEmpty, "no card data and no API call: the website owns checkout")
+        let path = try await rig.service.beginGift(amountMinor: 21000)
+        XCTAssertEqual(path, .webCheckoutHandoff(URL(string: "https://checkout.stripe.com/c/pay/cs_1")!))
+        let call = try XCTUnwrap(transport.seen.first)
+        XCTAssertEqual(call.request.method, .post)
+        XCTAssertEqual(call.request.path, "/donor/me/recurring/checkout")
+        XCTAssertEqual(call.request.headerFields[.authorization], "Bearer tok")
+        XCTAssertEqual(call.request.headerFields[nativeClientHeader], "native")
+        XCTAssertNotNil(idempotencyKey(call).flatMap(UUID.init(uuidString:)))
+        let sent = try JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: Any]
+        XCTAssertEqual(sent?["amount_minor"] as? Int, 21000)
+        XCTAssertEqual(sent?.count, 1)
     }
 
-    func testBeginGiftNeedsAConfiguredHTTPSPublicOrigin() async throws {
-        for origin in [nil, URL(string: "http://dad.test"), URL(string: "https://dad.test/path"), URL(string: "https://u:p@dad.test")] {
-            let rig = try make(ScriptedTransport { _, _ in (.ok, "{}") }, publicOrigin: origin)
-            do { _ = try await rig.service.beginGift(); XCTFail("\(String(describing: origin))") }
-            catch { XCTAssertEqual(error as? AccountError, .invalidConfiguration) }
+    func testBeginGiftRefusesAnAmountOffTheDailyStepWithoutCallingTheServer() async throws {
+        let transport = ScriptedTransport { _, _ in (.created, checkoutJSON) }
+        let rig = try make(transport)
+        for bad in [0, 2999, 3500, 93000] {
+            do { _ = try await rig.service.beginGift(amountMinor: bad); XCTFail("\(bad)") }
+            catch { XCTAssertEqual(error as? AccountError, .invalidInput) }
+        }
+        XCTAssertTrue(transport.seen.isEmpty)
+    }
+
+    func testBeginGiftStatusMapping() async throws {
+        let cases: [(HTTPResponse.Status, String, AccountError)] = [
+            (.unauthorized, "{}", .signedOut), (.forbidden, "{}", .forbidden), (.conflict, "{}", .conflict),
+            (.unprocessableContent, "{}", .invalidInput), (.tooManyRequests, #"{"detail":"slow"}"#, .rateLimited),
+            (.tooManyRequests, "", .rateLimited),   // the ingress limiter sends no body
+            (.serviceUnavailable, "{}", .unavailable),
+            (.serviceUnavailable, #"{"detail":"x","code":"PAYMENTS_UNCONFIGURED"}"#, .paymentsUnavailable),
+        ]
+        for (status, body, expected) in cases {
+            let rig = try make(ScriptedTransport { _, _ in (status, body) })
+            do { _ = try await rig.service.beginGift(amountMinor: 6000); XCTFail("\(status)") }
+            catch { XCTAssertEqual(error as? AccountError, expected, "\(status) \(body)") }
+        }
+    }
+
+    func testBeginGiftRefusesANonHTTPSHostedURL() async throws {
+        for bad in ["http://checkout.stripe.com/x", "javascript:alert(1)", "https://u:p@evil.test/x", "dad://pay"] {
+            let rig = try make(ScriptedTransport { _, _ in (.created, #"{"url":"\#(bad)","session_id":"cs","expires_at":"2026-11-01T12:00:00Z"}"#) })
+            do { _ = try await rig.service.beginGift(amountMinor: 6000); XCTFail(bad) }
+            catch { XCTAssertEqual(error as? AccountError, .invalidResponse, bad) }
+        }
+    }
+
+    func testBeginGiftKeyIsReusedOnRetryAndRetiredAfterDefinitiveOutcomes() async throws {
+        // Retryable outcomes (503, 429, lost response) keep the key for the same amount.
+        let transport = ScriptedTransport { _, index in index < 2 ? (index == 0 ? (.serviceUnavailable, "{}") : (.tooManyRequests, "")) : (.created, checkoutJSON) }
+        let rig = try make(transport)
+        for _ in 0..<2 { do { _ = try await rig.service.beginGift(amountMinor: 6000); XCTFail() } catch {} }
+        _ = try await rig.service.beginGift(amountMinor: 6000)
+        XCTAssertEqual(Set(transport.seen.compactMap(idempotencyKey)).count, 1)
+        // Success retired it: the next gift of the same amount is a new command.
+        _ = try await rig.service.beginGift(amountMinor: 6000)
+        XCTAssertEqual(Set(transport.seen.compactMap(idempotencyKey)).count, 2)
+        // A different amount never shares a key.
+        _ = try await rig.service.beginGift(amountMinor: 9000)
+        XCTAssertEqual(Set(transport.seen.compactMap(idempotencyKey)).count, 3)
+        // A definitive refusal (409) retires the key too.
+        let refused = ScriptedTransport { _, _ in (.conflict, "{}") }
+        let r2 = try make(refused)
+        for _ in 0..<2 { do { _ = try await r2.service.beginGift(amountMinor: 6000); XCTFail() } catch {} }
+        XCTAssertEqual(Set(refused.seen.compactMap(idempotencyKey)).count, 2)
+    }
+
+    // MARK: Subscription.status is an open set
+
+    func testAnUnknownSubscriptionStatusStillDecodesTheRecurringResponse() async throws {
+        for status in ["paused", "trialing", "some_future_status", "active", "incomplete_expired"] {
+            let rig = try make(ScriptedTransport { _, _ in (.ok, recurringJSON(status: status)) })
+            let state = try await rig.service.recurring()
+            guard case let .active(_, amount, _) = state else { return XCTFail("\(status): \(state)") }
+            XCTAssertEqual(amount, 15000, status)
         }
     }
 }

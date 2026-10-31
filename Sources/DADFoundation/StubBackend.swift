@@ -68,7 +68,7 @@ public enum StubBackend {
             credentialAuth: WireCredentialAuth(origin: origin, transport: transport),
             passwords: WirePasswordSettings(product: product),
             dashboard: WireDashboard(product: product),
-            giving: WireGiving(product: product, publicOrigin: origin),
+            giving: WireGiving(product: product),
             completeHandoff: { transport.completeHandoff($0) })
     }
 }
@@ -93,6 +93,8 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private enum Payment: String { case none = "NONE", open = "OPEN", applied = "APPLIED" }
     private var giftAmount: Int?
     private var giftEnding = false
+    /// The amount the last `startRecurringCheckout` was created for: what the "paid" webhook activates.
+    private var checkoutAmount: Int?
     private var payment = Payment.none
     private var recurringFailureServed = false
     private let failFirstRecurring: Bool
@@ -109,7 +111,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     func completeHandoff(_ purpose: HostedHandoff.Purpose) {
         lock.withLock {
             switch purpose {
-            case .startGift: giftAmount = 3000; giftEnding = false
+            case .startGift: giftAmount = checkoutAmount ?? 3000; giftEnding = false
             case .updatePayment: payment = .applied
             }
         }
@@ -142,6 +144,12 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         case (.get, "/donor/me/recurring/amount"):
             guard let amount = lock.withLock({ giftAmount }) else { return reply(.ok, #"{"state":"unavailable"}"#) }
             return reply(.ok, #"{"state":"ready","subscription_id":"\#(Self.subscriptionID)","amount_minor":\#(amount),"effective_at":"\#(Self.periodEnd)","change":null}"#)
+        case (.post, "/donor/me/recurring/checkout"):
+            guard validKey() else { return reply(.unprocessableContent, "{}") }
+            guard let amount = fields["amount_minor"] as? Int, amount >= 3000, amount <= 90000, amount % 3000 == 0 else { return reply(.unprocessableContent, "{}") }
+            guard lock.withLock({ giftAmount }) == nil else { return reply(.conflict, "{}") }
+            lock.withLock { checkoutAmount = amount }
+            return reply(.created, #"{"url":"https://stub.invalid/pay/checkout","session_id":"cs_stub_1","expires_at":"2026-11-01T12:00:00Z"}"#)
         case (.post, "/donor/me/recurring/amount"):
             guard validKey() else { return reply(.unprocessableContent, "{}") }
             guard let new = fields["amount_minor"] as? Int, new >= 3000, new <= 90000, new % 3000 == 0 else { return reply(.unprocessableContent, "{}") }
