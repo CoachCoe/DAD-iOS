@@ -61,7 +61,7 @@ and passkeys (see below). Also wired (P2, donor home reads): the dashboard (`das
 null/unknown figures are shown as such, never as zero), today's initiative (`todayInitiative`, 404 = nothing
 in rotation), paged gift history (`gifts`, 50 a page, capped at 500 rows in memory) with a per-gift record
 (`receipt`) and the calendar-year total (`annualSummary`). Still on in-memory previews and not wired:
-giving (set/change/cancel gift, payment), events, engagement (badges, rankings opt-out, network, referral),
+engagement (badges, rankings opt-out, network, referral),
 the partner portal, push registration and analytics upload. Partner sign-in is not wired yet. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
@@ -91,8 +91,9 @@ System universal links/passkeys require a final bundle ID, signing team, Associa
 Domains (`applinks:` and `webcredentials:`), and matching DAD-Main association files.
 The app ships under `org.dad.foundation` (Release) and `org.dad.foundation.debug` (Debug); see
 "Bundle identifier" below. Neither is registered with a signing team or Associated Domains yet.
-Camera, push registration, and Wallet have integration protocols; this foundation does
-not request those permissions or configure provider accounts. A reachable staging API
+Push registration and Wallet have integration protocols; this foundation does
+not request those permissions or configure provider accounts. The camera is requested only when a donor
+opens the check-in scanner (see Events). A reachable staging API
 and real-device/provider acceptance remain separate from synthetic tests.
 
 The version 2 Swift input preserves nullable dashboard, recurring, and event values
@@ -139,6 +140,38 @@ The donor home shows a "Your monthly gift" card; "Manage gift" opens the gift sc
   now offers "Cancel my monthly gift", which opens the real cancel flow; deleting again then goes through.
 - Not covered: pause/resume (not in the contract), Apple Pay in-app (gated on the nonprofit decision), and the
   real Stripe pages (device/staging acceptance).
+
+## Events (P4)
+
+Real `WireEvents` over the generated client, behind `EventsService`: the list (`donorEvents` merged with
+`inviteOnlyEvents`, de-duplicated, soonest first), detail (`donorEventDetail`), reserve / join waitlist
+(`reserveEvent`), cancel (`cancelEvent`), check-in (`checkInEvent`) and the authenticated `.ics`
+(`donorEventCalendar`). The donor home has an Events card; the list opens an in-place detail.
+
+- **Statuses.** 401 refreshes once then signs out; 403 reads "not eligible" (reserve / cancel / check-in);
+  404 "no longer available" (also what the server answers for an invite-only event the donor has not
+  unlocked); 409 (full, started, booking not open, reservation changed) refreshes the list and says so;
+  422 on check-in explains the three real causes; 429 with or without a body is "too many attempts".
+  A failed command never changes what is on screen, and a second tap while one is running is ignored.
+- **Idempotency.** The contract defines no `Idempotency-Key` for these commands, so none is sent.
+- **Booking rules.** Cancel is offered until the event starts (E-9); a started event offers no new
+  reservation; `early_booking` lets a Team Captain reserve before it opens to everyone (B-3); capacity 0
+  is "open to everyone". Times show the zone abbreviation and the donor's locale; the contract has no
+  event time zone yet, so the device zone is used.
+- **Check-in.** Only a held seat, only between the event's start and end (the contract's window, not an
+  assumed early grace). Outside it the panel says when it opens or that it closed. A typed code always
+  works; "Scan QR code" opens the camera scanner (AVFoundation, QR only). The camera is requested at that
+  moment through `CameraPermission`; denied or no camera falls back to the typed code. Needs
+  `NSCameraUsageDescription` (set); no entitlement. **The live camera capture itself needs a device to
+  verify**: the simulator has no camera, so CI covers the typed-code path and the permission states only.
+- **Add to calendar.** The `.ics` is fetched with the donor's bearer, written to a temporary file and
+  offered through the system share sheet, where the donor picks Calendar. The app never reads or writes the
+  calendar, so there is no calendar permission or entitlement.
+- **Report an issue.** The event's `report_issue_url` (mailto) opens the mail composer.
+- **Not covered.** Reminder pushes (E-7) wait for push registration (P7); E-1 volunteer opt-in is a settings
+  preference and is not part of this screen.
+- **Test stub.** `--stub-backend --stub-signed-in` serves five scripted events (`--stub-events-ungated`
+  hides the invite-only one, `--stub-events-fail-first` fails the first list read).
 
 ## Real backend acceptance
 

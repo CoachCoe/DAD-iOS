@@ -19,6 +19,14 @@ struct DonorHomeView: View {
     let onSignedOut: () -> Void
     private let service: any DashboardService
     private let giving: GivingKit?
+    private let events: (any EventsService)?
+    @State private var showEvents: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--stub-open-events")   // screenshot/UITest aid, DEBUG only
+        #else
+        false
+        #endif
+    }()
     @State private var showHistory = false
     @State private var showGift: Bool = {
         #if DEBUG
@@ -29,9 +37,10 @@ struct DonorHomeView: View {
     }()
     @State private var giftModel: GivingModel?
 
-    init(service: any DashboardService, giving: GivingKit? = nil, onSignedOut: @escaping () -> Void) {
+    init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil, onSignedOut: @escaping () -> Void) {
         self.service = service
         self.giving = giving
+        self.events = events
         self.onSignedOut = onSignedOut
         _model = State(initialValue: DashboardModel(service: service))
         _giftModel = State(initialValue: giving?.makeModel())
@@ -64,6 +73,16 @@ struct DonorHomeView: View {
             }
             InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } })
             if let giftModel { GiftSummaryCard(model: giftModel, onManage: { showGift = true }) }
+            if events != nil {
+                DADCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Events").font(.headline).accessibilityAddTraits(.isHeader)
+                        Text("Volunteer, meet other donors and check in.").font(.footnote)
+                        Button("Browse events") { showEvents = true }
+                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-events")
+                    }
+                }.accessibilityElement(children: .contain).accessibilityIdentifier("events-card")
+            }
             Button("Gift history") { showHistory = true }
                 .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-history")
         }
@@ -76,6 +95,12 @@ struct DonorHomeView: View {
             if let giftModel, let giving {
                 GiftSheet(model: giftModel, stubComplete: giving.stubComplete, onClose: { showGift = false },
                           onSignedOut: { showGift = false; onSignedOut() })
+            }
+        }
+        .sheet(isPresented: $showEvents) {
+            if let events {
+                EventsScreen(model: EventsModel(service: events), service: events, onClose: { showEvents = false },
+                             onSignedOut: { showEvents = false; onSignedOut() })
             }
         }
         .sheet(isPresented: $showHistory) {
