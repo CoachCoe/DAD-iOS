@@ -157,3 +157,19 @@ final class CancelCopyTests: XCTestCase {
         XCTAssertTrue(copy.lowercased().contains("streak ends"))
     }
 }
+
+final class RecurringHeadingTests: XCTestCase {
+    private let date = Date(timeIntervalSince1970: 0)
+
+    func testHeadingBeforeLoadIgnoresState() {
+        XCTAssertEqual(RecurringState.none.heading(hasLoaded: false), "Your monthly gift")
+        XCTAssertEqual(RecurringState.ending(subscriptionID: "s", amountMinor: 500, periodEnd: date, stopsAt: date).heading(hasLoaded: false), "Your monthly gift")
+    }
+
+    func testHeadingPerLoadedState() {
+        XCTAssertEqual(RecurringState.none.heading(hasLoaded: true), "Start a monthly gift")
+        XCTAssertEqual(RecurringState.preparing.heading(hasLoaded: true), "Your gift is on its way")
+        XCTAssertEqual(RecurringState.active(subscriptionID: "s", amountMinor: 500, periodEnd: date).heading(hasLoaded: true), "Your monthly gift")
+        XCTAssertEqual(RecurringState.ending(subscriptionID: "s", amountMinor: 500, periodEnd: date, stopsAt: date).heading(hasLoaded: true), "Your gift is ending")
+    }
+}

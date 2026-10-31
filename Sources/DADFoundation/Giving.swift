@@ -108,6 +108,16 @@ public enum RecurringState: Sendable, Equatable {
     }
 
     public var isEnding: Bool { if case .ending = self { return true }; return false }
+
+    public func heading(hasLoaded: Bool) -> String {
+        guard hasLoaded else { return "Your monthly gift" }
+        switch self {
+        case .none: return "Start a monthly gift"
+        case .preparing: return "Your gift is on its way"
+        case .active: return "Your monthly gift"
+        case .ending: return "Your gift is ending"
+        }
+    }
 }
 
 /// What the amount endpoint offers for the subscription: the amount the next renewal will charge,

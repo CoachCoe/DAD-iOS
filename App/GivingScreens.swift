@@ -90,7 +90,7 @@ struct GiftScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text(model.recurring == .none && model.hasLoaded ? "Your gift" : "Set your gift")
+            Text(model.recurring.heading(hasLoaded: model.hasLoaded))
                 .font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
             if !model.hasLoaded {
                 loadingOrFailed
