@@ -37,6 +37,10 @@ public final class AccountSettingsModel {
     /// True once deleted or signed out — the UI leaves the settings shell.
     public private(set) var signedOut = false
     public private(set) var actionError: String?
+    /// The server refused deletion (409) because a monthly gift is still set to renew or a checkout is
+    /// open. The screen then offers the real cancel-gift flow instead of a dead end; a retry after the
+    /// gift is cancelled clears it.
+    public private(set) var deletionBlocked = false
     /// A save or delete is in flight; the UI disables its controls so requests cannot overlap.
     public private(set) var isBusy = false
 
@@ -79,9 +83,11 @@ public final class AccountSettingsModel {
         isBusy = true
         defer { isBusy = false }
         actionError = nil
+        deletionBlocked = false
         do {
             try await service.deleteAccount()
         } catch {
+            if case AccountError.deletionBlocked = error { deletionBlocked = true }
             actionError = error.userMessage
             return
         }

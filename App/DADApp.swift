@@ -15,7 +15,7 @@ private func launchFlag(_ name: String) -> Bool {
 
 private func tokenColor(_ name: String) -> Color { Color.dad(name) }
 
-private struct AppBackground: ViewModifier {
+struct AppBackground: ViewModifier {
     @Environment(\.colorScheme) private var scheme
     func body(content: Content) -> some View { content.background(tokenColor(scheme == .dark ? "ink-deep" : "paper")) }
 }
@@ -62,6 +62,8 @@ private final class AccountModel {
     /// Donor-home reads (dashboard, today's initiative, gift history): real `WireDashboard` or the
     /// scripted stub; nil in the synthetic DEBUG preview, which has no account to read.
     private(set) var dashboardService: (any DashboardService)?
+    /// Giving (recurring gift, amount, payment method, cancel): real `WireGiving` or the scripted stub; nil in previews.
+    private(set) var givingKit: GivingKit?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -106,7 +108,9 @@ private final class AccountModel {
                 let scenario: StubBackend.Scenario = launchFlag("--stub-dashboard-empty") ? .empty
                     : launchFlag("--stub-dashboard-fail-first") ? .failFirst
                     : launchFlag("--stub-dashboard-unranked") ? .unranked : .populated
-                let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"), scenario: scenario,
+                let gift: StubBackend.GiftScenario = launchFlag("--stub-gift-fail-first") ? .activeFailFirst
+                    : launchFlag("--stub-gift-active") ? .active : .none
+                let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"), scenario: scenario, gift: gift,
                                                     signedIn: launchFlag("--stub-signed-in"),
                                                     onLocalWipe: { DefaultsAttributionStore().clear() })
                 session = services.session
@@ -115,6 +119,7 @@ private final class AccountModel {
                 settingsService = services.settings
                 passwordSettings = services.passwords
                 dashboardService = services.dashboard
+                givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 state = .loading
             } catch { session = nil; state = .unavailable }
             return
@@ -165,6 +170,9 @@ private final class AccountModel {
                 settingsService = settings
                 passwordSettings = try WirePasswordSettings(origin: origin, session: built)
                 dashboardService = try WireDashboard(origin: origin, session: built)
+                givingKit = GivingKit(service: try WireGiving(
+                    origin: origin, session: built,
+                    publicOrigin: (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String).flatMap(URL.init(string:))))
                 session = built
             }
         } catch {
@@ -251,6 +259,7 @@ private struct DonorLanding: View {
     var onSettings: (() -> Void)?
     /// The real donor-home reads; nil in the synthetic preview, which keeps its placeholder line.
     var dashboard: (any DashboardService)?
+    var giving: GivingKit?
     var onSignedOut: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -281,7 +290,7 @@ private struct DonorLanding: View {
                 Button("Settings", action: onSettings)
                     .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
             }
-            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, onSignedOut: onSignedOut) }
+            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, onSignedOut: onSignedOut) }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
@@ -362,6 +371,9 @@ private actor PreviewGiving: GivingService {
     func beginPayment() async throws -> PaymentPath {
         .webCheckoutHandoff(URL(string: "https://give.example.org/setup")!)
     }
+    func amountOffer() async throws -> AmountOffer? { nil }
+    func paymentMethod() async throws -> PaymentMethodState { PaymentMethodState(kind: .none) }
+    func beginGift() async throws -> PaymentPath { .webCheckoutHandoff(URL(string: "https://give.example.org/donate")!) }
 }
 #endif
 
@@ -791,7 +803,10 @@ private struct AccountSettingsScreen: View {
     @State var model: AccountSettingsModel
     /// Set/change password; nil where there is no real account to change (previews).
     var passwords: (any PasswordSettingsService)?
+    /// The real cancel-gift flow, offered when the server refuses deletion because a gift is still renewing.
+    var giving: GivingKit?
     var onSignedOut: (() -> Void)?
+    @State private var giftModel: GivingModel?
     @State private var confirmingDelete = false
     @State private var deleteTyped = ""
     var body: some View {
@@ -822,6 +837,12 @@ private struct AccountSettingsScreen: View {
         .accessibilityElement(children: .contain).accessibilityIdentifier("settings-screen")
         .task { await model.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut?() } }
+        .sheet(isPresented: Binding(get: { giftModel != nil }, set: { if !$0 { giftModel = nil } })) {
+            if let giftModel, let giving {
+                GiftSheet(model: giftModel, stubComplete: giving.stubComplete, onClose: { self.giftModel = nil },
+                          onSignedOut: { self.giftModel = nil; onSignedOut?() })
+            }
+        }
     }
 
     @ViewBuilder private func settingsBody(_ snapshot: AccountSettingsSnapshot) -> some View {
@@ -864,6 +885,15 @@ private struct AccountSettingsScreen: View {
                     .accessibilityIdentifier("delete-confirm")
                 Button("Keep my account") { confirmingDelete = false; deleteTyped = "" }
                     .buttonStyle(DADButtonStyle(.secondary))
+                if model.deletionBlocked, let giving {
+                    // The server refused because a monthly gift is still set to renew (or a checkout is open):
+                    // offer the real cancel flow rather than a dead end, then the donor tries deleting again.
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Cancel your monthly gift, then delete your account again.").font(.footnote)
+                        Button("Cancel my monthly gift") { giftModel = giving.makeModel() }
+                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("delete-cancel-gift")
+                    }.accessibilityElement(children: .contain).accessibilityIdentifier("delete-blocked-block")
+                }
             }.accessibilityElement(children: .contain).accessibilityIdentifier("delete-confirm-block")
         }
     }
@@ -1016,76 +1046,6 @@ private struct EngagementHome: View {
                 Text("\(snapshot.referral.totalConverted) have joined through you").font(.footnote).foregroundStyle(.secondary)
             }
         }
-    }
-}
-
-/// Set / change your recurring gift (G-1/G-2/G-7). A $1–$30/day stepper with the monthly
-/// equivalent (×30) shown derived, the streak bar, and a cancel path (G-8/G-9) with the
-/// ends-streak confirmation copy. Bound to `GivingModel`.
-private struct GiftScreen: View {
-    @State var model: GivingModel
-    @State private var confirmingCancel = false
-    @ScaledMetric(relativeTo: .largeTitle) private var amountSize: CGFloat = 44
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Set your gift").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            DADCard {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(model.selection.dailyLabel).font(.system(size: amountSize, weight: .bold))
-                        .accessibilityIdentifier("gift-daily")
-                    Text("\(model.selection.monthlyLabel) · charged monthly").foregroundStyle(.secondary)
-                    HStack(spacing: 16) {
-                        Button { model.decrement() } label: { Image(systemName: "minus.circle.fill").font(.title) }
-                            .accessibilityLabel("Decrease gift")
-                            .disabled(model.selection.dailyDollars <= GiftAmount.minDailyDollars)
-                        Button { model.increment() } label: { Image(systemName: "plus.circle.fill").font(.title) }
-                            .accessibilityLabel("Increase gift")
-                            .disabled(model.selection.dailyDollars >= GiftAmount.maxDailyDollars)
-                    }
-                }
-            }
-            DADStreakBar(filled: min(model.selection.dailyDollars, 30))
-            if case .failed(let message) = model.phase {
-                Text(message).font(.footnote).foregroundStyle(Color.dad("fail"))
-            }
-            Button("Save gift") { Task { await model.applySelection() } }
-                .buttonStyle(DADButtonStyle(.primary))
-                .disabled(model.phase == .working)
-            if case .active = model.recurring {
-                if confirmingCancel {
-                    // Inline confirmation rather than a `confirmationDialog`: the OS action sheet
-                    // presents in a separate layer whose buttons the simulator's XCUITest harness
-                    // surfaces unreliably (the sheet animation races the automation idle-wait), so
-                    // an inline block is both deterministic to test and keeps the ends-streak copy
-                    // on screen beside the choice.
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Cancel your gift?").font(.headline)
-                        if case let .active(_, _, periodEnd) = model.recurring {
-                            Text(CancelCopy.confirmation(periodEnd: periodEnd))
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
-                        Button("End my gift") { Task { await model.cancel() }; confirmingCancel = false }
-                            .buttonStyle(DADButtonStyle(.secondary))
-                        Button("Keep giving") { confirmingCancel = false }
-                            .buttonStyle(DADButtonStyle(.primary))
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("cancel-confirm")
-                } else {
-                    Button("Cancel gift") { confirmingCancel = true }
-                        .buttonStyle(DADButtonStyle(.secondary))
-                }
-            }
-            if model.recurring.isEnding {
-                Text("Your gift won’t renew — it stays active until the period ends.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("gift-ending")
-            }
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("gift-screen")
-        .task { await model.load() }
     }
 }
 
@@ -1397,6 +1357,7 @@ private struct UnauthenticatedStack: View {
 private struct SettingsSheet: View {
     let service: any AccountSettingsService
     let passwords: (any PasswordSettingsService)?
+    var giving: GivingKit?
     let onClose: () -> Void
     let onSignedOut: () -> Void
     var body: some View {
@@ -1404,7 +1365,7 @@ private struct SettingsSheet: View {
             VStack(alignment: .leading, spacing: 0) {
                 Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
                     .accessibilityIdentifier("settings-close")
-                AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, onSignedOut: onSignedOut)
+                AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, giving: giving, onSignedOut: onSignedOut)
             }
         }.modifier(AppBackground()).tint(tokenColor("brand-ink"))
     }
@@ -1438,7 +1399,7 @@ struct DADApp: App {
     private var donorLanding: some View {
         DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
                      onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
-                     dashboard: model.dashboardService, onSignedOut: { Task { await model.load() } })
+                     dashboard: model.dashboardService, giving: model.givingKit, onSignedOut: { Task { await model.load() } })
     }
 
     @ViewBuilder private var partnerRoot: some View {
@@ -1535,7 +1496,7 @@ struct DADApp: App {
             }
             .sheet(isPresented: $showSettings) {
                 if let service = model.makeSettings() {
-                    SettingsSheet(service: service, passwords: model.passwordSettings, onClose: { showSettings = false },
+                    SettingsSheet(service: service, passwords: model.passwordSettings, giving: model.givingKit, onClose: { showSettings = false },
                                   onSignedOut: { showSettings = false; Task { await model.load() } })
                 }
             }

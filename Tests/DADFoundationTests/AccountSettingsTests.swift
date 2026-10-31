@@ -47,6 +47,7 @@ final class AccountSettingsModelTests: XCTestCase {
         var failLoad = false
         var failSave = false
         var failDelete = false
+        var blockDelete = false
         var failSignOut = false
         private(set) var deleted = false
         private(set) var didSignOut = false
@@ -80,6 +81,7 @@ final class AccountSettingsModelTests: XCTestCase {
         }
         func deleteAccount() async throws {
             if failDelete { throw AccountError.unavailable }
+            if blockDelete { throw AccountError.deletionBlocked }
             deleted = true
         }
         func signOut() async throws {
@@ -157,6 +159,30 @@ final class AccountSettingsModelTests: XCTestCase {
         XCTAssertFalse(model.signedOut)
         XCTAssertNotNil(model.actionError)
         XCTAssertFalse(model.isBusy)
+    }
+
+    func testDeleteBlockedByAnActiveGiftOffersTheCancelPathAndRetryClearsIt() async {
+        let svc = FakeService(); svc.blockDelete = true
+        let model = AccountSettingsModel(service: svc)
+        await model.load()
+        await model.deleteAccount(DeleteAccountGate(typed: "DELETE"))
+        XCTAssertTrue(model.deletionBlocked)
+        XCTAssertTrue(model.actionError?.contains("Cancel your monthly gift first") == true)
+        XCTAssertFalse(model.signedOut)
+        XCTAssertFalse(svc.didSignOut, "a blocked delete leaves the session untouched")
+        svc.blockDelete = false   // the gift was cancelled in the meantime
+        await model.deleteAccount(DeleteAccountGate(typed: "DELETE"))
+        XCTAssertFalse(model.deletionBlocked)
+        XCTAssertTrue(model.signedOut)
+        XCTAssertTrue(svc.deleted)
+    }
+
+    func testOtherDeleteFailuresDoNotOfferTheCancelPath() async {
+        let svc = FakeService(); svc.failDelete = true
+        let model = AccountSettingsModel(service: svc)
+        await model.load()
+        await model.deleteAccount(DeleteAccountGate(typed: "DELETE"))
+        XCTAssertFalse(model.deletionBlocked)
     }
 
     func testDeleteLeavesTheShellEvenWhenRemoteLogoutFailsAfterward() async {

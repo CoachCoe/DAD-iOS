@@ -16,7 +16,10 @@ import OpenAPIRuntime
 /// with 422 `CURRENT_PASSWORD_INCORRECT` and a new password outside 12...72 bytes with 422. Profile/preferences/
 /// logout/refresh behave like a live account; the donor-home reads (dashboard, today's initiative, 120 gifts
 /// paged 50 at a time, receipts, the annual summary) follow `Scenario`; account deletion succeeds (200) unless
-/// `deletionBlocked` (409), after which the account is gone (profile -> 401).
+/// `deletionBlocked` (409) or while a monthly gift is still set to renew (`GiftScenario`), after which the
+/// account is gone (profile -> 401). The giving reads/commands (recurring, amount, cancel, payment method)
+/// follow a stateful gift: the hosted Stripe pages are stubbed by the UI (`completeHandoff` plays the
+/// "payment finished" webhook), so the REAL `WireGiving` conformer runs end to end.
 public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Credentials?
@@ -35,6 +38,10 @@ public enum StubBackend {
     /// like `populated` but the donor opted out of rankings and has no streak figure yet.
     public enum Scenario: Sendable { case populated, empty, failFirst, unranked }
 
+    /// The donor's recurring gift at launch. `none`: no gift yet. `active`: $5/day ($150/month) renewing.
+    /// `activeFailFirst`: like `active`, but the first recurring read is a 503 (the error + retry path).
+    public enum GiftScenario: Sendable { case none, active, activeFailFirst }
+
     public struct Services: Sendable {
         public let session: AccountSession
         public let signIn: any SignInService
@@ -42,12 +49,15 @@ public enum StubBackend {
         public let credentialAuth: WireCredentialAuth
         public let passwords: any PasswordSettingsService
         public let dashboard: any DashboardService
+        public let giving: any GivingService
+        /// Plays the Stripe webhook after the stubbed hosted page "finishes" (a gift starts, a card is applied).
+        public let completeHandoff: @Sendable (HostedHandoff.Purpose) -> Void
     }
 
     /// `signedIn` starts with a stored session (as after a relaunch), skipping the phone sign-in dance.
-    public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, signedIn: Bool = false,
-                            onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
-        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario)
+    public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, gift: GiftScenario = .none,
+                            signedIn: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
+        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift)
         let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore(signedIn ? Credentials(
             access: "stub-access-0", refresh: "stub-refresh-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx", expiresAt: Date().addingTimeInterval(900)) : nil))
         let product = ProductClient(origin: origin, transport: transport, session: session)
@@ -57,7 +67,9 @@ public enum StubBackend {
             settings: WireAccountSettings(product: product, onLocalWipe: onLocalWipe),
             credentialAuth: WireCredentialAuth(origin: origin, transport: transport),
             passwords: WirePasswordSettings(product: product),
-            dashboard: WireDashboard(product: product))
+            dashboard: WireDashboard(product: product),
+            giving: WireGiving(product: product, publicOrigin: origin),
+            completeHandoff: { transport.completeHandoff($0) })
     }
 }
 
@@ -77,7 +89,85 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         "rankings_opted_out": false, "network_visible": true, "volunteer": true,
     ]
 
-    init(deletionBlocked: Bool, scenario: StubBackend.Scenario) { self.deletionBlocked = deletionBlocked; self.scenario = scenario }
+    // Giving: one stateful gift. `giftAmount` is the integer-cent monthly charge; nil means no gift.
+    private enum Payment: String { case none = "NONE", open = "OPEN", applied = "APPLIED" }
+    private var giftAmount: Int?
+    private var giftEnding = false
+    private var payment = Payment.none
+    private var recurringFailureServed = false
+    private let failFirstRecurring: Bool
+    private static let subscriptionID = "5d6f1d9e-0a5b-4e6f-8d0f-3f1c2a9b7c10"
+    private static let periodEnd = "2026-11-20T15:00:00Z"
+
+    init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario) {
+        self.deletionBlocked = deletionBlocked; self.scenario = scenario
+        giftAmount = gift == .none ? nil : 15000
+        failFirstRecurring = gift == .activeFailFirst
+    }
+
+    /// The "payment finished" webhook: what the server would hold once the hosted page completed.
+    func completeHandoff(_ purpose: HostedHandoff.Purpose) {
+        lock.withLock {
+            switch purpose {
+            case .startGift: giftAmount = 3000; giftEnding = false
+            case .updatePayment: payment = .applied
+            }
+        }
+    }
+
+    private func recurringJSON() -> String {
+        lock.withLock {
+            guard let amount = giftAmount else { return #"{"mode":"test","state":"ready","subscription":null}"# }
+            let stops = giftEnding ? "\"" + Self.periodEnd + "\"" : "null"
+            return #"{"mode":"test","state":"ready","observed_at":"2026-10-31T12:00:00Z","subscription":{"amount_minor":\#(amount),"currency":"USD","id":"\#(Self.subscriptionID)","period_end":"\#(Self.periodEnd)","status":"active","stops_at":\#(stops)}}"#
+        }
+    }
+
+    /// Giving routes. Commands need a version 4 Idempotency-Key and echo the values the matching GET returned.
+    private func giving(_ request: HTTPRequest, _ payload: String, authorized: Bool,
+                        _ reply: (HTTPResponse.Status, String) -> (HTTPResponse, HTTPBody?)) -> (HTTPResponse, HTTPBody?)? {
+        guard let path = request.path, path.hasPrefix("/donor/me/recurring") || path == "/donor/me/payment-method" || path == "/donor/me/payment-method/setup" else { return nil }
+        guard authorized, !lock.withLock({ deleted }) else { return reply(.unauthorized, "{}") }
+        let key = request.headerFields[HTTPField.Name("Idempotency-Key")!]
+        let fields = Self.object(payload)
+        func validKey() -> Bool { key.flatMap(UUID.init(uuidString:)) != nil }
+        switch (request.method, path) {
+        case (.get, "/donor/me/recurring"):
+            let fail = lock.withLock { () -> Bool in
+                guard failFirstRecurring, !recurringFailureServed else { return false }
+                recurringFailureServed = true
+                return true
+            }
+            return fail ? reply(.serviceUnavailable, #"{"detail":"unavailable"}"#) : reply(.ok, recurringJSON())
+        case (.get, "/donor/me/recurring/amount"):
+            guard let amount = lock.withLock({ giftAmount }) else { return reply(.ok, #"{"state":"unavailable"}"#) }
+            return reply(.ok, #"{"state":"ready","subscription_id":"\#(Self.subscriptionID)","amount_minor":\#(amount),"effective_at":"\#(Self.periodEnd)","change":null}"#)
+        case (.post, "/donor/me/recurring/amount"):
+            guard validKey() else { return reply(.unprocessableContent, "{}") }
+            guard let new = fields["amount_minor"] as? Int, new >= 3000, new <= 90000, new % 3000 == 0 else { return reply(.unprocessableContent, "{}") }
+            let current = lock.withLock { giftAmount }
+            guard let current, fields["subscription_id"] as? String == Self.subscriptionID, fields["previous_minor"] as? Int == current,
+                  fields["effective_at"] as? String == Self.periodEnd else { return reply(.conflict, "{}") }
+            lock.withLock { giftAmount = new }
+            return reply(.ok, #"{"amount_minor":\#(new),"previous_minor":\#(current),"confirmed":true,"effective_at":"\#(Self.periodEnd)","request_id":"11111111-2222-4333-8444-555555555555"}"#)
+        case (.post, "/donor/me/recurring/cancel"):
+            guard validKey() else { return reply(.unprocessableContent, "{}") }
+            guard lock.withLock({ giftAmount }) != nil, fields["subscription_id"] as? String == Self.subscriptionID,
+                  fields["period_end"] as? String == Self.periodEnd else { return reply(.conflict, "{}") }
+            lock.withLock { giftEnding = true }
+            return reply(.ok, recurringJSON())
+        case (.get, "/donor/me/payment-method"):
+            let status = lock.withLock { payment.rawValue }
+            let completed = status == "APPLIED" ? "\"2026-10-31T12:00:00Z\"" : "null"
+            return reply(.ok, #"{"mode":"test","status":"\#(status)","completed_at":\#(completed)}"#)
+        case (.post, "/donor/me/payment-method/setup"):
+            guard validKey() else { return reply(.unprocessableContent, "{}") }
+            guard lock.withLock({ giftAmount }) != nil else { return reply(.conflict, "{}") }
+            lock.withLock { payment = .open }
+            return reply(.ok, #"{"url":"https://stub.invalid/pay/setup"}"#)
+        default: return nil
+        }
+    }
 
     private func session() -> String {
         lock.withLock { generation += 1; return """
@@ -171,8 +261,11 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         let authorized = request.headerFields[.authorization].map { $0.hasPrefix("Bearer stub-access-") } ?? false
         let isDeleted = lock.withLock { deleted }
         func reply(_ status: HTTPResponse.Status, _ json: String = "{}") -> (HTTPResponse, HTTPBody?) {
-            (HTTPResponse(status: status, headerFields: [.contentType: "application/json"]), HTTPBody(json))
+            // Every non-2xx body is the contract's Problem object, which requires `detail`.
+            let body = status.code >= 400 && json == "{}" ? #"{"detail":"stub"}"# : json
+            return (HTTPResponse(status: status, headerFields: [.contentType: "application/json"]), HTTPBody(body))
         }
+        if let response = giving(request, payload, authorized: authorized, reply) { return response }
         switch (request.method, request.path ?? "") {
         case (.post, "/donor/phone/sign-in/options"): return reply(.ok, #"{"sent":true}"#)
         case (.post, "/donor/phone/sign-in"):
@@ -216,7 +309,8 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             return reply(.ok, profile())
         case (.post, "/donor/me/delete"):
             guard authorized, !isDeleted else { return reply(.unauthorized) }
-            if deletionBlocked { return reply(.conflict) }
+            // 409 while a checkout is open (`deletionBlocked`) or a monthly gift is still set to renew.
+            if deletionBlocked || lock.withLock({ giftAmount != nil && !giftEnding }) { return reply(.conflict) }
             lock.withLock { deleted = true }
             return reply(.ok, #"{"deleted":true}"#)
         case (.post, "/donor/logout"): return reply(.ok, #"{"signed_out":true}"#)

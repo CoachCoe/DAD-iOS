@@ -18,6 +18,9 @@ extension Error {
             case .rateLimited: return "Too many attempts. Please wait a moment and try again."
             case .deletionBlocked:
                 return "We can’t delete your account while a monthly gift is active or a checkout is open. Cancel your monthly gift first, then try again."
+            case .forbidden: return "Giving isn’t available for this account."
+            case .conflict: return "Your gift changed while you were looking at it. We’ve refreshed it; please review and try again."
+            case .paymentsUnavailable: return "Payments aren’t available right now. Please try again later."
             default: break
             }
         }

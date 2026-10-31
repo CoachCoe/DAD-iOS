@@ -109,6 +109,29 @@ its source and changes, then replace the vendored snapshot and lock together. Ne
 fetch a moving branch during builds. `node scripts/check-foundation.mjs` verifies every
 file hash, source revision, and version; its tests demonstrate tamper detection.
 
+## Giving (recurring gift, payment method)
+
+The donor home shows a "Your monthly gift" card; "Manage gift" opens the gift screen, bound to the real
+`WireGiving` (`recurring`, `amountOptions`, `changeAmount`, `cancelRecurring`, `paymentMethod`,
+`beginPaymentUpdate`) through the same authorized session as every other read.
+
+- **Card data never enters the app.** Starting a gift and updating the card both open a page hosted outside
+  the app in the system's secure Safari view (`SFSafariViewController`). When it closes (Done or swipe down)
+  the app re-reads the server a bounded number of times until it reflects the outcome, then says what it found.
+  No callback URL, custom scheme or Associated Domain is needed for this, so nothing extra is required from you.
+- **Commands are idempotent.** Each command carries a version 4 `Idempotency-Key`; a retry after a timeout,
+  429 or 503 reuses the key, and a success or a definitive refusal (403/409/422) retires it. Buttons are
+  disabled while a request is in flight.
+- **Starting a NEW gift is a website handoff, not a server-issued checkout.** Contract 2.5.0 has no native
+  operation that mints a hosted checkout for a signed-in donor (`beginCheckout` is web-only and email-keyed), so
+  "Start a monthly gift" opens `<DADPublicOrigin>/donate`. The chosen amount is not carried over. With no public
+  origin configured the screen says starting a gift is not available in this build yet. A server-issued
+  checkout session (and a return link) needs a DAD-Main operation plus Associated Domains; see the wiring plan.
+- **Account deletion and gifts.** A deletion refused with 409 ("monthly gift still renews / checkout open")
+  now offers "Cancel my monthly gift", which opens the real cancel flow; deleting again then goes through.
+- Not covered: pause/resume (not in the contract), Apple Pay in-app (gated on the nonprofit decision), and the
+  real Stripe pages (device/staging acceptance).
+
 ## Real backend acceptance
 
 From the matching DAD-Main checkout, run `make test-native-clients` with

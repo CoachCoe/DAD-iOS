@@ -2,6 +2,11 @@ generate:
   - types
   - client
 accessModifier: internal
+# The contract spells the payment-update's literal-null `url` as a marked string schema; without this
+# override it generates as a plain String and a finished update (`url: null`) cannot decode at all.
+typeOverrides:
+  schemas:
+    DADLiteralNull: DADNullValue
 filter:
   operations:
     # --- Session & auth (app shell, Phase A/B) ---

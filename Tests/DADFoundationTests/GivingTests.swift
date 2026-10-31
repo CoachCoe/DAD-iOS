@@ -75,6 +75,9 @@ final class GivingModelTests: XCTestCase {
             return state
         }
         func beginPayment() async throws -> PaymentPath { payment }
+        func amountOffer() async throws -> AmountOffer? { nil }
+        func paymentMethod() async throws -> PaymentMethodState { PaymentMethodState(kind: .none) }
+        func beginGift() async throws -> PaymentPath { payment }
     }
 
     @MainActor
