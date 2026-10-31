@@ -81,7 +81,7 @@ public enum CalendarExport {
         let folder = directory.appendingPathComponent("dad-calendar", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let url = folder.appendingPathComponent("\(safe.isEmpty ? "event" : safe).ics")
-        try data.write(to: url, options: [.atomic, .completeFileProtection])
+        try data.write(to: url, options: .atomic)
         return url
     }
 }

@@ -150,7 +150,7 @@ final class EventsModelBehaviourTests: XCTestCase {
         let model = EventsModel(service: service, exportDirectory: directory)
         await model.load()
         await model.prepareCalendar(eventID: "e1")
-        let file = try XCTUnwrap(model.calendarFile)
+        let file = try XCTUnwrap(model.calendarFile, "calendar not prepared: \(model.actionError ?? "no error")")
         XCTAssertEqual(file.url.pathExtension, "ics")
         XCTAssertEqual(file.url.deletingLastPathComponent().lastPathComponent, "dad-calendar")
         XCTAssertFalse(file.url.lastPathComponent.contains("/"))
