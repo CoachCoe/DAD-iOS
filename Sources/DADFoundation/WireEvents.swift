@@ -12,9 +12,9 @@ import OpenAPIRuntime
 /// ingress limiter sends none) -> rate limited; anything else, or a body that does not decode ->
 /// unavailable. Cancellation propagates untouched so the model keeps its prior state.
 ///
-/// The contract defines no Idempotency-Key for these commands. Reserve and cancel are naturally safe to
-/// repeat (a second reserve is a 409, a second cancel changes nothing), and the model refuses a second
-/// command for an event while one is in flight, so no key is invented here.
+/// The contract defines no Idempotency-Key for these commands: reserve, cancel and check-in are naturally
+/// idempotent server-side, so retrying after a lost response is safe. The model still refuses a second
+/// command for an event while one is in flight (double-tap guard), so no key is invented here.
 public struct WireEvents: EventsService {
     private let product: ProductClient
     /// Defensive caps: a larger body is truncated rather than trusted.
@@ -74,10 +74,11 @@ public struct WireEvents: EventsService {
         return try await call { client in
             switch try await client.reserveEvent(.init(path: .init(event_id: eventID))) {
             case .ok(let response):
-                switch try response.body.json.status {
-                case .RESERVED: return .reserved
-                case .WAITLISTED: return .waitlisted
-                case .CANCELLED: throw AccountError.invalidResponse
+                // An open string: only the two outcomes a reserve can produce are accepted.
+                switch try response.body.json.status.uppercased() {
+                case "RESERVED": return .reserved
+                case "WAITLISTED": return .waitlisted
+                default: throw AccountError.invalidResponse
                 }
             case .unauthorized: throw AccountError.signedOut
             case .forbidden: throw AccountError.forbidden
@@ -97,7 +98,7 @@ public struct WireEvents: EventsService {
             switch try await client.cancelEvent(.init(path: .init(event_id: eventID))) {
             case .ok(let response):
                 // Anything but CANCELLED means the server did not do what was asked: do not report success.
-                guard try response.body.json.status == .CANCELLED else { throw AccountError.invalidResponse }
+                guard try response.body.json.status.uppercased() == "CANCELLED" else { throw AccountError.invalidResponse }
             case .unauthorized: throw AccountError.signedOut
             case .forbidden: throw AccountError.forbidden
             case .notFound: throw AccountError.notFound
@@ -111,8 +112,8 @@ public struct WireEvents: EventsService {
     }
 
     public func checkIn(code: String) async throws -> CheckInResultValue {
-        // The server rejects any string containing NUL (422); refuse an empty or oversized token locally.
-        guard !code.isEmpty, code.utf8.count <= 1024, !code.unicodeScalars.contains("\u{0}") else { throw AccountError.invalidInput }
+        // A token is exactly `<22 base64url>.<43 base64url>`; refuse anything else before it becomes a request.
+        guard CheckInToken.isWellFormed(code) else { throw AccountError.invalidInput }
         return try await call { client in
             switch try await client.checkInEvent(.init(body: .json(.init(token: code)))) {
             case .ok(let response):
@@ -183,17 +184,21 @@ public struct WireEvents: EventsService {
     }
 
     static func map(_ value: Components.Schemas.EventView) -> DonorEvent {
-        let status: ReservationStatus
-        switch value.reservation_status {
-        case .RESERVED?: status = .reserved
-        case .WAITLISTED?: status = .waitlisted
+        // `reservation_status` is an open string (unknown values mean no usable reservation). A donor who
+        // checked in keeps RESERVED on the wire; `checked_in_at` is what makes the event "checked in".
+        var status: ReservationStatus
+        switch value.reservation_status?.uppercased() {
+        case "RESERVED"?: status = .reserved
+        case "WAITLISTED"?: status = .waitlisted
         default: status = .none
         }
+        if status == .reserved, value.checked_in_at != nil { status = .checkedIn }
         return DonorEvent(
-            id: value.id, slug: value.slug, title: value.title, type: value._type.rawValue.lowercased(), venue: value.venue,
+            id: value.id, slug: value.slug, title: value.title, type: value._type.lowercased(), venue: value.venue,
             city: value.city, startsAt: value.starts_at, endsAt: value.ends_at, capacity: Int(value.capacity),
             spotsLeft: value.spots_left.map(Int.init) ?? 0, status: status, invitationNote: value.invitation_note,
             reportIssueURL: value.report_issue_url, cancelled: value.cancelled, bookingOpensAt: value.booking_opens_at,
-            earlyBooking: value.early_booking, details: value.description, address: value.address)
+            earlyBooking: value.early_booking, details: value.description, address: value.address,
+            timeZoneID: value.time_zone, checkedInAt: value.checked_in_at)
     }
 }

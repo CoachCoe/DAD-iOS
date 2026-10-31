@@ -194,10 +194,17 @@ final class CheckInModelHardeningTests: XCTestCase {
     private let inside = at("2026-12-01T18:30:00Z")
 
     func testEmptyAndControlCharacterCodesNeverReachTheService() async {
-        for code in ["", "   ", "a\u{0}b"] {
+        for code in ["", "   "] {
             let model = CheckInModel(service: ScriptedEvents(list: []))
             await model.submit(code: code, window: window, now: inside)
             XCTAssertEqual(model.state, .failed("Enter the code shown at the venue."), code)
+        }
+        for code in ["a\u{0}b", "tok", String(validCheckInToken.dropLast()), validCheckInToken + "x", "QR123"] {
+            let service = ScriptedEvents(list: [])
+            let model = CheckInModel(service: service)
+            await model.submit(code: code, window: window, now: inside)
+            guard case .failed(let message) = model.state else { return XCTFail("expected a shape failure for \(code)") }
+            XCTAssertTrue(message.hasPrefix("That doesn’t look like a full check-in code."), code)
         }
     }
 
@@ -209,7 +216,7 @@ final class CheckInModelHardeningTests: XCTestCase {
         ]
         for (error, message) in cases {
             let model = CheckInModel(service: FailingCheckIn(error: error))
-            await model.submit(code: "tok", window: window, now: inside)
+            await model.submit(code: validCheckInToken, window: window, now: inside)
             XCTAssertEqual(model.state, .failed(message))
         }
         _ = service
@@ -217,13 +224,13 @@ final class CheckInModelHardeningTests: XCTestCase {
 
     func testSignedOutIsFlagged() async {
         let model = CheckInModel(service: FailingCheckIn(error: AccountError.signedOut))
-        await model.submit(code: "tok", window: window, now: inside)
+        await model.submit(code: validCheckInToken, window: window, now: inside)
         XCTAssertTrue(model.signedOut)
     }
 
     func testCancelledCheckInRestoresThePriorState() async {
         let model = CheckInModel(service: FailingCheckIn(error: CancellationError()))
-        await model.submit(code: "tok", window: window, now: inside)
+        await model.submit(code: validCheckInToken, window: window, now: inside)
         XCTAssertEqual(model.state, .idle)
     }
 }
@@ -237,6 +244,84 @@ private struct FailingCheckIn: EventsService {
     func cancel(eventID: String) async throws { throw error }
     func checkIn(code: String) async throws -> CheckInResultValue { throw error }
     func calendar(eventID: String) async throws -> Data { throw error }
+}
+
+final class EventTimeZoneTests: XCTestCase {
+    private func event(zone: String) -> DonorEvent {
+        DonorEvent(id: "e", slug: "e", title: "t", type: "volunteer", venue: "v", city: "c",
+                   startsAt: at("2026-11-07T18:00:00Z"), endsAt: at("2026-11-07T20:00:00Z"), capacity: 1, spotsLeft: 1, status: .none,
+                   timeZoneID: zone)
+    }
+    private let en = Locale(identifier: "en_US")
+
+    /// Event in Los Angeles while the device (explicitly UTC here) is elsewhere: the venue's clock wins.
+    func testTimesUseTheEventZoneNotTheDeviceZone() {
+        let la = event(zone: "America/Los_Angeles")
+        let text = EventTime.range(la, locale: en)
+        XCTAssertTrue(text.contains("10:00"), text)   // 18:00Z is 10:00 PST
+        XCTAssertTrue(text.contains("12:00"), text)
+        XCTAssertTrue(text.contains("PST"), text)
+        let device = EventTime.range(la, timeZone: TimeZone(identifier: "UTC")!, locale: en)
+        XCTAssertTrue(device.contains("6:00"), device)
+        XCTAssertNotEqual(text, device)
+    }
+
+    func testDaylightTimeShowsDaylightAbbreviation() {
+        let summer = DonorEvent(id: "e", slug: "e", title: "t", type: "volunteer", venue: "v", city: "c",
+                                startsAt: at("2026-07-07T18:00:00Z"), endsAt: at("2026-07-07T20:00:00Z"), capacity: 1, spotsLeft: 1,
+                                status: .none, timeZoneID: "America/Los_Angeles")
+        let text = EventTime.start(summer, locale: en)
+        XCTAssertTrue(text.contains("11:00") && text.contains("PDT"), text)
+    }
+
+    func testUnknownZoneFallsBackToTheDeviceZone() {
+        XCTAssertNil(event(zone: "Mars/Olympus").timeZone)
+        XCTAssertNil(event(zone: "").timeZone)
+        let fallback = EventTime.start(event(zone: "Mars/Olympus"), locale: en)
+        XCTAssertEqual(fallback, EventTime.start(event(zone: "Mars/Olympus"), timeZone: .current, locale: en))
+    }
+
+    func testCheckInOpensMessageUsesTheEventZone() async {
+        let la = event(zone: "America/Los_Angeles")
+        let model = await MainActor.run { CheckInModel(service: ScriptedEvents(list: [])) }
+        await model.submit(code: validCheckInToken, window: la.checkInWindow, now: at("2026-11-07T10:00:00Z"))
+        let state = await MainActor.run { model.state }
+        guard case .outsideWindow(let reason) = state else { return XCTFail("expected outsideWindow") }
+        XCTAssertTrue(reason.contains("PST"), reason)
+    }
+}
+
+final class CheckInTokenTests: XCTestCase {
+    func testShape() {
+        XCTAssertTrue(CheckInToken.isWellFormed(validCheckInToken))
+        XCTAssertEqual(validCheckInToken.count, 66)
+        for bad in ["", "STUBCHECKIN", String(validCheckInToken.dropLast()), validCheckInToken + "a",
+                    validCheckInToken.replacingOccurrences(of: ".", with: "_"),                       // no separator
+                    "abcdefghijklmnopqrstu.ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_abcdef",            // 21 + 44
+                    String(validCheckInToken.dropLast()) + "+", String(validCheckInToken.dropLast()) + " ",
+                    String(validCheckInToken.dropLast()) + "é"] {
+            XCTAssertFalse(CheckInToken.isWellFormed(bad), bad)
+        }
+    }
+}
+
+@MainActor
+final class CheckedInReloadTests: XCTestCase {
+    func testCheckedInAtShowsAfterReload() async {
+        let service = ScriptedEvents(list: [event("e1", status: .reserved)])
+        let model = EventsModel(service: service)
+        await model.load()
+        XCTAssertNil(model.event(id: "e1")?.checkedInAt)
+        let stamp = at("2026-12-01T18:30:00Z")
+        await service.setList([DonorEvent(id: "e1", slug: "park-cleanup", title: "Park Cleanup", type: "volunteer", venue: "Zilker", city: "Austin",
+                                          startsAt: at("2026-12-01T18:00:00Z"), endsAt: at("2026-12-01T20:00:00Z"), capacity: 20, spotsLeft: 5,
+                                          status: .checkedIn, timeZoneID: "America/Chicago", checkedInAt: stamp)])
+        await model.reloadEvent(eventID: "e1")
+        XCTAssertEqual(model.event(id: "e1")?.status, .checkedIn)
+        XCTAssertEqual(model.event(id: "e1")?.checkedInAt, stamp)
+        await model.load()   // a relaunch re-reads the list: the state comes from the server, not the session
+        XCTAssertEqual(model.event(id: "e1")?.checkedInAt, stamp)
+    }
 }
 
 final class EventTimeTests: XCTestCase {

@@ -121,7 +121,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     // Events: reservation status per event id, and which codes have already checked in.
     private let eventsScenario: StubBackend.EventsScenario
     private var reservations: [String: String] = [StubEvents.workshop: "RESERVED"]
-    private var checkedIn = Set<String>()
+    private var checkedIn = [String: Date]()
     private var eventListFailureServed = false
 
     init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario, events: StubBackend.EventsScenario) {
@@ -221,7 +221,9 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         StubEvent(id: StubEvents.brunch, slug: "members-brunch", title: "Members Brunch", type: "COMMUNITY", venue: "Cafe Sol", city: "Austin",
                   startOffset: 5 * 86_400, duration: 5_400, capacity: 40, taken: 10),
     ]
-    private static let checkInTokens = ["STUBCHECKIN": StubEvents.workshop, "STUBPARK": StubEvents.park]
+    /// Well-formed tokens (`<22 base64url>.<43 base64url>`) the stub accepts, plus one well-formed but unknown.
+    static let checkInTokens = ["stubworkshop0stubworks.stubworkshopcheckin0stubworkshopcheckin0stu": StubEvents.workshop,
+                                "stubpark0stubpark0stub.stubparkcheckin0stubparkcheckin0stubparkche": StubEvents.park]
 
     private static func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
 
@@ -231,8 +233,9 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         // The donor's own seat counts toward what is taken (the fixture's `taken` is everyone else).
         let spots = max(0, event.capacity - event.taken - (mine == "RESERVED" ? 1 : 0))
         let status = mine.map { "\"\($0)\"" } ?? "null"
+        let checkedInAt = lock.withLock { checkedIn[event.id] }.map { "\"\(Self.iso($0))\"" } ?? "null"
         let note = event.note.map { "\"\($0)\"" } ?? "null"
-        return #"{"id":"\#(event.id)","slug":"\#(event.slug)","title":"\#(event.title)","type":"\#(event.type)","description":"Bring water and good shoes.","venue":"\#(event.venue)","address":"1 Main St","city":"\#(event.city)","starts_at":"\#(Self.iso(start))","ends_at":"\#(Self.iso(start.addingTimeInterval(event.duration)))","capacity":\#(event.capacity),"spots_left":\#(spots),"reservation_status":\#(status),"invitation_note":\#(note),"report_issue_url":"mailto:help@dad.org","cancelled":false,"booking_opens_at":null,"early_booking":false}"#
+        return #"{"id":"\#(event.id)","slug":"\#(event.slug)","title":"\#(event.title)","type":"\#(event.type)","description":"Bring water and good shoes.","venue":"\#(event.venue)","address":"1 Main St","city":"\#(event.city)","starts_at":"\#(Self.iso(start))","ends_at":"\#(Self.iso(start.addingTimeInterval(event.duration)))","capacity":\#(event.capacity),"spots_left":\#(spots),"reservation_status":\#(status),"time_zone":"America/Chicago","checked_in_at":\#(checkedInAt),"invitation_note":\#(note),"report_issue_url":"mailto:help@dad.org","cancelled":false,"booking_opens_at":null,"early_booking":false}"#
     }
 
     private func events(_ request: HTTPRequest, _ payload: String, authorized: Bool,
@@ -263,7 +266,11 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             guard now >= start, now <= start.addingTimeInterval(event.duration), lock.withLock({ reservations[id] }) == "RESERVED" else {
                 return reply(.unprocessableContent, "{}")
             }
-            let already = lock.withLock { !checkedIn.insert(id).inserted }
+            let already = lock.withLock { () -> Bool in
+                if checkedIn[id] != nil { return true }
+                checkedIn[id] = now
+                return false
+            }
             return reply(.ok, #"{"event_id":"\#(id)","checked_in":\#(!already),"already_checked_in":\#(already)}"#)
         case (.get, 4):
             guard let event = Self.eventTable.first(where: { $0.id == parts[3] }), visible(event) else { return reply(.notFound, "{}") }

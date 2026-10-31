@@ -49,6 +49,16 @@ extension Error {
     }
 }
 
+/// The shape of a check-in token: exactly `<22 base64url>.<43 base64url>` (66 characters).
+public enum CheckInToken {
+    public static let length = 66
+    public static func isWellFormed(_ code: String) -> Bool {
+        let parts = code.split(separator: ".", omittingEmptySubsequences: false)
+        guard code.utf8.count == length, parts.count == 2, parts[0].utf8.count == 22, parts[1].utf8.count == 43 else { return false }
+        return code.utf8.allSatisfy { $0 == 0x2E || $0 == 0x2D || $0 == 0x5F || ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x5A) || ($0 >= 0x61 && $0 <= 0x7A) }
+    }
+}
+
 /// Domain mirror of the contract's `CheckInResult` so the model/tests never import transport.
 public struct CheckInResultValue: Sendable, Equatable {
     public let eventID: String
@@ -192,6 +202,13 @@ public final class EventsModel {
         }
     }
 
+    /// Re-read one event (after a check-in) so `checkedInAt` shows; a failed read keeps what is on screen.
+    public func reloadEvent(eventID: String) async {
+        guard let index = events.firstIndex(where: { $0.id == eventID }),
+              let updated = try? await service.event(id: eventID) else { return }
+        events[index] = updated
+    }
+
     public func clearCalendar() { calendarFile = nil }
 
     /// Re-fetch one event after a mutation and splice it back into the list in place.
@@ -228,7 +245,8 @@ extension DonorEvent {
             id: id, slug: slug, title: title, type: type, venue: venue, city: city, startsAt: startsAt, endsAt: endsAt,
             capacity: capacity, spotsLeft: spotsLeft, status: status, invitationNote: invitationNote,
             reportIssueURL: reportIssueURL, cancelled: cancelled, bookingOpensAt: bookingOpensAt,
-            earlyBooking: earlyBooking, details: details, address: address)
+            earlyBooking: earlyBooking, details: details, address: address,
+            timeZoneID: timeZoneID, checkedInAt: checkedInAt)
     }
 }
 
@@ -251,10 +269,6 @@ public final class CheckInModel {
     public private(set) var state: State = .idle
     public private(set) var signedOut = false
 
-    /// A code is a short opaque token; refuse anything empty, oversized or with control characters
-    /// (the server rejects NUL) before it becomes a request.
-    static let maxCodeLength = 512
-
     private let service: any EventsService
 
     public init(service: any EventsService) { self.service = service }
@@ -266,7 +280,7 @@ public final class CheckInModel {
         let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines)
         switch window.state(now: now) {
         case .tooEarly(let opensAt):
-            state = .outsideWindow(reason: "Check-in opens \(Self.timeLabel(opensAt)).")
+            state = .outsideWindow(reason: "Check-in opens \(EventTime.moment(opensAt, timeZone: window.timeZone)).")
             return
         case .tooLate:
             state = .outsideWindow(reason: "Check-in for this event has closed.")
@@ -274,8 +288,12 @@ public final class CheckInModel {
         case .open:
             break
         }
-        guard !code.isEmpty, code.count <= Self.maxCodeLength, !code.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard !code.isEmpty else {
             state = .failed("Enter the code shown at the venue.")
+            return
+        }
+        guard CheckInToken.isWellFormed(code) else {
+            state = .failed("That doesn’t look like a full check-in code. Scan the QR code again, or paste the whole code exactly as shown (\(CheckInToken.length) characters).")
             return
         }
         let prior = state
@@ -293,7 +311,4 @@ public final class CheckInModel {
 
     public func reset() { state = .idle }
 
-    static func timeLabel(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .shortened)
-    }
 }

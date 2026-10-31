@@ -10,6 +10,10 @@ import XCTest
     private let workshop = "11111111-0000-4000-8000-000000000004"
     private let brunch = "11111111-0000-4000-8000-000000000005"
 
+    /// Well-formed check-in tokens (`<22>.<43>` base64url): the stub accepts the workshop's; the other is well formed but unknown.
+    private let workshopToken = "stubworkshop0stubworks.stubworkshopcheckin0stubworkshopcheckin0stu"
+    private let unknownToken = "unknown0unknown0unknow.unknowncheckin0unknowncheckin0unknownchecki"
+
     private func launch(_ extra: String...) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--stub-backend", "--stub-signed-in"] + extra
@@ -92,10 +96,14 @@ import XCTest
         let code = app.textFields["checkin-code"]
         XCTAssertTrue(code.waitForExistence(timeout: 5))
         code.tap()
-        code.typeText("STUBCHECKIN")
+        code.typeText(workshopToken)
         app.buttons["checkin-submit"].tap()
         XCTAssertTrue(app.staticTexts["checkin-result"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["checkin-result"].label, "You’re checked in. Thanks for showing up.")
+        let status = app.staticTexts["status-\(workshop)"]
+        XCTAssertTrue(status.waitForExistence(timeout: 10), "checked_in_at drives the checked-in state")
+        XCTAssertTrue(status.label.hasPrefix("Checked in · "), status.label)
+        XCTAssertTrue(status.label.hasSuffix("CST") || status.label.hasSuffix("CDT"), "shown in the event's zone: \(status.label)")
         app.buttons["checkin-submit"].tap()
         XCTAssertTrue(app.staticTexts["You were already checked in."].waitForExistence(timeout: 10))
     }
@@ -107,10 +115,31 @@ import XCTest
         let code = app.textFields["checkin-code"]
         XCTAssertTrue(code.waitForExistence(timeout: 5))
         code.tap()
-        code.typeText("NOTACODE")
+        code.typeText(unknownToken)
         app.buttons["checkin-submit"].tap()
         XCTAssertTrue(app.staticTexts["checkin-result"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["checkin-result"].label.hasPrefix("That code didn’t work."))
+    }
+
+    func testAMalformedCodeIsRefusedBeforeAnyRequest() {
+        let app = launch()
+        openEvents(app)
+        openDetail(app, workshop)
+        let code = app.textFields["checkin-code"]
+        XCTAssertTrue(code.waitForExistence(timeout: 5))
+        code.tap()
+        code.typeText("NOTACODE")
+        app.buttons["checkin-submit"].tap()
+        XCTAssertTrue(app.staticTexts["checkin-result"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["checkin-result"].label.hasPrefix("That doesn’t look like a full check-in code."))
+    }
+
+    func testEventTimesCarryTheEventZoneAbbreviation() {
+        let app = launch()
+        openEvents(app)
+        openDetail(app, park)
+        let label = app.staticTexts["event-time"].label
+        XCTAssertTrue(label.hasSuffix("CST") || label.hasSuffix("CDT"), "the stub venue is America/Chicago: \(label)")
     }
 
     func testCheckInOutsideTheWindowOffersNoScannerAndSaysWhenItOpens() {

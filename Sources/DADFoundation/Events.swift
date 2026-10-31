@@ -75,12 +75,17 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
     public let details: String
     /// Street address (E-3); empty when the server sent none.
     public let address: String
+    /// IANA identifier of the venue's time zone (contract `time_zone`); empty when unknown.
+    public let timeZoneID: String
+    /// When the signed-in donor checked in (E-8); nil until they do.
+    public let checkedInAt: Date?
 
     public init(
         id: String, slug: String, title: String, type: String, venue: String, city: String,
         startsAt: Date, endsAt: Date, capacity: Int, spotsLeft: Int, status: ReservationStatus,
         invitationNote: String? = nil, reportIssueURL: String? = nil, cancelled: Bool = false,
-        bookingOpensAt: Date? = nil, earlyBooking: Bool = false, details: String = "", address: String = ""
+        bookingOpensAt: Date? = nil, earlyBooking: Bool = false, details: String = "", address: String = "",
+        timeZoneID: String = "", checkedInAt: Date? = nil
     ) {
         self.id = id
         self.slug = slug
@@ -100,7 +105,12 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
         self.earlyBooking = earlyBooking
         self.details = details
         self.address = address
+        self.timeZoneID = timeZoneID
+        self.checkedInAt = checkedInAt
     }
+
+    /// The venue's zone, or nil when the identifier is empty or unknown to this device.
+    public var timeZone: TimeZone? { TimeZone(identifier: timeZoneID) }
 
     /// Whether this event is invite-only (E-5): the contract's INVITE_ONLY type, or an invitation note.
     public var isInviteOnly: Bool { invitationNote != nil || type.lowercased() == "invite_only" }
@@ -125,7 +135,7 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
     }
 
     /// The window in which check-in is accepted (E-8), exactly as the server enforces it.
-    public var checkInWindow: CheckInWindow { CheckInWindow(startsAt: startsAt, endsAt: endsAt) }
+    public var checkInWindow: CheckInWindow { CheckInWindow(startsAt: startsAt, endsAt: endsAt, timeZone: timeZone) }
 
     /// Check-in is for a held seat, not a waitlist place (the server answers 422 otherwise).
     public var canAttemptCheckIn: Bool { !cancelled && status == .reserved }
@@ -167,10 +177,13 @@ public struct CheckInWindow: Sendable, Equatable {
 
     public let startsAt: Date
     public let endsAt: Date
+    /// The event's zone, used only to word "opens at ..." messages; nil falls back to the device zone.
+    public let timeZone: TimeZone?
 
-    public init(startsAt: Date, endsAt: Date) {
+    public init(startsAt: Date, endsAt: Date, timeZone: TimeZone? = nil) {
         self.startsAt = startsAt
         self.endsAt = endsAt
+        self.timeZone = timeZone
     }
 
     public var opensAt: Date { startsAt.addingTimeInterval(-Self.earlyGrace) }
@@ -216,26 +229,39 @@ public enum ReservationOutcome: Sendable, Equatable {
 
 // MARK: - Time display (E-3)
 
-/// Event times in a stated time zone with the donor's locale (E-3). The contract's `EventView`
-/// carries no time zone of its own (only `city`), so callers pass the device zone today; the zone
-/// abbreviation is always shown so a time is never ambiguous. Pure, so it is unit-tested.
+/// Event times in the EVENT's time zone with the donor's locale (E-3), always with the zone abbreviation
+/// so a time is never ambiguous. An explicit `timeZone` wins; otherwise the event's `time_zone`; the
+/// device zone is only the fallback for an identifier this device does not know. Pure, so it is unit-tested.
 public enum EventTime {
-    public static func start(_ event: DonorEvent, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
-        let date = event.startsAt.formatted(Self.style(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), timeZone, locale))
-        return "\(date) \(zone(event.startsAt, timeZone, locale))"
+    public static func start(_ event: DonorEvent, timeZone: TimeZone? = nil, locale: Locale = .current) -> String {
+        moment(event.startsAt, in: event, timeZone: timeZone, locale: locale)
+    }
+
+    /// "Wed, Nov 4, 3:00 PM CST" for any instant (booking opens, check-in opens) in the event's zone.
+    public static func moment(_ date: Date, in event: DonorEvent, timeZone: TimeZone? = nil, locale: Locale = .current) -> String {
+        moment(date, timeZone: resolve(event, timeZone), locale: locale)
+    }
+
+    public static func moment(_ date: Date, timeZone: TimeZone?, locale: Locale = .current) -> String {
+        let zone = timeZone ?? .current
+        let text = date.formatted(Self.style(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), zone, locale))
+        return "\(text) \(abbreviation(date, zone, locale))"
     }
 
     /// "Sat, Nov 7, 10:00 AM – 12:00 PM CST" (the end carries its date only when it is another day).
-    public static func range(_ event: DonorEvent, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+    public static func range(_ event: DonorEvent, timeZone: TimeZone? = nil, locale: Locale = .current) -> String {
+        let zone = resolve(event, timeZone)
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = timeZone
-        let startText = event.startsAt.formatted(Self.style(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), timeZone, locale))
+        calendar.timeZone = zone
+        let startText = event.startsAt.formatted(Self.style(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), zone, locale))
         let sameDay = calendar.isDate(event.startsAt, inSameDayAs: event.endsAt)
         let endText = event.endsAt.formatted(Self.style(sameDay
             ? .dateTime.hour().minute()
-            : .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), timeZone, locale))
-        return "\(startText) – \(endText) \(zone(event.endsAt, timeZone, locale))"
+            : .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), zone, locale))
+        return "\(startText) – \(endText) \(abbreviation(event.endsAt, zone, locale))"
     }
+
+    private static func resolve(_ event: DonorEvent, _ explicit: TimeZone?) -> TimeZone { explicit ?? event.timeZone ?? .current }
 
     private static func style(_ format: Date.FormatStyle, _ timeZone: TimeZone, _ locale: Locale) -> Date.FormatStyle {
         var style = format
@@ -244,7 +270,7 @@ public enum EventTime {
         return style
     }
 
-    private static func zone(_ date: Date, _ timeZone: TimeZone, _ locale: Locale) -> String {
+    private static func abbreviation(_ date: Date, _ timeZone: TimeZone, _ locale: Locale) -> String {
         timeZone.localizedName(for: timeZone.isDaylightSavingTime(for: date) ? .shortDaylightSaving : .shortStandard, locale: locale)
             ?? timeZone.abbreviation(for: date) ?? timeZone.identifier
     }

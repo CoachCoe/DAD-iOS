@@ -149,9 +149,10 @@ private struct EventActions: View {
             case .reserved, .waitlisted:
                 held(now: now)
             case .checkedIn:
-                Text("Checked in").font(.subheadline.bold()).foregroundStyle(Color.dad("brand-ink"))
+                Text(event.checkedInAt.map { "Checked in · \(EventTime.moment($0, in: event))" } ?? "Checked in")
+                    .font(.subheadline.bold()).foregroundStyle(Color.dad("brand-ink")).accessibilityIdentifier("status-\(event.id)")
             case let .notYetOpen(opensAt):
-                Text("Booking opens \(opensAt.formatted(date: .abbreviated, time: .shortened))")
+                Text("Booking opens \(EventTime.moment(opensAt, in: event))")
                     .font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("not-open-\(event.id)")
             case .started:
                 Text("This event has already started.").font(.footnote).foregroundStyle(.secondary)
@@ -215,8 +216,9 @@ private struct EventDetail: View {
                     EventActions(model: model, event: event, confirmingCancel: $confirmingCancel)
                 }
             }.accessibilityElement(children: .contain).accessibilityIdentifier("event-detail-\(event.id)")
-            if event.status == .reserved || event.status == .waitlisted {
-                CheckInPanel(model: CheckInModel(service: service), event: event, onSignedOut: {})
+            if event.status == .reserved || event.status == .waitlisted || event.status == .checkedIn {
+                CheckInPanel(model: CheckInModel(service: service), event: event, onSignedOut: {},
+                             onCheckedIn: { await model.reloadEvent(eventID: event.id) })
                     .id(event.id)
             }
             if !event.cancelled {
@@ -241,6 +243,7 @@ private struct CheckInPanel: View {
     @State var model: CheckInModel
     let event: DonorEvent
     let onSignedOut: () -> Void
+    let onCheckedIn: () async -> Void
     @State private var code = ""
     @State private var scanning = false
 
@@ -254,13 +257,16 @@ private struct CheckInPanel: View {
         DADCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Check in").font(.headline).accessibilityAddTraits(.isHeader)
-                if !event.canAttemptCheckIn {
+                if event.status == .checkedIn, model.state == .idle {
+                    Text(event.checkedInAt.map { "You’re checked in (\(EventTime.moment($0, in: event)))." } ?? "You’re checked in.")
+                        .font(.subheadline.bold()).accessibilityIdentifier("checkin-result")
+                } else if !event.canAttemptCheckIn && event.status != .checkedIn {
                     Text("Check-in is for reserved seats. You’re on the waitlist.").font(.footnote)
                         .accessibilityIdentifier("checkin-waitlisted")
                 } else {
                     switch event.checkInWindow.state(now: now) {
                     case let .tooEarly(opensAt):
-                        Text("Check-in opens \(opensAt.formatted(date: .abbreviated, time: .shortened)), when the event starts.")
+                        Text("Check-in opens \(EventTime.moment(opensAt, in: event)), when the event starts.")
                             .font(.footnote).accessibilityIdentifier("checkin-closed")
                     case .tooLate:
                         Text("Check-in for this event has closed.").font(.footnote).accessibilityIdentifier("checkin-closed")
@@ -276,9 +282,15 @@ private struct CheckInPanel: View {
             QRScanSheet(onCode: { scanned in
                 scanning = false
                 code = scanned
-                Task { await model.submit(code: scanned, window: event.checkInWindow, now: Date()) }
+                Task { await submit(scanned) }
             }, onClose: { scanning = false })
         }
+    }
+
+    /// Submit, then re-read the event so the list and detail show the server's `checked_in_at`.
+    private func submit(_ value: String) async {
+        await model.submit(code: value, window: event.checkInWindow, now: Date())
+        if case .success = model.state { await onCheckedIn() }
     }
 
     @ViewBuilder private func entry(now: Date) -> some View {
@@ -289,7 +301,7 @@ private struct CheckInPanel: View {
             .textInputAutocapitalization(.never).autocorrectionDisabled()
             .textFieldStyle(.roundedBorder).accessibilityIdentifier("checkin-code")
         Button(model.state == .checking ? "Checking in…" : "Check in") {
-            Task { await model.submit(code: code, window: event.checkInWindow, now: Date()) }
+            Task { await submit(code) }
         }
         .buttonStyle(DADButtonStyle(.primary)).disabled(model.state == .checking || code.trimmingCharacters(in: .whitespaces).isEmpty)
         .accessibilityIdentifier("checkin-submit")

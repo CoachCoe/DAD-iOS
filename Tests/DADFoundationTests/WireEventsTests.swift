@@ -8,10 +8,14 @@ private let eventA = "11111111-0000-4000-8000-000000000001"
 private let eventB = "11111111-0000-4000-8000-000000000002"
 private let eventC = "11111111-0000-4000-8000-000000000003"
 
+/// A well-formed check-in token: 22 + "." + 43 base64url characters.
+let validCheckInToken = "abcdefghijklmnopqrstuv.ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_abcde"
+
 func eventJSON(id: String = eventA, type: String = "VOLUNTEER", status: String = "null", note: String = "null", capacity: Int = 20,
                spots: String = "8", start: String = "2026-11-07T15:00:00Z", end: String = "2026-11-07T17:00:00Z",
-               opens: String = "null", early: Bool = false, cancelled: Bool = false, report: String = #""mailto:help@dad.org""#) -> String {
-    #"{"id":"\#(id)","slug":"park-cleanup","title":"Park Cleanup","type":"\#(type)","description":"Bring water.","venue":"Zilker Park","address":"2100 Barton Springs Rd","city":"Austin","starts_at":"\#(start)","ends_at":"\#(end)","capacity":\#(capacity),"spots_left":\#(spots),"reservation_status":\#(status),"invitation_note":\#(note),"report_issue_url":\#(report),"cancelled":\#(cancelled),"booking_opens_at":\#(opens),"early_booking":\#(early)}"#
+               opens: String = "null", early: Bool = false, cancelled: Bool = false, report: String = #""mailto:help@dad.org""#,
+               zone: String = "America/Chicago", checkedInAt: String = "null") -> String {
+    #"{"id":"\#(id)","slug":"park-cleanup","title":"Park Cleanup","type":"\#(type)","description":"Bring water.","venue":"Zilker Park","address":"2100 Barton Springs Rd","city":"Austin","starts_at":"\#(start)","ends_at":"\#(end)","capacity":\#(capacity),"spots_left":\#(spots),"reservation_status":\#(status),"time_zone":"\#(zone)","checked_in_at":\#(checkedInAt),"invitation_note":\#(note),"report_issue_url":\#(report),"cancelled":\#(cancelled),"booking_opens_at":\#(opens),"early_booking":\#(early)}"#
 }
 private func listJSON(_ rows: String...) -> String { #"{"events":[\#(rows.joined(separator: ","))]}"# }
 private let icsText = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nSUMMARY:Park Cleanup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
@@ -103,6 +107,47 @@ final class WireEventsTests: XCTestCase {
         XCTAssertEqual(event.startsAt.timeIntervalSince1970, 1_794_063_600)
     }
 
+    func testUnknownEnumValuesDecodeInsteadOfFailingTheList() async throws {
+        let rig = try make(ScriptedTransport { seen, _ in
+            seen.request.path == "/donor/me/events/invite-only" ? (.ok, listJSON())
+                : (.ok, listJSON(eventJSON(type: "GALA", status: #""PENDING_REVIEW""#)))
+        })
+        let events = try await rig.service.events()
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(event.type, "gala")
+        XCTAssertEqual(event.typeLabel, "Gala")
+        XCTAssertEqual(event.status, .none, "an unknown reservation status is no usable reservation")
+    }
+
+    func testUnknownReservationResultStatusIsNotASuccess() async throws {
+        for json in [#"{"status":"PENDING"}"#] {
+            let reserve = try make(ScriptedTransport { _, _ in (.ok, json) })
+            do { _ = try await reserve.service.reserve(eventID: eventA); XCTFail() } catch { XCTAssertEqual(error as? AccountError, .invalidResponse) }
+            let cancel = try make(ScriptedTransport { _, _ in (.ok, json) })
+            do { try await cancel.service.cancel(eventID: eventA); XCTFail() } catch { XCTAssertEqual(error as? AccountError, .invalidResponse) }
+        }
+    }
+
+    func testTimeZoneAndCheckedInAtAreMapped() async throws {
+        let rig = try make(ScriptedTransport { seen, _ in
+            seen.request.path == "/donor/me/events/invite-only" ? (.ok, listJSON())
+                : (.ok, listJSON(eventJSON(status: #""RESERVED""#, zone: "America/Los_Angeles", checkedInAt: #""2026-11-07T15:05:00Z""#)))
+        })
+        let events = try await rig.service.events()
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(event.timeZoneID, "America/Los_Angeles")
+        XCTAssertEqual(event.checkedInAt?.timeIntervalSince1970, 1_794_063_900)
+        XCTAssertEqual(event.status, .checkedIn, "RESERVED plus checked_in_at is checked in")
+        XCTAssertEqual(event.availability(now: Date(timeIntervalSince1970: 1_794_064_000)), .checkedIn)
+    }
+
+    func testReservedWithoutCheckedInAtStaysReserved() async throws {
+        let rig = try make(ScriptedTransport { _, _ in (.ok, eventJSON(status: #""RESERVED""#)) })
+        let event = try await rig.service.event(id: eventA)
+        XCTAssertEqual(event.status, .reserved)
+        XCTAssertNil(event.checkedInAt)
+    }
+
     func testFractionalSecondTimestampsDecode() async throws {
         let rig = try make(ScriptedTransport { seen, _ in
             seen.request.path == "/donor/me/events/invite-only" ? (.ok, listJSON())
@@ -131,7 +176,7 @@ final class WireEventsTests: XCTestCase {
 
     func testMalformedAndOversizeBodiesThrow() async throws {
         let padding = String(repeating: "a", count: 1_100_000)
-        for body in [#"{"events":[{"id":"x"}]}"#, "<html>", listJSON(eventJSON(status: #""MAYBE""#)), #"{"events":[],"pad":""# + padding + #""}"#] {
+        for body in [#"{"events":[{"id":"x"}]}"#, "<html>", listJSON(eventJSON(zone: "")).replacingOccurrences(of: "\"time_zone\":\"\",", with: ""), #"{"events":[],"pad":""# + padding + #""}"#] {
             let rig = try make(ScriptedTransport { _, _ in (.ok, body) })
             do { _ = try await rig.service.events(); XCTFail(String(body.prefix(40))) } catch {}
         }
@@ -287,17 +332,17 @@ final class WireEventsTests: XCTestCase {
     func testCheckInPostsTheTokenAndMapsTheResult() async throws {
         let transport = ScriptedTransport { _, _ in (.ok, #"{"event_id":"\#(eventA)","checked_in":true,"already_checked_in":false}"#) }
         let rig = try make(transport)
-        let result = try await rig.service.checkIn(code: "tok-123")
+        let result = try await rig.service.checkIn(code: validCheckInToken)
         XCTAssertEqual(result, CheckInResultValue(eventID: eventA, checkedIn: true, alreadyCheckedIn: false))
         let call = try XCTUnwrap(transport.seen.first)
         XCTAssertEqual(call.request.path, "/donor/me/events/check-in")
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: String])
-        XCTAssertEqual(body, ["token": "tok-123"])
+        XCTAssertEqual(body, ["token": validCheckInToken])
     }
 
     func testCheckInSecondScanIsAlreadyCheckedIn() async throws {
         let rig = try make(ScriptedTransport { _, _ in (.ok, #"{"event_id":"\#(eventA)","checked_in":false,"already_checked_in":true}"#) })
-        let result = try await rig.service.checkIn(code: "tok")
+        let result = try await rig.service.checkIn(code: validCheckInToken)
         XCTAssertTrue(result.alreadyCheckedIn)
     }
 
@@ -309,13 +354,14 @@ final class WireEventsTests: XCTestCase {
             (.tooManyRequests, "{}", .rateLimited),
             (.serviceUnavailable, "{}", .unavailable),
             (.unsupportedMediaType, "{}", .unavailable),
-        ]) { _ = try await $0.checkIn(code: "tok") }
+        ]) { _ = try await $0.checkIn(code: validCheckInToken) }
     }
 
     func testCheckInRefusesEmptyOrNulCodesWithoutCallingTheServer() async throws {
         let transport = ScriptedTransport { _, _ in (.ok, "{}") }
         let rig = try make(transport)
-        for code in ["", "a\u{0}b", String(repeating: "x", count: 2000)] {
+        for code in ["", "a\u{0}b", String(repeating: "x", count: 2000), "tok", String(validCheckInToken.dropLast()), validCheckInToken + "x",
+                     validCheckInToken.replacingOccurrences(of: ".", with: "-"), String(validCheckInToken.dropLast()) + "="] {
             do { _ = try await rig.service.checkIn(code: code); XCTFail() }
             catch { XCTAssertEqual(error as? AccountError, .invalidInput) }
         }
@@ -324,7 +370,7 @@ final class WireEventsTests: XCTestCase {
 
     func testCheckInMalformedBodyThrows() async throws {
         let rig = try make(ScriptedTransport { _, _ in (.ok, #"{"event_id":"x"}"#) })
-        do { _ = try await rig.service.checkIn(code: "tok"); XCTFail() } catch {}
+        do { _ = try await rig.service.checkIn(code: validCheckInToken); XCTFail() } catch {}
     }
 
     // MARK: calendar

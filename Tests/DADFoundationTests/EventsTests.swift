@@ -295,7 +295,7 @@ final class CheckInModelTests: XCTestCase {
     func testRejectsBeforeWindowWithoutCallingService() async {
         let service = FakeEventsService(list: [])
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T16:00:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T16:00:00Z"))
         guard case .outsideWindow(let reason) = model.state else { return XCTFail("expected outsideWindow (too early)") }
         XCTAssertTrue(reason.hasPrefix("Check-in opens "))
         let calls = await service.checkInCalls
@@ -305,7 +305,7 @@ final class CheckInModelTests: XCTestCase {
     func testRejectsAfterWindow() async {
         let service = FakeEventsService(list: [])
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T21:00:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T21:00:00Z"))
         XCTAssertEqual(model.state, .outsideWindow(reason: "Check-in for this event has closed."))
         let calls = await service.checkInCalls
         XCTAssertEqual(calls, 0)
@@ -314,14 +314,14 @@ final class CheckInModelTests: XCTestCase {
     func testChecksInInsideWindow() async {
         let service = FakeEventsService(list: [], checkInResult: CheckInResultValue(eventID: "e1", checkedIn: true, alreadyCheckedIn: false))
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T18:30:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T18:30:00Z"))
         XCTAssertEqual(model.state, .success(alreadyCheckedIn: false))
     }
 
     func testAlreadyCheckedInSurfaced() async {
         let service = FakeEventsService(list: [], checkInResult: CheckInResultValue(eventID: "e1", checkedIn: false, alreadyCheckedIn: true))
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T18:30:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T18:30:00Z"))
         XCTAssertEqual(model.state, .success(alreadyCheckedIn: true))
     }
 
@@ -329,7 +329,7 @@ final class CheckInModelTests: XCTestCase {
         let service = FakeEventsService(list: [])
         await service.setThrowOnCheckIn(AccountError.invalidResponse)
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T18:30:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T18:30:00Z"))
         if case .failed = model.state {} else { XCTFail("expected failed") }
     }
 }
