@@ -75,6 +75,7 @@ filter:
     - checkInEvent
     - eventDetail
     - eventCalendar
+    - donorEventCalendar
     # --- Employee / matching (Phase D/F) ---
     - employeeEnroll
     - employeeJoinTeam

@@ -28,7 +28,20 @@ struct ProductClient: Sendable {
     func perform<T: Sendable>(_ operation: @Sendable (Client) async throws -> T) async throws -> T {
         let origin = origin, transport = transport
         return try await session.authorized { access in
-            try await operation(Client(serverURL: origin, transport: transport, middlewares: [NativeHeaders(access: { access })]))
+            try await operation(Client(serverURL: origin, configuration: .init(dateTranscoder: LenientDateTranscoder()),
+                                       transport: transport, middlewares: [NativeHeaders(access: { access })]))
         }
+    }
+}
+
+/// The server's timestamps are RFC 3339: whole seconds today, but a value with fractional seconds
+/// (Go's encoder emits them whenever the instant has any) must not fail the whole response. Accepts
+/// both on read and always writes the plain form.
+struct LenientDateTranscoder: DateTranscoder {
+    func encode(_ date: Date) throws -> String { date.formatted(.iso8601) }
+    func decode(_ dateString: String) throws -> Date {
+        if let plain = try? Date(dateString, strategy: .iso8601) { return plain }
+        if let fractional = try? Date(dateString, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)) { return fractional }
+        throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Expected date string to be ISO8601-formatted."))
     }
 }
