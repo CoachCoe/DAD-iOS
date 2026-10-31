@@ -21,6 +21,8 @@ public enum AccountError: Error, Sendable, Equatable {
     case conflict
     /// 503 carrying a `code`: this deployment has deliberately not configured payments. Not transient.
     case paymentsUnavailable
+    /// 404 on an event command or read: the event is gone, hidden from this donor, or the id is not one.
+    case notFound
 }
 
 public struct Credentials: Codable, Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {

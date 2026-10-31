@@ -42,6 +42,12 @@ public enum StubBackend {
     /// `activeFailFirst`: like `active`, but the first recurring read is a 503 (the error + retry path).
     public enum GiftScenario: Sendable { case none, active, activeFailFirst }
 
+    /// What the scripted events answer. `standard`: five events (one reservable, one full, one invite-only unlocked
+    /// for this donor, one in progress that the donor already holds a seat for, one that refuses the donor with
+    /// 403). `ungated`: the donor lacks the badge, so the invite-only event is neither listed nor readable (404).
+    /// `failFirst`: the first list read is a 503, then it behaves like `standard`.
+    public enum EventsScenario: Sendable { case standard, ungated, failFirst }
+
     public struct Services: Sendable {
         public let session: AccountSession
         public let signIn: any SignInService
@@ -50,14 +56,15 @@ public enum StubBackend {
         public let passwords: any PasswordSettingsService
         public let dashboard: any DashboardService
         public let giving: any GivingService
+        public let events: any EventsService
         /// Plays the Stripe webhook after the stubbed hosted page "finishes" (a gift starts, a card is applied).
         public let completeHandoff: @Sendable (HostedHandoff.Purpose) -> Void
     }
 
     /// `signedIn` starts with a stored session (as after a relaunch), skipping the phone sign-in dance.
     public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, gift: GiftScenario = .none,
-                            signedIn: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
-        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift)
+                            events: EventsScenario = .standard, signedIn: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
+        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift, events: events)
         let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore(signedIn ? Credentials(
             access: "stub-access-0", refresh: "stub-refresh-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx", expiresAt: Date().addingTimeInterval(900)) : nil))
         let product = ProductClient(origin: origin, transport: transport, session: session)
@@ -69,8 +76,18 @@ public enum StubBackend {
             passwords: WirePasswordSettings(product: product),
             dashboard: WireDashboard(product: product),
             giving: WireGiving(product: product),
+            events: WireEvents(product: product),
             completeHandoff: { transport.completeHandoff($0) })
     }
+}
+
+/// Fixed ids for the scripted events (`StubBackend.EventsScenario`), shared with the UITests' expectations.
+enum StubEvents {
+    static let park = "11111111-0000-4000-8000-000000000001"
+    static let foodBank = "11111111-0000-4000-8000-000000000002"
+    static let dinner = "11111111-0000-4000-8000-000000000003"
+    static let workshop = "11111111-0000-4000-8000-000000000004"
+    static let brunch = "11111111-0000-4000-8000-000000000005"
 }
 
 private final class StubTransport: ClientTransport, @unchecked Sendable {
@@ -101,8 +118,14 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private static let subscriptionID = "5d6f1d9e-0a5b-4e6f-8d0f-3f1c2a9b7c10"
     private static let periodEnd = "2026-11-20T15:00:00Z"
 
-    init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario) {
-        self.deletionBlocked = deletionBlocked; self.scenario = scenario
+    // Events: reservation status per event id, and which codes have already checked in.
+    private let eventsScenario: StubBackend.EventsScenario
+    private var reservations: [String: String] = [StubEvents.workshop: "RESERVED"]
+    private var checkedIn = Set<String>()
+    private var eventListFailureServed = false
+
+    init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario, events: StubBackend.EventsScenario) {
+        self.deletionBlocked = deletionBlocked; self.scenario = scenario; eventsScenario = events
         giftAmount = gift == .none ? nil : 15000
         failFirstRecurring = gift == .activeFailFirst
     }
@@ -173,6 +196,96 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             guard lock.withLock({ giftAmount }) != nil else { return reply(.conflict, "{}") }
             lock.withLock { payment = .open }
             return reply(.ok, #"{"url":"https://stub.invalid/pay/setup"}"#)
+        default: return nil
+        }
+    }
+
+
+    // MARK: events
+
+    private struct StubEvent {
+        let id: String, slug: String, title: String, type: String, venue: String, city: String
+        let startOffset: TimeInterval, duration: TimeInterval, capacity: Int, taken: Int
+        var note: String? = nil
+    }
+
+    private static let eventTable: [StubEvent] = [
+        StubEvent(id: StubEvents.park, slug: "park-cleanup", title: "Park Cleanup", type: "VOLUNTEER", venue: "Zilker Park", city: "Austin",
+                  startOffset: 3 * 86_400, duration: 7_200, capacity: 20, taken: 12),
+        StubEvent(id: StubEvents.foodBank, slug: "food-bank-night", title: "Food Bank Night", type: "COMMUNITY", venue: "Central Kitchen", city: "Austin",
+                  startOffset: 4 * 86_400, duration: 7_200, capacity: 30, taken: 30),
+        StubEvent(id: StubEvents.dinner, slug: "founders-dinner", title: "Founders Dinner", type: "INVITE_ONLY", venue: "The Loft", city: "Austin",
+                  startOffset: 6 * 86_400, duration: 10_800, capacity: 20, taken: 15, note: "Invitation earned at Founding Donor"),
+        StubEvent(id: StubEvents.workshop, slug: "live-workshop", title: "Live Workshop", type: "VOLUNTEER", venue: "Maker Hall", city: "Austin",
+                  startOffset: -1_800, duration: 7_200, capacity: 10, taken: 4),
+        StubEvent(id: StubEvents.brunch, slug: "members-brunch", title: "Members Brunch", type: "COMMUNITY", venue: "Cafe Sol", city: "Austin",
+                  startOffset: 5 * 86_400, duration: 5_400, capacity: 40, taken: 10),
+    ]
+    private static let checkInTokens = ["STUBCHECKIN": StubEvents.workshop, "STUBPARK": StubEvents.park]
+
+    private static func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
+
+    private func eventJSON(_ event: StubEvent, now: Date) -> String {
+        let mine = lock.withLock { reservations[event.id] }
+        let start = now.addingTimeInterval(event.startOffset)
+        // The donor's own seat counts toward what is taken (the fixture's `taken` is everyone else).
+        let spots = max(0, event.capacity - event.taken - (mine == "RESERVED" ? 1 : 0))
+        let status = mine.map { "\"\($0)\"" } ?? "null"
+        let note = event.note.map { "\"\($0)\"" } ?? "null"
+        return #"{"id":"\#(event.id)","slug":"\#(event.slug)","title":"\#(event.title)","type":"\#(event.type)","description":"Bring water and good shoes.","venue":"\#(event.venue)","address":"1 Main St","city":"\#(event.city)","starts_at":"\#(Self.iso(start))","ends_at":"\#(Self.iso(start.addingTimeInterval(event.duration)))","capacity":\#(event.capacity),"spots_left":\#(spots),"reservation_status":\#(status),"invitation_note":\#(note),"report_issue_url":"mailto:help@dad.org","cancelled":false,"booking_opens_at":null,"early_booking":false}"#
+    }
+
+    private func events(_ request: HTTPRequest, _ payload: String, authorized: Bool,
+                        _ reply: (HTTPResponse.Status, String) -> (HTTPResponse, HTTPBody?)) -> (HTTPResponse, HTTPBody?)? {
+        guard let path = request.path, path.hasPrefix("/donor/me/events") else { return nil }
+        guard authorized, !lock.withLock({ deleted }) else { return reply(.unauthorized, "{}") }
+        let now = Date()
+        let gated = eventsScenario == .ungated
+        func visible(_ event: StubEvent) -> Bool { !(gated && event.type == "INVITE_ONLY") }
+        let parts = path.split(separator: "/").map(String.init)   // donor, me, events, [id|check-in|invite-only], [action]
+        switch (request.method, parts.count) {
+        case (.get, 3):
+            let fail = lock.withLock { () -> Bool in
+                guard eventsScenario == .failFirst, !eventListFailureServed else { return false }
+                eventListFailureServed = true
+                return true
+            }
+            if fail { return reply(.serviceUnavailable, #"{"detail":"unavailable"}"#) }
+            let rows = Self.eventTable.filter { $0.type != "INVITE_ONLY" }.map { eventJSON($0, now: now) }.joined(separator: ",")
+            return reply(.ok, #"{"events":[\#(rows)]}"#)
+        case (.get, 4) where parts[3] == "invite-only":
+            let rows = Self.eventTable.filter { $0.type == "INVITE_ONLY" && visible($0) }.map { eventJSON($0, now: now) }.joined(separator: ",")
+            return reply(.ok, #"{"events":[\#(rows)]}"#)
+        case (.post, 4) where parts[3] == "check-in":
+            guard let token = Self.object(payload)["token"] as? String, !token.isEmpty else { return reply(.unprocessableContent, "{}") }
+            guard let id = Self.checkInTokens[token], let event = Self.eventTable.first(where: { $0.id == id }) else { return reply(.unprocessableContent, "{}") }
+            let start = now.addingTimeInterval(event.startOffset)
+            guard now >= start, now <= start.addingTimeInterval(event.duration), lock.withLock({ reservations[id] }) == "RESERVED" else {
+                return reply(.unprocessableContent, "{}")
+            }
+            let already = lock.withLock { !checkedIn.insert(id).inserted }
+            return reply(.ok, #"{"event_id":"\#(id)","checked_in":\#(!already),"already_checked_in":\#(already)}"#)
+        case (.get, 4):
+            guard let event = Self.eventTable.first(where: { $0.id == parts[3] }), visible(event) else { return reply(.notFound, "{}") }
+            return reply(.ok, eventJSON(event, now: now))
+        case (.get, 5) where parts[4] == "calendar.ics":
+            guard let event = Self.eventTable.first(where: { $0.id == parts[3] }), visible(event) else { return reply(.notFound, "{}") }
+            let start = now.addingTimeInterval(event.startOffset)
+            let compact = { (d: Date) in Self.iso(d).replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "") }
+            let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//DAD//Stub//EN\r\nBEGIN:VEVENT\r\nUID:\(event.id)@stub.invalid\r\nDTSTAMP:\(compact(now))\r\nDTSTART:\(compact(start))\r\nDTEND:\(compact(start.addingTimeInterval(event.duration)))\r\nSUMMARY:\(event.title)\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+            return (HTTPResponse(status: .ok, headerFields: [.contentType: "text/calendar"]), HTTPBody(ics))
+        case (.post, 5) where parts[4] == "reserve" || parts[4] == "cancel":
+            guard let event = Self.eventTable.first(where: { $0.id == parts[3] }), visible(event) else { return reply(.notFound, "{}") }
+            if parts[4] == "cancel" {
+                guard lock.withLock({ reservations[event.id] }) != nil else { return reply(.conflict, "{}") }
+                lock.withLock { reservations[event.id] = nil }
+                return reply(.ok, #"{"status":"CANCELLED"}"#)
+            }
+            if event.id == StubEvents.brunch { return reply(.forbidden, "{}") }
+            guard lock.withLock({ reservations[event.id] }) == nil, now < now.addingTimeInterval(event.startOffset) else { return reply(.conflict, "{}") }
+            let full = event.capacity - event.taken <= 0
+            lock.withLock { reservations[event.id] = full ? "WAITLISTED" : "RESERVED" }
+            return reply(.ok, #"{"status":"\#(full ? "WAITLISTED" : "RESERVED")"}"#)
         default: return nil
         }
     }
@@ -274,6 +387,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             return (HTTPResponse(status: status, headerFields: [.contentType: "application/json"]), HTTPBody(body))
         }
         if let response = giving(request, payload, authorized: authorized, reply) { return response }
+        if let response = events(request, payload, authorized: authorized, reply) { return response }
         switch (request.method, request.path ?? "") {
         case (.post, "/donor/phone/sign-in/options"): return reply(.ok, #"{"sent":true}"#)
         case (.post, "/donor/phone/sign-in"):

@@ -64,6 +64,8 @@ private final class AccountModel {
     private(set) var dashboardService: (any DashboardService)?
     /// Giving (recurring gift, amount, payment method, cancel): real `WireGiving` or the scripted stub; nil in previews.
     private(set) var givingKit: GivingKit?
+    /// Events (list, reserve, cancel, check-in, calendar): real `WireEvents` or the scripted stub; nil in previews.
+    private(set) var eventsService: (any EventsService)?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -110,7 +112,10 @@ private final class AccountModel {
                     : launchFlag("--stub-dashboard-unranked") ? .unranked : .populated
                 let gift: StubBackend.GiftScenario = launchFlag("--stub-gift-fail-first") ? .activeFailFirst
                     : launchFlag("--stub-gift-active") ? .active : .none
+                let eventScenario: StubBackend.EventsScenario = launchFlag("--stub-events-ungated") ? .ungated
+                    : launchFlag("--stub-events-fail-first") ? .failFirst : .standard
                 let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"), scenario: scenario, gift: gift,
+                                                    events: eventScenario,
                                                     signedIn: launchFlag("--stub-signed-in"),
                                                     onLocalWipe: { DefaultsAttributionStore().clear() })
                 session = services.session
@@ -119,6 +124,7 @@ private final class AccountModel {
                 settingsService = services.settings
                 passwordSettings = services.passwords
                 dashboardService = services.dashboard
+                eventsService = services.events
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 state = .loading
             } catch { session = nil; state = .unavailable }
@@ -171,6 +177,7 @@ private final class AccountModel {
                 passwordSettings = try WirePasswordSettings(origin: origin, session: built)
                 dashboardService = try WireDashboard(origin: origin, session: built)
                 givingKit = GivingKit(service: try WireGiving(origin: origin, session: built))
+                eventsService = try WireEvents(origin: origin, session: built)
                 session = built
             }
         } catch {
@@ -258,6 +265,7 @@ private struct DonorLanding: View {
     /// The real donor-home reads; nil in the synthetic preview, which keeps its placeholder line.
     var dashboard: (any DashboardService)?
     var giving: GivingKit?
+    var events: (any EventsService)?
     var onSignedOut: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -288,7 +296,7 @@ private struct DonorLanding: View {
                 Button("Settings", action: onSettings)
                     .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
             }
-            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, onSignedOut: onSignedOut) }
+            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, onSignedOut: onSignedOut) }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
@@ -462,101 +470,12 @@ private actor PreviewEvents: EventsService {
     func checkIn(code: String) async throws -> CheckInResultValue {
         CheckInResultValue(eventID: "e1", checkedIn: true, alreadyCheckedIn: false)
     }
+
+    func calendar(eventID: String) async throws -> Data {
+        Data("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nSUMMARY:Preview event\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".utf8)
+    }
 }
 #endif
-
-/// Events home (PRD E-1..E-10): the events list (soonest-first, invite-only marked), with an
-/// inline reserve/cancel action per row and an inline confirmation — no OS action sheets, per
-/// the hard-won UITest lesson. Bound to `EventsModel`.
-private struct EventsHome: View {
-    @State var model: EventsModel
-    @State private var confirmingCancel: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Events").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            switch model.phase {
-            case .loading:
-                ProgressView().accessibilityIdentifier("events-loading")
-            case let .failed(message):
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(message).foregroundStyle(Color.dad("fail"))
-                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
-                }
-            case .ready:
-                if let outcome = model.lastOutcome {
-                    DADCard {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(outcome.confirmationTitle).font(.headline).accessibilityIdentifier("reserve-confirm")
-                            Text(outcome.confirmationDetail).font(.footnote).foregroundStyle(.secondary)
-                            Button("Done") { model.clearOutcome() }.buttonStyle(DADButtonStyle(.secondary))
-                        }
-                    }
-                }
-                ForEach(model.sortedEvents) { event in row(event) }
-            }
-        }
-        .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("events-home")
-        .task { await model.load() }
-    }
-
-    @ViewBuilder private func row(_ event: DonorEvent) -> some View {
-        DADCard {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(event.title).font(.headline)
-                    if event.isInviteOnly {
-                        Text("Invite-only").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Color.dad("brand-ink").opacity(0.12)).clipShape(Capsule())
-                            .accessibilityIdentifier("invite-only-badge")
-                    }
-                }
-                Text("\(event.venue) · \(event.city)").font(.footnote).foregroundStyle(.secondary)
-                Text(event.spotsLabel).font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("spots-\(event.id)")
-                action(event)
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("event-\(event.id)")
-    }
-
-    @ViewBuilder private func action(_ event: DonorEvent) -> some View {
-        switch event.availability(now: Date()) {
-        case .reservable:
-            Button("Reserve") { Task { await model.reserve(eventID: event.id) } }
-                .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("reserve-\(event.id)")
-        case .waitlistable:
-            Button("Join waitlist") { Task { await model.reserve(eventID: event.id) } }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("waitlist-\(event.id)")
-        case .reserved, .waitlisted:
-            if confirmingCancel == event.id {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Cancel your reservation?").font(.subheadline)
-                    HStack {
-                        Button("Yes, cancel") { Task { await model.cancel(eventID: event.id) }; confirmingCancel = nil }
-                            .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("confirm-cancel-\(event.id)")
-                        Button("Keep it") { confirmingCancel = nil }.buttonStyle(DADButtonStyle(.secondary))
-                    }
-                }
-                .accessibilityElement(children: .contain).accessibilityIdentifier("cancel-confirm-\(event.id)")
-            } else {
-                Text(event.status == .waitlisted ? "On the waitlist" : "You're going").font(.subheadline.bold())
-                Button("Cancel reservation") { confirmingCancel = event.id }
-                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("cancel-\(event.id)")
-            }
-        case .checkedIn:
-            Text("Checked in").font(.subheadline.bold()).foregroundStyle(Color.dad("brand-ink"))
-        case .notYetOpen:
-            Text("Booking not open yet").font(.footnote).foregroundStyle(.secondary)
-        case .cancelled:
-            Text("Cancelled").font(.footnote).foregroundStyle(Color.dad("fail"))
-        }
-    }
-}
-
 
 #if DEBUG
 /// In-memory partner service for the preview/UITest. A `--preview-partner-pending` launch shows
@@ -1383,7 +1302,8 @@ struct DADApp: App {
         } else if launchFlag("--preview-engagement") {
             EngagementHome(model: EngagementModel(service: PreviewEngagement()))
         } else if launchFlag("--preview-events") {
-            EventsHome(model: EventsModel(service: PreviewEvents()))
+            let preview = PreviewEvents()
+            EventsScreen(model: EventsModel(service: preview), service: preview)
         } else if launchFlag("--preview-settings") {
             AccountSettingsScreen(model: AccountSettingsModel(service: PreviewAccountSettings()))
         } else {
@@ -1397,7 +1317,7 @@ struct DADApp: App {
     private var donorLanding: some View {
         DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
                      onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
-                     dashboard: model.dashboardService, giving: model.givingKit, onSignedOut: { Task { await model.load() } })
+                     dashboard: model.dashboardService, giving: model.givingKit, events: model.eventsService, onSignedOut: { Task { await model.load() } })
     }
 
     @ViewBuilder private var partnerRoot: some View {

@@ -22,7 +22,9 @@ final class ScriptedTransport: ClientTransport, @unchecked Sendable {
         let reply = try await script(entry, index)
         // Every non-2xx body is the contract's Problem object, which requires `detail`.
         let json = reply.status.code >= 400 && reply.json == "{}" ? #"{"detail":"scripted"}"# : reply.json
-        return (HTTPResponse(status: reply.status, headerFields: [.contentType: "application/json"]), HTTPBody(json))
+        // A successful `.ics` read is the one non-JSON body the product API serves.
+        let type = request.path?.hasSuffix("/calendar.ics") == true && reply.status.code < 300 ? "text/calendar" : "application/json"
+        return (HTTPResponse(status: reply.status, headerFields: [.contentType: type]), HTTPBody(json))
     }
 }
 
