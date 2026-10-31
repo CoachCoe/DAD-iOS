@@ -1457,22 +1457,32 @@ struct DADApp: App {
         #endif
     }
 
+    private var showsDonorShell: Bool {
+        switch router.root {
+        case .authenticated(.donor): return true
+        case .restoring: return model.hasRestorableSession
+        default: return false
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ScrollView {
                 Group {
+                    if showsDonorShell {
+                        // ONE branch for both "restoring with a stored session" and "signed in as donor":
+                        // the restore -> signed-in transition must not change view identity, or the donor
+                        // home is rebuilt a frame after it mounted, cancelling its in-flight dashboard
+                        // read (result discarded) and starting a second one.
+                        donorRoot
+                    } else {
                     switch router.root {
                     case .authenticated(.donor):
-                        donorRoot
+                        donorRoot   // unreachable: handled by `showsDonorShell`
                     case .restoring:
-                        // During restore, show the donor landing only when a session exists
-                        // (its loading state covers the wait); a session-less launch waits on a
-                        // neutral progress view so it never flashes the signed-in screen.
-                        if model.hasRestorableSession {
-                            donorLanding
-                        } else {
-                            ProgressView().accessibilityIdentifier("restoring")
-                        }
+                        // A session-less launch waits on a neutral progress view so it never flashes
+                        // the signed-in screen (a restorable session is the donor shell above).
+                        ProgressView().accessibilityIdentifier("restoring")
                     case .authenticated(.partner):
                         partnerRoot
                     case .unauthenticated:
@@ -1487,6 +1497,7 @@ struct DADApp: App {
                                 _ = router.flushPendingDestination()
                             }
                         }
+                    }
                     }
                 }
             }
