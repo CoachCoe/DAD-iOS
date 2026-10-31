@@ -43,6 +43,11 @@ const stripEventCopies = (node) => {
 };
 stripEventCopies(spec.components.schemas);
 if (eventEnums < 3) throw new Error("Event enums not found");
+// Engagement enums are open sets as well: a referral conversion's channel (LINK, IRL) may gain a value, and
+// a closed Swift enum would fail the whole conversions list on it. Generate it as a plain string.
+const conversionKind = spec.components.schemas.Conversion?.properties?.kind;
+if (!conversionKind?.enum) throw new Error("Conversion.kind enum not found");
+delete conversionKind.enum;
 await writeFile("Sources/DADFoundation/openapi.json", `${JSON.stringify(spec, null, 2)}\n`);
 const config = await readFile("Sources/DADFoundation/openapi-generator-config.yaml", "utf8");
 if (!config.includes("operations:")) throw new Error("Client scope must be explicit");

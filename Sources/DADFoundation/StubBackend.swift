@@ -48,6 +48,12 @@ public enum StubBackend {
     /// `failFirst`: the first list read is a 503, then it behaves like `standard`.
     public enum EventsScenario: Sendable { case standard, ungated, failFirst }
 
+    /// What the scripted engagement reads answer. `standard`: badges, network, a public name and conversions all
+    /// answer. `rankingToggleFails`: like `standard`, but saving the rankings choice is a 503 (the revert path).
+    /// `noPublicName`: the donor has not chosen a public name, so there is no invite code until one is saved.
+    /// `badgesDown`: the badges read is a 503 while everything else answers (the partial-section path).
+    public enum EngagementScenario: Sendable { case standard, rankingToggleFails, noPublicName, badgesDown }
+
     public struct Services: Sendable {
         public let session: AccountSession
         public let signIn: any SignInService
@@ -57,14 +63,17 @@ public enum StubBackend {
         public let dashboard: any DashboardService
         public let giving: any GivingService
         public let events: any EventsService
+        public let engagement: any EngagementService
         /// Plays the Stripe webhook after the stubbed hosted page "finishes" (a gift starts, a card is applied).
         public let completeHandoff: @Sendable (HostedHandoff.Purpose) -> Void
     }
 
     /// `signedIn` starts with a stored session (as after a relaunch), skipping the phone sign-in dance.
     public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, gift: GiftScenario = .none,
-                            events: EventsScenario = .standard, signedIn: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
-        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift, events: events)
+                            events: EventsScenario = .standard, engagement: EngagementScenario = .standard, signedIn: Bool = false,
+                            onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
+        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift, events: events,
+                                      engagement: engagement)
         let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore(signedIn ? Credentials(
             access: "stub-access-0", refresh: "stub-refresh-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx", expiresAt: Date().addingTimeInterval(900)) : nil))
         let product = ProductClient(origin: origin, transport: transport, session: session)
@@ -77,6 +86,7 @@ public enum StubBackend {
             dashboard: WireDashboard(product: product),
             giving: WireGiving(product: product),
             events: WireEvents(product: product),
+            engagement: WireEngagement(product: product),
             completeHandoff: { transport.completeHandoff($0) })
     }
 }
@@ -124,8 +134,16 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private var checkedIn = [String: Date]()
     private var eventListFailureServed = false
 
-    init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario, events: StubBackend.EventsScenario) {
+    // Engagement: the donor's public name (nil until chosen under `.noPublicName`).
+    private let engagementScenario: StubBackend.EngagementScenario
+    private var publicName: String?
+    private static let initiativeID = "11111111-1111-4111-8111-111111111111"
+
+    init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario, events: StubBackend.EventsScenario,
+         engagement: StubBackend.EngagementScenario) {
         self.deletionBlocked = deletionBlocked; self.scenario = scenario; eventsScenario = events
+        engagementScenario = engagement
+        publicName = engagement == .noPublicName ? nil : "Alex R"
         giftAmount = gift == .none ? nil : 15000
         failFirstRecurring = gift == .activeFailFirst
     }
@@ -297,6 +315,49 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         }
     }
 
+    // MARK: engagement
+
+    private static let badges = #"{"badges":[{"code":"F","title":"Founding Donor","rule":"Start a monthly gift before January 2027, or join the website waitlist","perk":"FOUNDING_EVENTS","earned":true,"earned_at":"2026-09-02T10:00:00Z","artwork":"f"},{"code":"7","title":"One Week","rule":"Reach a 7-day streak","perk":"","earned":true,"earned_at":"2026-10-14T10:00:00Z","artwork":"7"},{"code":"30","title":"One Month","rule":"Reach a 30-day streak","perk":"","earned":false,"earned_at":null,"artwork":"30"},{"code":"1K","title":"1,000 Days","rule":"Reach a 1,000-day streak","perk":"MILESTONE_EVENTS","earned":false,"earned_at":null,"artwork":"1k"},{"code":"TC","title":"Team Captain","rule":"Twenty people you invited complete a gift","perk":"TEAM_CAPTAIN","earned":false,"earned_at":null,"artwork":"tc"}]}"#
+    private static let network = #"{"active_count":3,"annualized_minor":474500,"next_milestone":{"label":"Team Captain","target":20,"remaining":17},"invitees":[{"name":"Sam L","active":true},{"name":"Jo P","active":false}],"anonymous_active":1}"#
+    private static let conversions = #"{"conversions":[{"converted_at":"2026-10-20T10:00:00Z","kind":"LINK"},{"converted_at":"2026-10-02T10:00:00Z","kind":"IRL"}],"more":false}"#
+    private static let spend = #"{"initiative_id":"11111111-1111-4111-8111-111111111111","total_minor":125000,"categories":[{"category":"Food","amount_minor":90000},{"category":"Delivery","amount_minor":35000}]}"#
+
+    private func sharingJSON() -> String {
+        guard let name = lock.withLock({ publicName }) else { return #"{"public_name":null,"link":null,"irl_link":null}"# }
+        return #"{"public_name":"\#(name)","link":"https://stub.invalid/r/ALEX42","irl_link":"https://stub.invalid/r/ALEX42?via=irl"}"#
+    }
+
+    /// The dashboard with the donor's current rankings choice applied: opted out hides the rank, as the server does.
+    private func readyDashboard() -> String {
+        guard lock.withLock({ prefs["rankings_opted_out"] }) == true else { return Self.ready }
+        guard let start = Self.ready.range(of: #""rank":{"#), let end = Self.ready.range(of: #"},"rankings_opted_out":false"#) else { return Self.ready }
+        var out = Self.ready
+        out.replaceSubrange(start.lowerBound..<end.upperBound, with: #""rank":null,"rankings_opted_out":true"#)
+        return out
+    }
+
+    private func engagement(_ request: HTTPRequest, _ payload: String, authorized: Bool,
+                            _ reply: (HTTPResponse.Status, String) -> (HTTPResponse, HTTPBody?)) -> (HTTPResponse, HTTPBody?)? {
+        guard let path = request.path else { return nil }
+        if path.hasPrefix("/initiatives/"), path.hasSuffix("/spend") {
+            return path == "/initiatives/\(Self.initiativeID)/spend" ? reply(.ok, Self.spend) : reply(.notFound, "{}")
+        }
+        guard ["/donor/me/badges", "/donor/me/network", "/donor/me/sharing", "/donor/me/conversions"].contains(where: { path.hasPrefix($0) }) else { return nil }
+        guard authorized, !lock.withLock({ deleted }) else { return reply(.unauthorized, "{}") }
+        switch (request.method, path) {
+        case (.get, "/donor/me/badges"):
+            return engagementScenario == .badgesDown ? reply(.serviceUnavailable, #"{"detail":"unavailable"}"#) : reply(.ok, Self.badges)
+        case (.get, "/donor/me/network"): return reply(.ok, Self.network)
+        case (.get, "/donor/me/sharing"): return reply(.ok, sharingJSON())
+        case (.get, "/donor/me/conversions"): return reply(.ok, Self.conversions)
+        case (.post, "/donor/me/sharing"):
+            guard let name = Self.object(payload)["public_name"] as? String, !name.isEmpty, name.count <= 80 else { return reply(.unprocessableContent, "{}") }
+            lock.withLock { publicName = name }
+            return reply(.ok, sharingJSON())
+        default: return nil
+        }
+    }
+
     private func session() -> String {
         lock.withLock { generation += 1; return """
         {"access_token":"stub-access-\(generation)","expires_in":900,"refresh_token":"stub-refresh-\(generation)-xxxxxxxxxxxxxxxxxxxxxxxxxxxx","refresh_expires_in":5184000}
@@ -346,7 +407,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             switch scenario {
             case .empty: return reply(.ok, #"{"state":"preparing","mode":"test"}"#)
             case .unranked: return reply(.ok, Self.unranked)
-            default: return reply(.ok, Self.ready)
+            default: return reply(.ok, readyDashboard())
             }
         case "/donor/me/today-initiative":
             return scenario == .empty ? reply(.notFound, #"{"detail":"nothing in rotation"}"#) : reply(.ok, Self.today)
@@ -395,6 +456,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         }
         if let response = giving(request, payload, authorized: authorized, reply) { return response }
         if let response = events(request, payload, authorized: authorized, reply) { return response }
+        if let response = engagement(request, payload, authorized: authorized, reply) { return response }
         switch (request.method, request.path ?? "") {
         case (.post, "/donor/phone/sign-in/options"): return reply(.ok, #"{"sent":true}"#)
         case (.post, "/donor/phone/sign-in"):
@@ -430,6 +492,11 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             guard authorized, !isDeleted else { return reply(.unauthorized) }
             guard let data = payload.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return reply(.unprocessableContent)
+            }
+            // `rankingToggleFails`: a change to the rankings choice is refused, so the screen must revert.
+            if engagementScenario == .rankingToggleFails, let wanted = object["rankings_opted_out"] as? Bool,
+               wanted != lock.withLock({ prefs["rankings_opted_out"] }) {
+                return reply(.serviceUnavailable, #"{"detail":"unavailable"}"#)
             }
             lock.withLock {
                 for (key, value) in object { if let flag = value as? Bool { prefs[key] = flag } }

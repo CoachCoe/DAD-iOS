@@ -28,23 +28,23 @@ public struct WireEvents: EventsService {
     init(product: ProductClient) { self.product = product }
 
     public func events() async throws -> [DonorEvent] {
-        let own = try await call { client in
+        let own = try await product.call { client in
             switch try await client.donorEvents(.init()) {
             case .ok(let response): return try response.body.json.events
             case .unauthorized: throw AccountError.signedOut
             case .tooManyRequests: throw AccountError.rateLimited
             case .serviceUnavailable: throw AccountError.unavailable
-            case .undocumented(let status, _): throw Self.undocumented(status)
+            case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable
             }
         }
-        let gated = try await call { client in
+        let gated = try await product.call { client in
             switch try await client.inviteOnlyEvents(.init()) {
             case .ok(let response): return try response.body.json.events
             case .unauthorized: throw AccountError.signedOut
             case .tooManyRequests: throw AccountError.rateLimited
             case .serviceUnavailable: throw AccountError.unavailable
-            case .undocumented(let status, _): throw Self.undocumented(status)
+            case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable
             }
         }
@@ -56,14 +56,14 @@ public struct WireEvents: EventsService {
 
     public func event(id: String) async throws -> DonorEvent {
         try Self.requireID(id)
-        return try await call { client in
+        return try await product.call { client in
             switch try await client.donorEventDetail(.init(path: .init(event_id: id))) {
             case .ok(let response): return Self.map(try response.body.json)
             case .unauthorized: throw AccountError.signedOut
             case .notFound: throw AccountError.notFound
             case .tooManyRequests: throw AccountError.rateLimited
             case .serviceUnavailable: throw AccountError.unavailable
-            case .undocumented(let status, _): throw Self.undocumented(status)
+            case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable
             }
         }
@@ -71,7 +71,7 @@ public struct WireEvents: EventsService {
 
     public func reserve(eventID: String) async throws -> ReservationOutcome {
         try Self.requireID(eventID)
-        return try await call { client in
+        return try await product.call { client in
             switch try await client.reserveEvent(.init(path: .init(event_id: eventID))) {
             case .ok(let response):
                 // An open string: only the two outcomes a reserve can produce are accepted.
@@ -86,7 +86,7 @@ public struct WireEvents: EventsService {
             case .conflict: throw AccountError.conflict
             case .tooManyRequests: throw AccountError.rateLimited
             case .serviceUnavailable: throw AccountError.unavailable
-            case .undocumented(let status, _): throw Self.undocumented(status)
+            case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable
             }
         }
@@ -94,7 +94,7 @@ public struct WireEvents: EventsService {
 
     public func cancel(eventID: String) async throws {
         try Self.requireID(eventID)
-        try await call { client in
+        try await product.call { client in
             switch try await client.cancelEvent(.init(path: .init(event_id: eventID))) {
             case .ok(let response):
                 // Anything but CANCELLED means the server did not do what was asked: do not report success.
@@ -105,7 +105,7 @@ public struct WireEvents: EventsService {
             case .conflict: throw AccountError.conflict
             case .tooManyRequests: throw AccountError.rateLimited
             case .serviceUnavailable: throw AccountError.unavailable
-            case .undocumented(let status, _): throw Self.undocumented(status)
+            case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable
             }
         }
@@ -114,7 +114,7 @@ public struct WireEvents: EventsService {
     public func checkIn(code: String) async throws -> CheckInResultValue {
         // A token is exactly `<22 base64url>.<43 base64url>`; refuse anything else before it becomes a request.
         guard CheckInToken.isWellFormed(code) else { throw AccountError.invalidInput }
-        return try await call { client in
+        return try await product.call { client in
             switch try await client.checkInEvent(.init(body: .json(.init(token: code)))) {
             case .ok(let response):
                 let value = try response.body.json
@@ -124,7 +124,7 @@ public struct WireEvents: EventsService {
             case .unprocessableContent: throw AccountError.invalidInput
             case .tooManyRequests: throw AccountError.rateLimited
             case .serviceUnavailable: throw AccountError.unavailable
-            case .undocumented(let status, _): throw Self.undocumented(status)
+            case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable
             }
         }
@@ -132,7 +132,7 @@ public struct WireEvents: EventsService {
 
     public func calendar(eventID: String) async throws -> Data {
         try Self.requireID(eventID)
-        return try await call { client in
+        return try await product.call { client in
             switch try await client.donorEventCalendar(.init(path: .init(event_id: eventID))) {
             case .ok(let response):
                 let body = try response.body.text_calendar
@@ -143,7 +143,7 @@ public struct WireEvents: EventsService {
             case .notFound: throw AccountError.notFound
             case .tooManyRequests: throw AccountError.rateLimited
             case .serviceUnavailable: throw AccountError.unavailable
-            case .undocumented(let status, _): throw Self.undocumented(status)
+            case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable
             }
         }
@@ -154,33 +154,6 @@ public struct WireEvents: EventsService {
     /// A malformed id is a 404 server-side; refuse it before it becomes a path segment.
     private static func requireID(_ id: String) throws {
         guard UUID(uuidString: id) != nil else { throw AccountError.invalidInput }
-    }
-
-    /// `ProductClient.perform` plus one rule: a 4xx/5xx whose body is not the documented Problem JSON
-    /// (the ingress limiter's 429 has none) makes the generated client throw a decode error. The status
-    /// is still on the error, so map it exactly as a documented response would be.
-    private func call<T: Sendable>(_ operation: @Sendable (Client) async throws -> T) async throws -> T {
-        try await product.perform { client in
-            do { return try await operation(client) }
-            catch let error as ClientError {
-                if let status = error.response?.status.code, status >= 400, !error.underlyingError.isCancellation {
-                    throw Self.undocumented(status)
-                }
-                throw error
-            }
-        }
-    }
-
-    private static func undocumented(_ status: Int) -> AccountError {
-        switch status {
-        case 401: return .signedOut
-        case 403: return .forbidden
-        case 404: return .notFound
-        case 409: return .conflict
-        case 422: return .invalidInput
-        case 429: return .rateLimited
-        default: return .unavailable
-        }
     }
 
     static func map(_ value: Components.Schemas.EventView) -> DonorEvent {
