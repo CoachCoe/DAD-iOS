@@ -261,7 +261,9 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         let authorized = request.headerFields[.authorization].map { $0.hasPrefix("Bearer stub-access-") } ?? false
         let isDeleted = lock.withLock { deleted }
         func reply(_ status: HTTPResponse.Status, _ json: String = "{}") -> (HTTPResponse, HTTPBody?) {
-            (HTTPResponse(status: status, headerFields: [.contentType: "application/json"]), HTTPBody(json))
+            // Every non-2xx body is the contract's Problem object, which requires `detail`.
+            let body = status.code >= 400 && json == "{}" ? #"{"detail":"stub"}"# : json
+            return (HTTPResponse(status: status, headerFields: [.contentType: "application/json"]), HTTPBody(body))
         }
         if let response = giving(request, payload, authorized: authorized, reply) { return response }
         switch (request.method, request.path ?? "") {

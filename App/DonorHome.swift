@@ -18,12 +18,23 @@ struct DonorHomeView: View {
     @State private var model: DashboardModel
     let onSignedOut: () -> Void
     private let service: any DashboardService
+    private let giving: GivingKit?
     @State private var showHistory = false
+    @State private var showGift: Bool = {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--stub-open-gift")   // screenshot/UITest aid, DEBUG only
+        #else
+        false
+        #endif
+    }()
+    @State private var giftModel: GivingModel?
 
-    init(service: any DashboardService, onSignedOut: @escaping () -> Void) {
+    init(service: any DashboardService, giving: GivingKit? = nil, onSignedOut: @escaping () -> Void) {
         self.service = service
+        self.giving = giving
         self.onSignedOut = onSignedOut
         _model = State(initialValue: DashboardModel(service: service))
+        _giftModel = State(initialValue: giving?.makeModel())
     }
 
     var body: some View {
@@ -52,15 +63,55 @@ struct DonorHomeView: View {
                 DashboardCards(dashboard: dashboard)
             }
             InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } })
+            if let giftModel { GiftSummaryCard(model: giftModel, onManage: { showGift = true }) }
             Button("Gift history") { showHistory = true }
                 .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-history")
         }
         .accessibilityElement(children: .contain).accessibilityIdentifier("donor-home")
         .task { await model.load() }
-        .refreshable { await model.load() }
+        .task { await giftModel?.load() }
+        .refreshable { await model.load(); await giftModel?.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
+        .sheet(isPresented: $showGift) {
+            if let giftModel, let giving {
+                GiftSheet(model: giftModel, stubComplete: giving.stubComplete, onClose: { showGift = false },
+                          onSignedOut: { showGift = false; onSignedOut() })
+            }
+        }
         .sheet(isPresented: $showHistory) {
             GiftHistoryScreen(service: service, onClose: { showHistory = false }, onSignedOut: { showHistory = false; onSignedOut() })
+        }
+    }
+}
+
+/// The donor's monthly gift at a glance (G-7..G-9); "Manage gift" opens the full gift screen. It reads
+/// the same `GivingModel` as that screen, so a cancel or change shows here the moment it succeeds.
+private struct GiftSummaryCard: View {
+    let model: GivingModel
+    let onManage: () -> Void
+
+    var body: some View {
+        DADCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Your monthly gift").font(.headline).accessibilityAddTraits(.isHeader)
+                Text(summary).font(.footnote).accessibilityIdentifier("gift-summary")
+                Button("Manage gift", action: onManage)
+                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-gift")
+            }
+        }.accessibilityElement(children: .contain).accessibilityIdentifier("gift-summary-card")
+    }
+
+    private var summary: String {
+        guard model.hasLoaded else {
+            if case .failed = model.phase { return "Your gift isn’t available right now." }
+            return "Loading your gift…"
+        }
+        func date(_ d: Date) -> String { d.formatted(date: .abbreviated, time: .omitted) }
+        switch model.recurring {
+        case .none: return "No monthly gift yet."
+        case .preparing: return "Getting your first gift ready."
+        case let .active(_, amount, periodEnd): return "\(formatUSDMinor(amount))/month · renews \(date(model.offer?.effectiveAt ?? periodEnd))"
+        case let .ending(_, amount, _, stopsAt): return "\(formatUSDMinor(amount))/month · ends \(date(stopsAt)), no further renewals"
         }
     }
 }
