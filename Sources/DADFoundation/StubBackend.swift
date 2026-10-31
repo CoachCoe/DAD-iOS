@@ -14,7 +14,8 @@ import OpenAPIRuntime
 /// stored password, replaceable via set-password), `throttled password` is 429, anything else is
 /// the server's 401 "email or password is incorrect". Set-password rejects a wrong `current_password`
 /// with 422 `CURRENT_PASSWORD_INCORRECT` and a new password outside 12...72 bytes with 422. Profile/preferences/
-/// logout/refresh behave like a live account; account deletion succeeds (200) unless
+/// logout/refresh behave like a live account; the donor-home reads (dashboard, today's initiative, 120 gifts
+/// paged 50 at a time, receipts, the annual summary) follow `Scenario`; account deletion succeeds (200) unless
 /// `deletionBlocked` (409), after which the account is gone (profile -> 401).
 public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
@@ -28,30 +29,43 @@ public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable
 public enum StubBackend {
     public static let origin = URL(string: "https://stub.invalid")!
 
+    /// What the scripted donor-home reads answer. `populated`: a ready dashboard, an initiative and 120
+    /// gifts. `empty`: dashboard still preparing, no initiative in rotation, no gifts. `failFirst`: the
+    /// first dashboard/gifts read of each kind is a 503, then it behaves like `populated`. `unranked`:
+    /// like `populated` but the donor opted out of rankings and has no streak figure yet.
+    public enum Scenario: Sendable { case populated, empty, failFirst, unranked }
+
     public struct Services: Sendable {
         public let session: AccountSession
         public let signIn: any SignInService
         public let settings: any AccountSettingsService
         public let credentialAuth: WireCredentialAuth
         public let passwords: any PasswordSettingsService
+        public let dashboard: any DashboardService
     }
 
-    public static func make(deletionBlocked: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
-        let transport = StubTransport(deletionBlocked: deletionBlocked)
-        let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore())
+    /// `signedIn` starts with a stored session (as after a relaunch), skipping the phone sign-in dance.
+    public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, signedIn: Bool = false,
+                            onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
+        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario)
+        let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore(signedIn ? Credentials(
+            access: "stub-access-0", refresh: "stub-refresh-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx", expiresAt: Date().addingTimeInterval(900)) : nil))
         let product = ProductClient(origin: origin, transport: transport, session: session)
         return Services(
             session: session,
             signIn: WireAuth(origin: origin, transport: transport),
             settings: WireAccountSettings(product: product, onLocalWipe: onLocalWipe),
             credentialAuth: WireCredentialAuth(origin: origin, transport: transport),
-            passwords: WirePasswordSettings(product: product))
+            passwords: WirePasswordSettings(product: product),
+            dashboard: WireDashboard(product: product))
     }
 }
 
 private final class StubTransport: ClientTransport, @unchecked Sendable {
     private let lock = NSLock()
     private let deletionBlocked: Bool
+    private let scenario: StubBackend.Scenario
+    private var failuresServed = Set<String>()
     private var generation = 0
     private var deleted = false
     private var version = 3
@@ -63,7 +77,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         "rankings_opted_out": false, "network_visible": true, "volunteer": true,
     ]
 
-    init(deletionBlocked: Bool) { self.deletionBlocked = deletionBlocked }
+    init(deletionBlocked: Bool, scenario: StubBackend.Scenario) { self.deletionBlocked = deletionBlocked; self.scenario = scenario }
 
     private func session() -> String {
         lock.withLock { generation += 1; return """
@@ -83,6 +97,72 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
 
     private static func object(_ payload: String) -> [String: Any] {
         (payload.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]) ?? [:]
+    }
+
+    // MARK: donor-home reads
+
+    private static let reads = ["/donor/me/dashboard", "/donor/me/today-initiative", "/donor/me/gifts", "/donor/me/receipts/", "/donor/me/annual-summary/"]
+    private static let giftTotal = 120
+    private static let ready = #"{"state":"ready","mode":"test","computed_at":"2026-10-30T12:00:00Z","founding_donor":true,"referrals":{"currency":"USD","irl":1,"irl_minor":3000,"link":2,"link_minor":9000,"total_minor":12000},"streak":{"at_risk":false,"current":18,"grace_ends_at":null,"ladder":{"days":18,"last_milestone":7,"next_milestone":30,"days_to_next":12,"bar":[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,false,false,false,false,false,false,false,false,false,false,false,false]}},"rank":{"national_percentile":2,"city":"Austin","city_rank":4,"computed_at":"2026-10-30T00:00:00Z"},"rankings_opted_out":false,"network":{"active_count":3,"annualized_minor":474500,"currency":"USD"},"impact":{"given_minor":124000,"currency":"USD","initiatives_funded":4,"events_volunteered":2}}"#
+    private static let unranked = #"{"state":"ready","mode":"test","computed_at":"2026-10-30T12:00:00Z","founding_donor":false,"referrals":null,"streak":null,"rank":null,"rankings_opted_out":true,"network":null,"impact":{"given_minor":null,"currency":"USD","initiatives_funded":0,"events_volunteered":0}}"#
+    private static let today = #"{"initiative_id":"11111111-1111-4111-8111-111111111111","slug":"meals-on-wheels","title":"Meals on Wheels","summary":"Hot meals delivered to neighbours who cannot cook for themselves.","region":"TX","location":"Austin, TX","type":"PROGRAM","started_on":"2025-01-02","metrics":[{"label":"Meals this week","value":1200,"unit":"PEOPLE","verified_on":"2026-10-28"},{"label":"Cost per meal","value":425,"unit":"USD_CENTS","verified_on":"2026-10-28"},{"label":"Partners","value":1,"unit":"PARTNERS","verified_on":"2026-10-28"}],"distinct_shown":4}"#
+
+    private static func giftID(_ index: Int) -> String { String(format: "00000000-0000-4000-8000-%012d", index) }
+    private static func giftRecord(_ index: Int) -> String {
+        let refunded = index % 7 == 0 ? 500 : 0
+        let day = 28 - (index % 28)
+        return #"{"id":"\#(giftID(index))","amount_minor":3000,"currency":"USD","paid_at":"2026-09-\#(String(format: "%02d", day))T10:00:00Z","frequency":"MONTHLY","refunded_minor":\#(refunded),"net_minor":\#(3000 - refunded),"refunds":[\#(refunded > 0 ? #"{"id":"re_\#(index)","amount_minor":500,"status":"succeeded","observed_at":"2026-09-29T10:00:00Z"}"# : "")]}"#
+    }
+
+    /// The first read of each kind fails under `.failFirst`, so the UITest sees the error and its retry.
+    private func failsThisTime(_ key: String) -> Bool {
+        lock.withLock { scenario == .failFirst && failuresServed.insert(key).inserted }
+    }
+
+    private func read(_ target: String, _ reply: (HTTPResponse.Status, String) -> (HTTPResponse, HTTPBody?)) -> (HTTPResponse, HTTPBody?) {
+        let parts = target.split(separator: "?", maxSplits: 1).map(String.init)
+        let path = parts[0]
+        switch path {
+        case "/donor/me/dashboard":
+            if failsThisTime("dashboard") { return reply(.serviceUnavailable, #"{"detail":"unavailable"}"#) }
+            switch scenario {
+            case .empty: return reply(.ok, #"{"state":"preparing","mode":"test"}"#)
+            case .unranked: return reply(.ok, Self.unranked)
+            default: return reply(.ok, Self.ready)
+            }
+        case "/donor/me/today-initiative":
+            return scenario == .empty ? reply(.notFound, #"{"detail":"nothing in rotation"}"#) : reply(.ok, Self.today)
+        case "/donor/me/gifts":
+            if failsThisTime("gifts") { return reply(.serviceUnavailable, #"{"detail":"unavailable"}"#) }
+            let offset = parts.count > 1 ? Int(parts[1].replacingOccurrences(of: "offset=", with: "")) ?? 0 : 0
+            return reply(.ok, page(total: scenario == .empty ? 0 : Self.giftTotal, offset: offset))
+        case _ where path.hasPrefix("/donor/me/receipts/"):
+            let id = String(path.dropFirst("/donor/me/receipts/".count))
+            guard scenario != .empty, let index = Self.giftIndex(id) else { return reply(.notFound, #"{"detail":"not found"}"#) }
+            return reply(.ok, #"{"mode":"test","tax_receipt":false,"as_of":"2026-10-30T00:00:00Z","receipt_id":"rcpt-\#(index)","gift":\#(Self.giftRecord(index))}"#)
+        case _ where path.hasPrefix("/donor/me/annual-summary/"):
+            if scenario == .empty { return reply(.notFound, #"{"detail":"no gifts"}"#) }
+            return reply(.ok, #"{"mode":"test","tax_receipt":false,"year":2026,"timezone":"America/Chicago","as_of":"2026-10-30T00:00:00Z","gifts":[\#(Self.giftRecord(0))],"amount_minor":360000,"refunded_minor":8500,"net_minor":351500,"currency":"USD"}"#)
+        default:
+            return reply(.notFound, #"{"detail":"not found"}"#)
+        }
+    }
+
+    private func page(total: Int, offset: Int) -> String {
+        let end = min(offset + 50, total)
+        let rows = (offset..<max(offset, end)).map(Self.giftRecordSummary).joined(separator: ",")
+        return #"{"email":"alex@example.org","mode":"test","gifts":[\#(rows)],"next_offset":\#(end < total ? String(end) : "null")}"#
+    }
+
+    private static func giftIndex(_ id: String) -> Int? {
+        guard id.hasPrefix("00000000-0000-4000-8000-"), let n = Int(id.suffix(12)), n >= 0, n < giftTotal else { return nil }
+        return n
+    }
+
+    private static func giftRecordSummary(_ index: Int) -> String {
+        let refunded = index % 7 == 0 ? 500 : 0
+        let day = 28 - (index % 28)
+        return #"{"id":"\#(giftID(index))","amount_minor":3000,"currency":"USD","frequency":"MONTHLY","paid_at":"2026-09-\#(String(format: "%02d", day))T10:00:00Z","refunded_minor":\#(refunded),"net_minor":\#(3000 - refunded)}"#
     }
 
     func send(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
@@ -140,6 +220,9 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             lock.withLock { deleted = true }
             return reply(.ok, #"{"deleted":true}"#)
         case (.post, "/donor/logout"): return reply(.ok, #"{"signed_out":true}"#)
+        case (.get, let path) where path.hasPrefix("/donor/me/") && Self.reads.contains(where: { path.hasPrefix($0) }):
+            guard authorized, !isDeleted else { return reply(.unauthorized) }
+            return read(path, reply)
         default: return reply(.notFound)
         }
     }

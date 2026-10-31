@@ -56,7 +56,13 @@ settings load/save, refresh, logout and account deletion. All authenticated call
 (P1b): new-donor email signup (`postDonorSignup`; the emailed link is claimed in-app, tapped or pasted),
 email + password sign-in (`postDonorPasswordSignIn`) and set/change password in Settings
 (`postDonorMePassword`). Built and tested but **switched off until configured**: Sign in with Apple, Google
-and passkeys (see below). Partner sign-in is not wired yet. Native entry hooks
+and passkeys (see below). Also wired (P2, donor home reads): the dashboard (`dashboard`: streak card with
+30-day bar and next milestone, rank line, total given, network, referral totals; `preparing` and the
+null/unknown figures are shown as such, never as zero), today's initiative (`todayInitiative`, 404 = nothing
+in rotation), paged gift history (`gifts`, 50 a page, capped at 500 rows in memory) with a per-gift record
+(`receipt`) and the calendar-year total (`annualSummary`). Still on in-memory previews and not wired:
+giving (set/change/cancel gift, payment), events, engagement (badges, rankings opt-out, network, referral),
+the partner portal, push registration and analytics upload. Partner sign-in is not wired yet. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next
