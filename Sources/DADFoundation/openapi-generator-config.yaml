@@ -45,6 +45,7 @@ filter:
     - dashboard
     - gifts
     - recurring
+    - startRecurringCheckout
     - changeAmount
     - cancelRecurring
     - amountOptions
