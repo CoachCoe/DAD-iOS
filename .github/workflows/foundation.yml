@@ -18,9 +18,24 @@ jobs:
   ios:
     runs-on: [self-hosted, dad, macos]
     timeout-minutes: 25
+    # One iOS job at a time shares the CI build caches.
+    concurrency:
+      group: dad-ios-macos
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '24'
+      # The self-hosted Mac is also a development machine: the job keeps its own build caches (apart
+      # from the /tmp/dad-ios-* defaults a local run uses) and tests on a simulator it creates, so a
+      # local run can neither feed it stale build products nor kill its app mid-test.
+      - name: Create this job's simulator
+        run: echo "DAD_SIMULATOR_ID=$(node scripts/simulator.mjs --create "DAD CI $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT")" >> "$GITHUB_ENV"
       - run: bash scripts/check-ios.sh
+        env:
+          DAD_SWIFT_BUILD: /tmp/dad-ci-ios-swift
+          DAD_XCODE_BUILD: /tmp/dad-ci-ios-xcode
+      - name: Delete this job's simulator
+        if: always() && env.DAD_SIMULATOR_ID != ''
+        run: xcrun simctl delete "$DAD_SIMULATOR_ID"

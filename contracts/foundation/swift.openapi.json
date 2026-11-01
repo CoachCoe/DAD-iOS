@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "description": "The DAD (Dynamic Aid Delivery) donor API, serving the web app, the donor iOS/Android app, and the staff back office.\n\n## Clients and authentication\n- **Browsers** authenticate with HttpOnly cookies. Every mutation must carry the exact configured `Origin`; this is the CSRF defense. The API sends no CORS headers.\n- **The donor app** sends `X-DAD-Client: native` on every request, never sends `Origin` or cookies, and authenticates with `Authorization: Bearer <access token>`. A request with Origin or cookies is a browser request whatever else it carries. Sign in by calling POST /donor/login, opening the emailed `/account/claim#token=…` link in the app, and sending the fragment's token to POST /donor/claim as a native request, which returns a 15-minute access token and a rotating refresh token. Exchange the refresh token at POST /donor/refresh when the access token expires or a request answers 401; send one refresh at a time and keep only the newest tokens. Routes that admit the app list `native` in `x-clients`, and POST /donor/refresh and the push-device routes admit nothing else; giving, referral capture, partner applications, and every staff route are web-only.\n- **Partner portal** users are separate from donors (P-5). They sign in by calling POST /donor/partner/sign-in and opening the emailed `/partner/accept#token=…` link, whose token POST /donor/partner/accept-invite exchanges for a 12-hour session: an HttpOnly cookie for a browser, or a bearer token for a native request, sent like the donor app's.\n- Staff routes are browser-only and never accept bearer tokens. The back office runs on its own host (`DONOR_STAFF_ORIGIN`): staff mutations require that exact `Origin`, and donor and public mutations require the public one, so neither site can act on the other.\n\n## Rate limits\nMutations are rate limited per client address and class (`x-rate-limit`): auth 10/min, visitor 60/min, account 30/min, staff 60/min, with bursts up to the same size. Exceeding one answers 429 with `Retry-After`. Reads are not rate limited by the API.\n\n## Conventions\n- Errors are always `application/json` `{\"detail\": \"…\"}` with the status below; the detail is safe to display. A 503 for a feature the deployment has not configured adds a stable `code` and should not be retried. Unknown routes and malformed record IDs answer 404, wrong methods 405 with `Allow`.\n- Request bodies are one JSON object with exactly the documented fields (unknown fields, trailing data, NUL characters, and `null` for a defaulted field are 422), at most 256 KiB unless stated (larger is 413).\n- Money is integer USD cents in fields ending `_minor`; the API shows the same numbers on every client.\n- Timestamps are RFC 3339 strings, UTC, possibly with fractional seconds (`2026-10-06T14:03:00Z`, `…+00:00` in gift records). Dates are `YYYY-MM-DD`.\n- Lists page by `offset`, 50 rows per page; a response's `next_offset` (or `next_<list>_offset`) is the next page's offset, or null on the last page.\n- Commands that reach the payment processor or deliver email require an `Idempotency-Key`; retry with the same key after a timeout or 503.\n- Every response is `Cache-Control: no-store` except published content.\n"
+    "description": "The DAD (Dynamic Aid Delivery) donor API, serving the web app, the donor iOS/Android app, and the staff back office.\n\n## Clients and authentication\n- **Browsers** authenticate with HttpOnly cookies. Every mutation must carry the exact configured `Origin`; this is the CSRF defense. The API sends no CORS headers.\n- **The donor app** sends `X-DAD-Client: native` on every request, never sends `Origin` or cookies, and authenticates with `Authorization: Bearer <access token>`. A request with Origin or cookies is a browser request whatever else it carries. Sign in by calling POST /donor/login, opening the emailed `/account/claim#token=…` link in the app, and sending the fragment's token to POST /donor/claim as a native request, which returns a 15-minute access token and a rotating refresh token. Exchange the refresh token at POST /donor/refresh when the access token expires or a request answers 401; send one refresh at a time and keep only the newest tokens. Routes that admit the app list `native` in `x-clients`, and POST /donor/refresh, the push-device routes, POST /donor/me/company-touch, and POST /donor/me/recurring/checkout admit nothing else. The app may record referral and company-code link visits, keeping the returned token in place of the browser's cookie. Guest giving, partner applications, and every staff route are web-only.\n- **Partner portal** users are separate from donors (P-5). They sign in by calling POST /donor/partner/sign-in and opening the emailed `/partner/accept#token=…` link, whose token POST /donor/partner/accept-invite exchanges for a 12-hour session: an HttpOnly cookie for a browser, or a bearer token for a native request, sent like the donor app's.\n- Staff routes are browser-only and never accept bearer tokens. The back office runs on its own host (`DONOR_STAFF_ORIGIN`): staff mutations require that exact `Origin`, and donor and public mutations require the public one, so neither site can act on the other.\n\n## Rate limits\nMutations are rate limited per client address and class (`x-rate-limit`): auth 10/min, visitor 60/min, account 30/min, staff 60/min, with bursts up to the same size. Exceeding one answers 429 with `Retry-After`. Reads are not rate limited by the API.\n\n## Conventions\n- Errors are always `application/json` `{\"detail\": \"…\"}` with the status below; the detail is safe to display. A 503 for a feature the deployment has not configured adds a stable `code` and should not be retried. Unknown routes and malformed record IDs answer 404, wrong methods 405 with `Allow`.\n- Request bodies are one JSON object with exactly the documented fields (unknown fields, trailing data, NUL characters, and `null` for a defaulted field are 422), at most 256 KiB unless stated (larger is 413).\n- Money is integer USD cents in fields ending `_minor`; the API shows the same numbers on every client.\n- Timestamps are RFC 3339 strings, UTC, possibly with fractional seconds (`2026-10-06T14:03:00Z`, `…+00:00` in gift records). Dates are `YYYY-MM-DD`.\n- Lists page by `offset`, 50 rows per page; a response's `next_offset` (or `next_<list>_offset`) is the next page's offset, or null on the last page.\n- Commands that reach the payment processor or deliver email require an `Idempotency-Key`; retry with the same key after a timeout or 503.\n- Every response is `Cache-Control: no-store` except published content.\n"
   },
   "servers": [
     {
@@ -49,6 +49,216 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/donor/referrals/{code}": {
+      "post": {
+        "operationId": "captureReferral",
+        "summary": "Record a referral visit",
+        "description": "Records a visit through a referral link; the latest valid touch wins for 30 days. A browser keeps the visitor token in the HttpOnly `dad_referral` cookie, which this sets or clears. The app, opening the same link, sends the `token` from its previous capture, if any, and keeps the one returned to send as `referral_token` when it starts a monthly gift.",
+        "tags": [
+          "Public"
+        ],
+        "security": [],
+        "x-rate-limit": "visitor",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{0,64}$"
+            },
+            "description": "Referral code from a /r/{code} link; any other form is 404."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "description": "Defaults to LINK when omitted; null is invalid.",
+                    "enum": [
+                      "LINK",
+                      "IRL"
+                    ]
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128,
+                    "description": "Native requests only: the token this app kept from its last referral capture. A browser sending it is 422."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "captured": {
+                      "type": "boolean",
+                      "description": "False when the visit did not start or keep a referral window."
+                    },
+                    "public_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "token": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Native responses only: the visitor token to keep, or null when nothing was captured, in which case discard any kept token."
+                    }
+                  },
+                  "required": [
+                    "captured",
+                    "public_name"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/company/{code}": {
+      "post": {
+        "operationId": "captureCompany",
+        "summary": "Record a company-code visit",
+        "description": "Records a pre-signup visit through an employer's company code (30 days, last touch wins). A browser keeps the visitor token in the HttpOnly `dad_company` cookie, which binds when the donor proves account ownership in that browser. The app, opening the same link, sends the `token` from its previous capture, if any, and after sign-in sends the one returned to POST /donor/me/company-touch. A guest checkout cannot change an employer based on email alone. The code is normalised to upper case. The response never reveals whether the code resolves to a partner.",
+        "tags": [
+          "Public"
+        ],
+        "security": [],
+        "x-rate-limit": "visitor",
+        "x-clients": [
+          "browser",
+          "native"
+        ],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{0,64}$"
+            },
+            "description": "Company code; any other form is 404."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128,
+                    "description": "Native requests only: the token this app kept from its last company-code capture. A browser sending it is 422."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "captured": {
+                      "type": "boolean",
+                      "description": "False when the visit did not start or keep a company-code window."
+                    },
+                    "token": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Native responses only: the visitor token to keep, or null when nothing was captured, in which case discard any kept token."
+                    }
+                  },
+                  "required": [
+                    "captured"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -1134,7 +1344,7 @@
       "post": {
         "operationId": "savePreferences",
         "summary": "Save preferences",
-        "description": "Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. 409 when `version` is stale: re-read the profile and retry.",
+        "description": "Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. `version` is optimistic concurrency, deliberately: every save is a new numbered record in the consent history, so it must name the profile version it replaces. 409 when `version` is stale: re-read the profile and retry. To change a single setting, read the profile, send its current `version` and the six required fields from `preferences` unchanged, and change only the one you mean to; the optional fields can be left out.",
         "tags": [
           "Donor"
         ],
@@ -1398,6 +1608,92 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/donor/me/company-touch": {
+      "post": {
+        "operationId": "bindCompanyTouch",
+        "summary": "Bind a company code the app captured before sign-in",
+        "description": "Native requests only. Binds the company code captured on `token` by POST /donor/company/{code} to the signed-in donor and links them to the employer it names, as signing in binds a browser's `dad_company` cookie. It never replaces an employer or code the donor already has. `bound` is false when the token names no unexpired touch; either way the app may discard the token.",
+        "tags": [
+          "Account"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "native"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128,
+                    "description": "The token from the app's latest company-code capture."
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "bound": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "bound"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -2168,6 +2464,12 @@
                     "minimum": 3000,
                     "maximum": 90000,
                     "multipleOf": 3000
+                  },
+                  "referral_token": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 128,
+                    "description": "The token from the app's latest referral capture (POST /donor/referrals/{code}). The referrer is credited if the touch is unexpired and is not the donor's own; otherwise it is ignored. A retry under the same `Idempotency-Key` must repeat it."
                   }
                 },
                 "required": [
@@ -2406,7 +2708,7 @@
       "post": {
         "operationId": "beginDonorPasskeySignIn",
         "summary": "Begin a passkey sign-in",
-        "description": "Issues a usernameless WebAuthn challenge that any of the donor's passkeys for the public origin may answer, in a browser or, through its associated domain, the app. Pass `options` to `PublicKeyCredential.parseRequestOptionsFromJSON` and `navigator.credentials.get`, then answer within five minutes. No body.",
+        "description": "Issues a usernameless WebAuthn challenge that any of the donor's passkeys for the public origin may answer, in a browser or, through its associated domain, the app. Pass `options` to `PublicKeyCredential.parseRequestOptionsFromJSON` and `navigator.credentials.get`, then answer within five minutes. No body. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
         "tags": [
           "Account"
         ],
@@ -2693,7 +2995,7 @@
       "post": {
         "operationId": "finishDonorPasskeySignIn",
         "summary": "Finish a passkey sign-in",
-        "description": "Verifies the assertion (challenge, origin, relying party, user verification, and signature) and signs the donor in, as a claim does. Each ceremony is answered once. 401 covers an unknown passkey, a disabled account, a signature counter that went backwards, and an unknown, expired, or used ceremony alike.",
+        "description": "Verifies the assertion (challenge, origin, relying party, user verification, and signature) and signs the donor in, as a claim does. Each ceremony is answered once. 401 covers an unknown passkey, a disabled account, a signature counter that went backwards, and an unknown, expired, or used ceremony alike. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
         "tags": [
           "Account"
         ],
@@ -2821,14 +3123,15 @@
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
-        }
+        },
+        "description": "503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address."
       }
     },
     "/donor/me/passkeys/register/options": {
       "post": {
         "operationId": "beginDonorPasskeyRegister",
         "summary": "Begin adding a passkey",
-        "description": "Issues WebAuthn creation options requiring a discoverable, user-verifying passkey, excluding those the donor already holds. Pass `options` to `PublicKeyCredential.parseCreationOptionsFromJSON` and `navigator.credentials.create`, then answer within five minutes. No body.",
+        "description": "Issues WebAuthn creation options requiring a discoverable, user-verifying passkey, excluding those the donor already holds. Pass `options` to `PublicKeyCredential.parseCreationOptionsFromJSON` and `navigator.credentials.create`, then answer within five minutes. No body. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
         "tags": [
           "Account"
         ],
@@ -2875,7 +3178,7 @@
       "post": {
         "operationId": "finishDonorPasskeyRegister",
         "summary": "Finish adding a passkey",
-        "description": "Verifies the attestation, stores the passkey, and emails the donor an essential notice naming it. 401 covers a rejected attestation, a passkey already registered to any account, a ceremony begun by another donor, and an unknown, expired, or used ceremony alike, as well as a missing session.",
+        "description": "Verifies the attestation, stores the passkey, and emails the donor an essential notice naming it. 401 covers a rejected attestation, a passkey already registered to any account, a ceremony begun by another donor, and an unknown, expired, or used ceremony alike, as well as a missing session. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
         "tags": [
           "Account"
         ],
@@ -2966,7 +3269,7 @@
       "post": {
         "operationId": "deleteDonorPasskey",
         "summary": "Remove a passkey",
-        "description": "The passkey stops signing in at once. Sessions it already started are not ended; see POST /donor/me/sessions/revoke-others. 404 when the ID is not one of the donor's passkeys.",
+        "description": "The passkey stops signing in at once. Sessions it already started are not ended; see POST /donor/me/sessions/revoke-others. 404 when the ID is not one of the donor's passkeys. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
         "tags": [
           "Account"
         ],
@@ -5886,6 +6189,16 @@
           }
         }
       },
+      "NotFound": {
+        "description": "No such record for this session, or no such route. A malformed record ID or referral code is also 404.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
       "PayloadTooLarge": {
         "description": "The request body exceeds the route's limit (256 KiB for JSON unless stated).",
         "content": {
@@ -5968,16 +6281,6 @@
       "RateLimitedByIngress": {
         "description": "The ingress rate limit rejected the request before it reached the API. The body is not guaranteed to be JSON and `Retry-After` may be absent. Back off and retry."
       },
-      "NotFound": {
-        "description": "No such record for this session, or no such route. A malformed record ID or referral code is also 404.",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Problem"
-            }
-          }
-        }
-      },
       "SignedIn": {
         "description": "Signed in.",
         "content": {
@@ -6013,6 +6316,9 @@
               "PAYMENTS_UNCONFIGURED",
               "EMAIL_UNCONFIGURED",
               "SOURCE_STORAGE_UNCONFIGURED",
+              "PUSH_UNCONFIGURED",
+              "FOUNDING_CLAIMS_UNCONFIGURED",
+              "PASSKEYS_UNCONFIGURED",
               "CURRENT_PASSWORD_INCORRECT"
             ]
           },
@@ -6916,12 +7222,20 @@
             ],
             "description": "In-person (QR) referral link.",
             "format": "uri"
+          },
+          "referral_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code in `link` and `irl_link` (their `/r/{code}` path segment), for display and copying; null exactly when they are. Replacing the code changes it."
           }
         },
         "required": [
           "public_name",
           "link",
-          "irl_link"
+          "irl_link",
+          "referral_code"
         ],
         "additionalProperties": false
       },
@@ -8135,6 +8449,17 @@
           },
           "artwork": {
             "type": "string"
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The city a city badge (code `CITY50`) was earned in, recorded when it was earned and kept if the donor later moves. Null for every other badge, for a `CITY50` that is not earned, and for one staff granted."
+          },
+          "display_title": {
+            "type": "string",
+            "description": "The title to show: `Top 50 in Chicago` for an earned city badge with a city, otherwise the same as `title`. The code stays `CITY50`."
           }
         },
         "required": [
@@ -8143,7 +8468,9 @@
           "rule",
           "perk",
           "earned",
-          "artwork"
+          "artwork",
+          "city",
+          "display_title"
         ],
         "additionalProperties": false
       },

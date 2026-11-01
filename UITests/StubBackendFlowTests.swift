@@ -47,4 +47,30 @@ import XCTest
         XCTAssertFalse(app.buttons["open-settings"].waitForExistence(timeout: 4))
         XCTAssertTrue(app.textFields["Verification code"].exists)
     }
+
+    func testTheAnalyticsQuestionIsAskedOnceAndRemembered() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend", "--stub-analytics-unset"]
+        app.launch()
+        XCTAssertTrue(app.buttons["analytics-allow"].waitForExistence(timeout: 15))
+        app.buttons["analytics-allow"].tap()
+        XCTAssertFalse(app.buttons["analytics-allow"].waitForExistence(timeout: 2), "an answered question is not asked again")
+        XCTAssertTrue(app.buttons["I’m a donor"].exists)
+    }
+
+    func testATappedNotificationOpensItsScreen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend", "--stub-signed-in", "--stub-push-tap-gifts"]
+        app.launch()
+        XCTAssertTrue(app.buttons["gift-row-0"].waitForExistence(timeout: 20), "the gifts notification opens gift history")
+    }
+
+    func testAnInviteLinkNamesTheReferrerBeforeSignIn() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend", "--stub-open-invite"]
+        app.launch()
+        let invitation = app.staticTexts["auth-invitation"]
+        XCTAssertTrue(invitation.waitForExistence(timeout: 20), "the opened invite link is captured natively")
+        XCTAssertEqual(invitation.label, "Alex R invited you to give with DAD.")
+    }
 }

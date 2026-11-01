@@ -1,8 +1,9 @@
 # DAD iOS
 
-SwiftUI donor-app foundation backed by DAD-Main's Go API. The native implementation
-was selected on 18 October 2026, superseding the earlier cross-platform plan. The final
-feature subset and navigation still require the mobile PRD.
+SwiftUI donor and partner app backed by DAD-Main's Go API. Separate native apps
+were selected on 18 October 2026, superseding the earlier cross-platform plan.
+The shared R1 product contract governs functionality; provider and device acceptance
+boundaries are listed below.
 
 ## Build and test
 
@@ -29,7 +30,7 @@ AppIntents metadata-extraction diagnostic is not suppressed; this app defines no
 
 ## Shared contract and native boundaries
 
-`foundation.lock.json` pins mobile foundation 2.5.0 and its manifest digest. The vendored
+`foundation.lock.json` pins mobile foundation 2.10.1 and its manifest digest. The vendored
 release is verified before generation. `prepare-client.mjs` copies the Swift generator input, null-only Codable adapter, tokens,
 and link policy into ignored generator inputs. Apple's pinned Swift generator produces
 types and a client during the build, scoped to profile, claim, refresh, and logout.
@@ -47,7 +48,9 @@ its result cannot restore local credentials. Offline remote logout can fail afte
 cleanup; errors propagate rather than claiming a confirmed remote revocation.
 
 Set Xcode build settings `DAD_API_ORIGIN` and `DAD_PUBLIC_ORIGIN` to the direct HTTPS API
-origin and public website origin for a real environment. No production hostname or secret
+origin and public website origin for a real environment, and `DAD_ASSOCIATED_DOMAIN` to the public origin's host
+(also the passkey relying party): `App/DAD.entitlements` declares it as the `applinks:` and `webcredentials:` associated
+domain, which DAD-Main's `/.well-known/apple-app-site-association` answers for. No production hostname or secret
 is compiled by default. A Release build with no API origin shows an unavailable state and sign-in fails
 with a clear message; it never serves synthetic data. Wired against the API: donor phone + SMS sign-in
 (`beginPhoneSignIn`/`finishPhoneSignIn`, existing accounts only), claim-link sign-in, profile read,
@@ -60,12 +63,17 @@ and passkeys (see below). Also wired (P2, donor home reads): the dashboard (`das
 30-day bar and next milestone, rank line, total given, network, referral totals; `preparing` and the
 null/unknown figures are shown as such, never as zero), today's initiative (`todayInitiative`, 404 = nothing
 in rotation), paged gift history (`gifts`, 50 a page, capped at 500 rows in memory) with a per-gift record
-(`receipt`) and the calendar-year total (`annualSummary`). Engagement is wired too (see Engagement). Still on
-in-memory previews and not wired: the partner portal, push registration and analytics upload. Partner sign-in is not wired yet. Native entry hooks
+(`receipt`) and the calendar-year total (`annualSummary`). Engagement is wired too (see Engagement). The
+partner portal is wired: an approved partner user signs in with an emailed link (`partnerRequestSignIn`, then
+`partnerAcceptInvite` from the tapped or pasted `/partner/accept` link; becoming a partner is the website's
+application, `applyWithReceipt`, linked from partner sign-in as `<public origin>/apply`), and the 12-hour partner session is kept
+in its own Keychain item. The portal reads the overview, initiatives, spend, our-people rollup and teams;
+admins edit the organization profile, workforce size and logo, invite and remove users, share the company
+code and export or re-download PDF reports. Analytics and push are described below. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
-website in Safari, without sending bearer credentials. Claim links with a web-only next
-destination stay on the web before their one-use proof is consumed.
+website in Safari, without sending bearer credentials. Claim links with supported dashboard or payment-method return destinations are
+claimed in-app and open the requested native screen.
 
 ### Switching on Apple, Google and passkeys
 
@@ -76,9 +84,9 @@ invented or committed; supply, per method:
 - **Sign in with Apple:** a signing team, the "Sign in with Apple" capability
   (`com.apple.developer.applesignin` entitlement) on the app ID, then build setting
   `DAD_APPLE_SIGNIN_ENABLED=YES`. DAD-Main must also have Apple configured (`oidcSignIn` is 503 otherwise).
-- **Passkeys:** the Associated Domains entitlement `webcredentials:<domain>`, an
-  `apple-app-site-association` file for that domain listing the final bundle ID, and build setting
-  `DAD_PASSKEY_RP_ID=<domain>` (bare hostname, the relying-party ID DAD-Main uses).
+- **Passkeys:** the Associated Domains capability on the app ID with `DAD_ASSOCIATED_DOMAIN=<domain>` (the
+  entitlement's `webcredentials:` entry), an `apple-app-site-association` file for that domain listing the final
+  bundle ID, and build setting `DAD_PASSKEY_RP_ID=<domain>` (bare hostname, the relying-party ID DAD-Main uses).
 - **Google:** build setting `DAD_GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com` **and** a Google id_token
   provider. The official SDK is a new dependency, so none is linked; Google stays off (a client ID alone
   does not enable it) until that decision is made and the provider replaces `UnavailableIDTokenProvider`.
@@ -86,13 +94,13 @@ invented or committed; supply, per method:
 Passkey list/delete are wired and tested in `WirePasswordSettings`; their Settings UI and passkey
 registration (`beginDonorPasskeyRegister`/`finishDonorPasskeyRegister`) follow with the entitlement.
 
-System universal links/passkeys require a final bundle ID, signing team, Associated
-Domains (`applinks:` and `webcredentials:`), and matching DAD-Main association files.
+System universal links/passkeys require a final bundle ID, signing team, the Associated
+Domains capability (the app declares `applinks:` and `webcredentials:` for `DAD_ASSOCIATED_DOMAIN` in
+`App/DAD.entitlements`), and DAD-Main's association file naming the app (`DONOR_IOS_APP_ID`).
 The app ships under `org.dad.foundation` (Release) and `org.dad.foundation.debug` (Debug); see
 "Bundle identifier" below. Neither is registered with a signing team or Associated Domains yet.
-Push registration and Wallet have integration protocols; this foundation does
-not request those permissions or configure provider accounts. The camera is requested only when a donor
-opens the check-in scanner (see Events). A reachable staging API
+Notification permission is asked only from Settings ("Turn on notifications"), never at launch. The camera is
+requested only when a donor opens the check-in scanner (see Events). A reachable staging API
 and real-device/provider acceptance remain separate from synthetic tests.
 
 The version 2 Swift input preserves nullable dashboard, recurring, and event values
@@ -155,8 +163,7 @@ Real `WireEvents` over the generated client, behind `EventsService`: the list (`
 - **Idempotency.** The contract defines no `Idempotency-Key` for these commands, so none is sent.
 - **Booking rules.** Cancel is offered until the event starts (E-9); a started event offers no new
   reservation; `early_booking` lets a Team Captain reserve before it opens to everyone (B-3); capacity 0
-  is "open to everyone". Times show the zone abbreviation and the donor's locale; the contract has no
-  event time zone yet, so the device zone is used.
+  is "open to everyone". Times use the event's `time_zone`, with the zone abbreviation and the donor's locale.
 - **Check-in.** Only a held seat, only between the event's start and end (the contract's window, not an
   assumed early grace). Outside it the panel says when it opens or that it closed. A typed code always
   works; "Scan QR code" opens the camera scanner (AVFoundation, QR only). The camera is requested at that
@@ -167,8 +174,8 @@ Real `WireEvents` over the generated client, behind `EventsService`: the list (`
   offered through the system share sheet, where the donor picks Calendar. The app never reads or writes the
   calendar, so there is no calendar permission or entitlement.
 - **Report an issue.** The event's `report_issue_url` (mailto) opens the mail composer.
-- **Not covered.** Reminder pushes (E-7) wait for push registration (P7); E-1 volunteer opt-in is a settings
-  preference and is not part of this screen.
+- **Elsewhere.** Reminder pushes (E-7) are sent by the server to the registered device (see Analytics and push);
+  E-1 volunteer opt-in is a settings preference and is not part of this screen.
 - **Test stub.** `--stub-backend --stub-signed-in` serves five scripted events (`--stub-events-ungated`
   hides the invite-only one, `--stub-events-fail-first` fails the first list read).
 
@@ -217,8 +224,9 @@ retained.
 **Privacy disclosure (App Store Privacy "nutrition label").** The app collects: email and phone
 (account), approximate location via ZIP (streak day boundary, nearby events), and gift history.
 No third-party analytics SDK is embedded — analytics events go only to the first-party DAD-Main
-ingest endpoint. No tracking across apps/sites; no IDFA. Declare Contact Info, Coarse Location,
-and Financial Info as "used for app functionality", not linked to third-party advertising.
+ingest endpoint, and only after the donor allows them. No tracking across apps/sites; no IDFA. Declare Contact Info,
+Coarse Location, and Financial Info as "used for app functionality", and Product Interaction as "analytics",
+none of them used for third-party advertising (matching `App/PrivacyInfo.xcprivacy`).
 
 **Entitlements / capabilities** required before submission (not needed for simulator builds):
 Push Notifications (APNs) for §6.11 categories, Associated Domains (`applinks:` +
@@ -258,3 +266,32 @@ exercised only at archive/submission time. Pre-submission:
 - [ ] Produce an `ExportOptions.plist` for `xcodebuild -exportArchive` (method `app-store`, your
       team id) — gitignored, not committed.
 - [ ] Verify the archived build is signed with the distribution certificate before upload.
+
+## Analytics and push (contract 2.9.0)
+
+**Analytics are opt-in**, worded and counted as on the website. The start screen asks once ("Allow usage
+analytics?") and Settings has a "Usage analytics" switch; until the donor allows it nothing is recorded. Events go
+only to DAD-Main's `ingestAnalytics` (first party, `X-DAD-Platform: IOS`, attributed to the donor when signed in)
+through `AnalyticsRecorder`, in batches of up to 100 with a stable id each so a retried batch is not double-counted;
+declining drops anything still buffered. The app emits `app_opened`, `role_selected`, `invite_shared`
+(`share_sheet` / `copy`), `irl_code_shown` and `push_opened`; every other event is derived from the successful API
+call it stands for by the same rules as the website's `observeAPI` (`ObservingTransport`), e.g. `signup_started`
+for `POST /donor/signup`.
+
+**Push** registers the donor (`registerPushDevice`, at every launch and sign-in; the server drops the token when the
+session ends) and the partner (`partnerRegisterPushDevice`, unregistered on sign-out), with the APNs environment of
+the build (Debug `SANDBOX`, Release `PRODUCTION`). A tapped notification's `category` is counted as `push_opened`
+and its `path` opens the matching screen (`/account/gifts` gift history, `/account/payment-method` the gift sheet,
+`/account/profile` Settings), after sign-in if need be. **Owner dependency:** APNs issues a device token only to an
+app with the Push Notifications capability (`aps-environment` entitlement) under the signing team, and DAD-Main
+needs its APNs key; until then the permission can be granted but no token is registered. `--stub-push-tap-gifts`
+replays a tap in UI tests.
+
+**Referral and company-code links (contract 2.10).** An invite (`/r/<code>`, `?via=irl` in person) or company
+(`/c/<code>`) link that opens the app is recorded with DAD-Main (`captureReferral` / `captureCompany`), and the visitor
+token it returns is kept where the website keeps its cookie (`LinkAttribution`, `UserDefaults`; the latest link wins,
+and a visit that keeps nothing discards it). The referral token goes with the first monthly gift
+(`startRecurringCheckout`'s `referral_token`, part of the command's idempotency fingerprint), so the referrer is credited
+as on the web; the company token is bound once the donor is signed in (`bindCompanyTouch`). Before sign-in an invite
+names the referrer on the start screen. Account deletion forgets both. `--stub-open-invite` replays an invite link in
+UI tests.

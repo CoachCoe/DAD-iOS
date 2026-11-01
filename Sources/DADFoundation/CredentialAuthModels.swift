@@ -56,6 +56,12 @@ public protocol SignupService: Sendable {
     func requestSignup(_ form: SignupForm) async throws
 }
 
+/// An existing donor asks for a single-use sign-in link (`POST /donor/login`). Like signup, the
+/// server never says whether the address has an account; the link is claimed via `AccountSession.claim`.
+public protocol SignInLinkService: Sendable {
+    func requestSignInLink(email: String) async throws
+}
+
 public protocol PasswordSignInService: Sendable {
     /// Returns native credentials; the caller hands them to `AccountSession.establish`.
     func signIn(email: String, password: String) async throws -> Credentials
@@ -116,6 +122,53 @@ public final class SignupModel {
     static func message(for error: Error) -> String {
         switch error as? AccountError {
         case .invalidInput: "Check your name, email, city and ZIP code, then try again."
+        case .rateLimited: "Too many attempts. Please wait a moment and try again."
+        case .unavailable: "We couldn’t send your sign-in link right now. Please try again in a moment."
+        default: "Something went wrong. Please try again."
+        }
+    }
+}
+
+// MARK: - Sign-in link model
+
+@MainActor @Observable
+public final class SignInLinkModel {
+    public enum Phase: Equatable {
+        case editing
+        case submitting
+        case sent(email: String)
+        case failed(String)
+    }
+
+    public private(set) var phase: Phase = .editing
+    public var email = ""
+
+    private let service: any SignInLinkService
+    public init(service: any SignInLinkService) { self.service = service }
+
+    public var canSubmit: Bool {
+        if case .submitting = phase { return false }
+        return CredentialRules.isPlausibleEmail(email)
+    }
+
+    public func submit() async {
+        guard canSubmit else { return }
+        phase = .submitting
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try await service.requestSignInLink(email: cleanEmail)
+            phase = .sent(email: cleanEmail)
+        } catch {
+            if error.isCancellation { phase = .editing; return }
+            phase = .failed(Self.message(for: error))
+        }
+    }
+
+    public func edit() { phase = .editing }
+
+    static func message(for error: Error) -> String {
+        switch error as? AccountError {
+        case .invalidInput: "Check your email address, then try again."
         case .rateLimited: "Too many attempts. Please wait a moment and try again."
         case .unavailable: "We couldn’t send your sign-in link right now. Please try again in a moment."
         default: "Something went wrong. Please try again."

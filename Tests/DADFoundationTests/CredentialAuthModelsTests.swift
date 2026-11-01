@@ -12,6 +12,16 @@ private actor FakeSignup: SignupService {
     }
 }
 
+private actor FakeSignInLink: SignInLinkService {
+    var emails: [String] = []
+    var failure: Error?
+    func setFailure(_ error: Error?) { failure = error }
+    func requestSignInLink(email: String) async throws {
+        emails.append(email)
+        if let failure { throw failure }
+    }
+}
+
 private final class FakePasswordSignIn: PasswordSignInService, @unchecked Sendable {
     private let lock = NSLock()
     private var seen: [(String, String)] = []
@@ -128,6 +138,57 @@ final class CredentialRulesTests: XCTestCase {
         await model.submit()
         let forms = await service.forms
         XCTAssertTrue(forms.isEmpty)
+    }
+}
+
+@MainActor final class SignInLinkModelTests: XCTestCase {
+    func testSubmitTrimsSendsOnceAndReportsTheAddress() async {
+        let service = FakeSignInLink()
+        let model = SignInLinkModel(service: service)
+        XCTAssertFalse(model.canSubmit)
+        model.email = " alex@example.org "
+        XCTAssertTrue(model.canSubmit)
+        await model.submit()
+        XCTAssertEqual(model.phase, .sent(email: "alex@example.org"))
+        let emails = await service.emails
+        XCTAssertEqual(emails, ["alex@example.org"])
+    }
+
+    func testInvalidEmailNeverCallsTheService() async {
+        let service = FakeSignInLink()
+        let model = SignInLinkModel(service: service)
+        model.email = "not an email"
+        await model.submit()
+        XCTAssertEqual(model.phase, .editing)
+        let emails = await service.emails
+        XCTAssertTrue(emails.isEmpty)
+    }
+
+    func testFailuresKeepTheAddressAndAllowRetry() async {
+        let cases: [(Error, String)] = [
+            (AccountError.invalidInput, "Check your email"), (AccountError.rateLimited, "Too many"),
+            (AccountError.unavailable, "couldn’t send"), (AccountError.invalidResponse, "Something went wrong"),
+        ]
+        for (error, fragment) in cases {
+            let service = FakeSignInLink()
+            await service.setFailure(error)
+            let model = SignInLinkModel(service: service)
+            model.email = "alex@example.org"
+            await model.submit()
+            guard case .failed(let message) = model.phase else { return XCTFail("\(error)") }
+            XCTAssertTrue(message.contains(fragment), "\(error): \(message)")
+            XCTAssertEqual(model.email, "alex@example.org")
+            XCTAssertTrue(model.canSubmit, "a failed request can be retried")
+        }
+    }
+
+    func testCancellationReturnsToEditingWithoutAnError() async {
+        let service = FakeSignInLink()
+        await service.setFailure(CancellationError())
+        let model = SignInLinkModel(service: service)
+        model.email = "alex@example.org"
+        await model.submit()
+        XCTAssertEqual(model.phase, .editing)
     }
 }
 

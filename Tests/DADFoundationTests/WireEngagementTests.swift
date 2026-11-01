@@ -13,16 +13,19 @@ private func dashboardJSON(rank: String = #"{"national_percentile":2,"city":"Aus
 }
 private let preparingJSON = #"{"state":"preparing","mode":"test"}"#
 
-private func badgeRow(_ code: String = "F", title: String = "Founding Donor", perk: String = "FOUNDING_EVENTS", earned: Bool = true) -> String {
-    #"{"code":"\#(code)","title":"\#(title)","rule":"Start a monthly gift","perk":"\#(perk)","earned":\#(earned),"earned_at":\#(earned ? #""2026-09-02T10:00:00Z""# : "null"),"artwork":"a"}"#
+private func badgeRow(_ code: String = "F", title: String = "Founding Donor", perk: String = "FOUNDING_EVENTS", earned: Bool = true,
+                      city: String? = nil, displayTitle: String? = nil) -> String {
+    let cityJSON = city.map { "\"\($0)\"" } ?? "null"
+    return #"{"code":"\#(code)","title":"\#(title)","city":\#(cityJSON),"display_title":"\#(displayTitle ?? title)","rule":"Start a monthly gift","perk":"\#(perk)","earned":\#(earned),"earned_at":\#(earned ? #""2026-09-02T10:00:00Z""# : "null"),"artwork":"a"}"#
 }
 private func badgesJSON(_ rows: String...) -> String { #"{"badges":[\#(rows.joined(separator: ","))]}"# }
 
 private let networkJSON = #"{"active_count":3,"annualized_minor":474500,"next_milestone":{"label":"Team Captain","target":20,"remaining":17},"invitees":[{"name":"Sam L","active":true},{"name":"Jo P","active":false}],"anonymous_active":1}"#
-private func sharingJSON(name: String? = "Alex R", link: String? = "https://dollaraday.org/r/ALEX42") -> String {
+private func sharingJSON(name: String? = "Alex R", link: String? = "https://dollaraday.org/r/ALEX42", code: String? = "ALEX42") -> String {
+    let c = code.map { "\"\($0)\"" } ?? "null"
     let n = name.map { "\"\($0)\"" } ?? "null"
     let l = link.map { "\"\($0)\"" } ?? "null"
-    return #"{"public_name":\#(n),"link":\#(l),"irl_link":\#(l)}"#
+    return #"{"public_name":\#(n),"link":\#(l),"irl_link":\#(l),"referral_code":\#(c)}"#
 }
 private func conversionsJSON(kind: String = "LINK", more: Bool = false) -> String {
     #"{"conversions":[{"converted_at":"2026-10-20T10:00:00Z","kind":"\#(kind)"},{"converted_at":"2026-10-02T10:00:00.5Z","kind":"IRL"}],"more":\#(more)}"#
@@ -84,6 +87,30 @@ final class WireEngagementTests: XCTestCase {
         XCTAssertEqual(snapshot.referral?.conversions?.map(\.kind), [.link, .irl])
         XCTAssertFalse(snapshot.needsPublicName)
         XCTAssertTrue(transport.seen.allSatisfy { $0.request.headerFields[.authorization] == "Bearer tok" })
+    }
+
+    func testReferralCodeComesFromTheServerField() async throws {
+        // The link path says ONE, the field says TWO: the displayed code is the field.
+        let snap = try await make(engagementTransport(sharing: (.ok, sharingJSON(link: "https://dollaraday.org/r/ONE", code: "TWO")))).service.snapshot()
+        XCTAssertEqual(snap.referral?.code, "TWO")
+    }
+
+    func testNullReferralCodeWithNullLinksNeedsAName() async throws {
+        let snap = try await make(engagementTransport(sharing: (.ok, sharingJSON(name: nil, link: nil, code: nil)))).service.snapshot()
+        XCTAssertNil(snap.referral)
+        XCTAssertTrue(snap.needsPublicName)
+    }
+
+    func testCityBadgeShowsDisplayTitleWhenEarnedAndTitleWhenLocked() async throws {
+        let rows = badgesJSON(
+            badgeRow("CITY50", title: "Top 50 City", perk: "", earned: true, city: "Chicago", displayTitle: "Top 50 in Chicago"),
+            badgeRow("C2", title: "Top 50 City", perk: "", earned: false, city: nil, displayTitle: "Top 50 City"),
+            badgeRow("C3", title: "Top 50 City", perk: "", earned: false, city: "Chicago", displayTitle: "Top 50 in Chicago"),
+            badgeRow("7", title: "One Week", perk: "", earned: true),
+            badgeRow("E", title: "Blank Display", perk: "", earned: true, displayTitle: ""))
+        let list = try await make(engagementTransport(badges: (.ok, rows))).service.snapshot().badges?.badges ?? []
+        XCTAssertEqual(list.map(\.shownTitle), ["Top 50 in Chicago", "Top 50 City", "Top 50 City", "One Week", "Blank Display"])
+        XCTAssertEqual(list.first?.accessibilitySummary, "Top 50 in Chicago, earned")
     }
 
     func testOptedOutAndNotRankedAreDistinct() async throws {
@@ -184,12 +211,11 @@ final class WireEngagementTests: XCTestCase {
         }
     }
 
-    func testUnusableInviteLinksAreNeitherAnInviteNorANamePrompt() async throws {
-        for link in ["https://dollaraday.org/other/ALEX42", "https://dollaraday.org/r/", "https://dollaraday.org/r/AL%20EX", "https://dollaraday.org/r/A/B",
-                     "https://dollaraday.org/r/" + String(repeating: "A", count: 65)] {
-            let snapshot = try await make(engagementTransport(sharing: (.ok, sharingJSON(link: link)))).service.snapshot()
-            XCTAssertNil(snapshot.referral, link)
-            XCTAssertFalse(snapshot.needsPublicName, link)
+    func testUnusableReferralCodesAreNeitherAnInviteNorANamePrompt() async throws {
+        for code in [nil, "", "AL EX", "A/B", String(repeating: "A", count: 65)] as [String?] {
+            let snapshot = try await make(engagementTransport(sharing: (.ok, sharingJSON(code: code)))).service.snapshot()
+            XCTAssertNil(snapshot.referral, code ?? "nil")
+            XCTAssertFalse(snapshot.needsPublicName, code ?? "nil")
         }
     }
 

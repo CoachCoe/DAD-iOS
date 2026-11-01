@@ -21,6 +21,7 @@ struct DonorHomeView: View {
     private let giving: GivingKit?
     private let events: (any EventsService)?
     private let engagement: (any EngagementService)?
+    private let wallet: (any WalletPassService)?
     @State private var showEngagement: Bool = {
         #if DEBUG
         ProcessInfo.processInfo.arguments.contains("--stub-open-engagement")   // screenshot/UITest aid, DEBUG only
@@ -45,13 +46,18 @@ struct DonorHomeView: View {
         #endif
     }()
     @State private var giftModel: GivingModel?
+    /// A screen a tapped notification asked for; opened here and then cleared.
+    @Binding private var destination: AccountDestination?
 
     init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil,
-         engagement: (any EngagementService)? = nil, onSignedOut: @escaping () -> Void) {
+         engagement: (any EngagementService)? = nil, wallet: (any WalletPassService)? = nil,
+         destination: Binding<AccountDestination?> = .constant(nil), onSignedOut: @escaping () -> Void) {
+        _destination = destination
         self.service = service
         self.giving = giving
         self.events = events
         self.engagement = engagement
+        self.wallet = wallet
         self.onSignedOut = onSignedOut
         _model = State(initialValue: DashboardModel(service: service))
         _giftModel = State(initialValue: giving?.makeModel())
@@ -111,6 +117,14 @@ struct DonorHomeView: View {
         .accessibilityElement(children: .contain).accessibilityIdentifier("donor-home")
         .task { await model.load() }
         .task { await giftModel?.load() }
+        .task(id: destination) {
+            switch destination {
+            case .gifts: showHistory = true
+            case .paymentMethod: showGift = giftModel != nil
+            default: return
+            }
+            destination = nil
+        }
         .refreshable { await model.load(); await giftModel?.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
         .sheet(isPresented: $showGift) {
@@ -121,7 +135,8 @@ struct DonorHomeView: View {
         }
         .sheet(isPresented: $showEngagement) {
             if let engagement {
-                EngagementHome(model: EngagementModel(service: engagement), onClose: { showEngagement = false },
+                EngagementHome(model: EngagementModel(service: engagement), wallet: wallet.map { WalletPassModel(service: $0) },
+                               onClose: { showEngagement = false },
                                onSignedOut: { showEngagement = false; onSignedOut() })
             }
         }

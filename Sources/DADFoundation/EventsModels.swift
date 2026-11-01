@@ -204,20 +204,35 @@ public final class EventsModel {
 
     /// Re-read one event (after a check-in) so `checkedInAt` shows; a failed read keeps what is on screen.
     public func reloadEvent(eventID: String) async {
-        guard let index = events.firstIndex(where: { $0.id == eventID }),
-              let updated = try? await service.event(id: eventID) else { return }
-        events[index] = updated
+        do {
+            let updated = try await service.event(id: eventID)
+            guard let index = events.firstIndex(where: { $0.id == eventID }) else { return }
+            events[index] = updated
+        } catch AccountError.notFound {
+            events.removeAll { $0.id == eventID }
+        } catch {
+            noteSignedOut(error)
+        }
     }
 
     public func clearCalendar() { calendarFile = nil }
 
     /// Re-fetch one event after a mutation and splice it back into the list in place.
     private func refresh(eventID: String, assuming status: ReservationStatus) async {
-        guard let index = events.firstIndex(where: { $0.id == eventID }) else { return }
-        // The mutation already succeeded, so a failed re-fetch must not report it as an error: fall back
-        // to the status the server just confirmed until the next load.
-        if let updated = try? await service.event(id: eventID) { events[index] = updated }
-        else { events[index] = events[index].with(status: status) }
+        do {
+            let updated = try await service.event(id: eventID)
+            guard let index = events.firstIndex(where: { $0.id == eventID }) else { return }
+            events[index] = updated
+        } catch AccountError.notFound {
+            events.removeAll { $0.id == eventID }
+        } catch where error.isCancellation {
+            return
+        } catch {
+            noteSignedOut(error)
+            // The command succeeded; keep its confirmed status if the follow-up read is unavailable.
+            guard !signedOut, let index = events.firstIndex(where: { $0.id == eventID }) else { return }
+            events[index] = events[index].with(status: status)
+        }
     }
 
     /// A 404/409 means what is on screen is stale; refresh the list quietly so the next tap is informed.
@@ -275,7 +290,7 @@ public final class CheckInModel {
 
     /// Apply the client-side window gate, then (if open) check in. `window` and `now` are injected
     /// so the "too early / too late" branch is deterministic in tests; the server still validates.
-    public func submit(code rawCode: String, window: CheckInWindow, now: Date) async {
+    public func submit(code rawCode: String, window: CheckInWindow, now: Date, eventID: String? = nil) async {
         if state == .checking { return }   // double-tap / double-scan guard
         let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines)
         switch window.state(now: now) {
@@ -300,6 +315,11 @@ public final class CheckInModel {
         state = .checking
         do {
             let result = try await service.checkIn(code: code)
+            if let eventID, result.eventID.caseInsensitiveCompare(eventID) != .orderedSame {
+                state = .failed("That code belongs to a different event. Open that event to check your attendance.")
+                return
+            }
+            guard result.checkedIn || result.alreadyCheckedIn else { throw AccountError.invalidResponse }
             state = .success(alreadyCheckedIn: result.alreadyCheckedIn)
         } catch where error.isCancellation {
             state = prior

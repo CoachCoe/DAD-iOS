@@ -88,7 +88,7 @@ struct EventsScreen: View {
             }
             if let id = selected, let event = model.event(id: id) {
                 EventDetail(model: model, service: service, event: event, confirmingCancel: $confirmingCancel,
-                            onBack: { selected = nil })
+                            onBack: { selected = nil }, onSignedOut: onSignedOut)
             } else if model.sortedEvents.isEmpty {
                 Text("No upcoming events near you yet. Check back soon.").accessibilityIdentifier("events-empty")
             } else {
@@ -196,6 +196,7 @@ private struct EventDetail: View {
     let event: DonorEvent
     @Binding var confirmingCancel: String?
     let onBack: () -> Void
+    let onSignedOut: () -> Void
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -217,7 +218,7 @@ private struct EventDetail: View {
                 }
             }.accessibilityElement(children: .contain).accessibilityIdentifier("event-detail-\(event.id)")
             if event.status == .reserved || event.status == .waitlisted || event.status == .checkedIn {
-                CheckInPanel(model: CheckInModel(service: service), event: event, onSignedOut: {},
+                CheckInPanel(model: CheckInModel(service: service), event: event, onSignedOut: onSignedOut,
                              onCheckedIn: { await model.reloadEvent(eventID: event.id) })
                     .id(event.id)
             }
@@ -289,7 +290,8 @@ private struct CheckInPanel: View {
 
     /// Submit, then re-read the event so the list and detail show the server's `checked_in_at`.
     private func submit(_ value: String) async {
-        await model.submit(code: value, window: event.checkInWindow, now: Date())
+        await model.submit(code: value, window: event.checkInWindow, now: Date(), eventID: event.id)
+        if model.signedOut { onSignedOut() }
         if case .success = model.state { await onCheckedIn() }
     }
 

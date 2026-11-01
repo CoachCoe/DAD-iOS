@@ -92,7 +92,7 @@ public struct WireEngagement: EngagementService {
                 let list = try response.body.json
                 return BadgeCollection(badges: list.badges.filter { !$0.code.isEmpty && !$0.title.isEmpty }.prefix(Self.badgeLimit).map { view in
                     Badge(code: view.code, title: view.title, rule: view.rule, perk: Badge.perkCopy(forKey: view.perk),
-                          earned: view.earned, earnedAt: view.earned_at)
+                          earned: view.earned, earnedAt: view.earned_at, displayTitle: view.display_title)
                 })
             case .unauthorized: throw AccountError.signedOut
             case .tooManyRequests: throw AccountError.rateLimited
@@ -150,10 +150,10 @@ public struct WireEngagement: EngagementService {
     }
 
     private static func outcome(of sharing: Components.Schemas.Sharing) -> InviteOutcome {
-        guard let name = sharing.public_name, !name.isEmpty, let link = sharing.link else { return .needsName }
-        // The code is the last segment of `<origin>/r/<code>`; the link itself is rebuilt from the configured public origin.
-        guard let url = URL(string: link), url.pathComponents.count == 3, url.pathComponents[1] == "r",
-              let code = Attribution.sanitized(url.pathComponents[2]) else { return .unusable }
+        guard let name = sharing.public_name, !name.isEmpty, sharing.link != nil else { return .needsName }
+        // The server names the code (`referral_code`, null exactly when the links are); the share and QR links are
+        // rebuilt from the configured public origin around it.
+        guard let raw = sharing.referral_code, let code = Attribution.sanitized(raw) else { return .unusable }
         return .code(code)
     }
 

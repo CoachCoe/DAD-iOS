@@ -439,6 +439,20 @@ final class WireGivingTests: XCTestCase {
         XCTAssertEqual(sent?.count, 1)
     }
 
+    func testBeginGiftCarriesTheKeptReferralAndKeysByIt() async throws {
+        let transport = ScriptedTransport { _, index in index == 0 ? (.serviceUnavailable, "{}") : (.created, checkoutJSON) }
+        let store = MemoryStore(Credentials(access: "tok", refresh: "ref", expiresAt: .distantFuture))
+        let session = try AccountSession(api: WireAPI(origin: testOrigin, transport: transport), store: store)
+        let kept = KeptReferral("r" + String(repeating: "1", count: 42))
+        let service = WireGiving(product: ProductClient(origin: testOrigin, transport: transport, session: session), referral: { kept.value })
+        do { _ = try await service.beginGift(amountMinor: 6000); XCTFail() } catch {}
+        kept.value = "r" + String(repeating: "2", count: 42)
+        _ = try await service.beginGift(amountMinor: 6000)
+        let sent = try transport.seen.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.body.utf8)) as? [String: Any]) }
+        XCTAssertEqual(sent.map { $0["referral_token"] as? String }, ["r" + String(repeating: "1", count: 42), "r" + String(repeating: "2", count: 42)])
+        XCTAssertNotEqual(idempotencyKey(transport.seen[0]), idempotencyKey(transport.seen[1]), "a changed referral reused the key")
+    }
+
     func testBeginGiftRefusesAnAmountOffTheDailyStepWithoutCallingTheServer() async throws {
         let transport = ScriptedTransport { _, _ in (.created, checkoutJSON) }
         let rig = try make(transport)

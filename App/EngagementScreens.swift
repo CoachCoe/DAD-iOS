@@ -1,4 +1,5 @@
 import CoreImage.CIFilterBuiltins
+import PassKit
 import SwiftUI
 import UIKit
 import DADFoundation
@@ -22,9 +23,12 @@ private func unavailableLine(_ what: String) -> some View {
 
 struct EngagementHome: View {
     @State var model: EngagementModel
+    /// Adds the referral code to Apple Wallet; nil where Wallet is not wired (previews).
+    @State var wallet: WalletPassModel? = nil
     var onClose: (() -> Void)?
     var onSignedOut: () -> Void = {}
     @State private var showQR = false
+    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
     @State private var copied = false
     @State private var nameDraft = ""
 
@@ -106,7 +110,7 @@ struct EngagementHome: View {
                         Image(systemName: badge.earned ? "checkmark.seal.fill" : "lock.fill")
                             .foregroundStyle(badge.earned ? Color.dad("brand-ink") : .secondary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(badge.title).fontWeight(badge.earned ? .semibold : .regular)
+                            Text(badge.shownTitle).fontWeight(badge.earned ? .semibold : .regular)
                             Text(badge.earned ? earnedLine(badge) : badge.rule).font(.caption).foregroundStyle(.secondary)
                             if badge.hasPerk {
                                 Text("Perk: \(badge.perk)").font(.caption).foregroundStyle(.secondary)
@@ -209,12 +213,15 @@ struct EngagementHome: View {
                             ShareLink(item: link, message: Text(referral.shareMessage())) {
                                 Label("Share invite", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity)
                             }.buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("share-invite")
+                                .simultaneousGesture(TapGesture().onEnded { analytics?.emit(.inviteShared, properties: ["channel": "share_sheet"]) })
                             Button(copied ? "Copied" : "Copy link") {
                                 UIPasteboard.general.string = link.absoluteString
                                 copied = true
+                                analytics?.emit(.inviteShared, properties: ["channel": "copy"])
                             }.buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("copy-invite")
-                            Button("Show QR") { showQR = true }
+                            Button("Show QR") { showQR = true; analytics?.emit(.irlCodeShown) }
                                 .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("show-qr")
+                            if let wallet { WalletPassButton(model: wallet) }
                         }
                         Text(link.absoluteString).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                             .accessibilityIdentifier("invite-link")
@@ -268,6 +275,47 @@ struct EngagementHome: View {
 
 /// The full-screen IRL code (R-1, R-2): a QR of the in-person link, drawn locally with CoreImage so no image
 /// is fetched and no untrusted file is parsed. Meant to be scanned from a phone screen face to face.
+/// "Add to Apple Wallet" for the referral code, shown only when the deployment issues passes. The
+/// bytes go to Wallet's own add sheet; ones Wallet cannot read are reported, not silently dropped.
+private struct WalletPassButton: View {
+    @State var model: WalletPassModel
+    @State private var presented: PresentedPass?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if model.available == true {
+                Button(model.isPreparing ? "Preparing your Wallet pass…" : "Add to Apple Wallet") { Task { await model.prepare() } }
+                    .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isPreparing).accessibilityIdentifier("wallet-add")
+            } else if model.checkFailed {
+                Text("Wallet availability couldn’t be checked. Your on-screen code still works.").font(.footnote).foregroundStyle(.secondary)
+                Button("Check Wallet availability again") { Task { await model.check() } }.accessibilityIdentifier("wallet-recheck")
+            }
+            if let error = model.error {
+                Text(error).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("wallet-error")
+            }
+        }
+        .task { await model.check() }
+        .onChange(of: model.pass) { _, data in
+            guard let data else { return }
+            if let pass = try? PKPass(data: data) { presented = PresentedPass(pass: pass); model.pass = nil } else { model.passRejected() }
+        }
+        .sheet(item: $presented) { AddPassSheet(pass: $0.pass) }
+    }
+}
+
+private struct PresentedPass: Identifiable {
+    let id = UUID()
+    let pass: PKPass
+}
+
+private struct AddPassSheet: UIViewControllerRepresentable {
+    let pass: PKPass
+    func makeUIViewController(context: Context) -> UIViewController {
+        PKAddPassesViewController(pass: pass) ?? UIViewController()
+    }
+    func updateUIViewController(_ controller: UIViewController, context: Context) {}
+}
+
 private struct InviteQRSheet: View {
     let url: URL
     let onClose: () -> Void

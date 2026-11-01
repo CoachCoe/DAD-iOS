@@ -19,8 +19,11 @@ private actor ScriptedEvents: EventsService {
     private(set) var reserveCalls = 0
     private(set) var listCalls = 0
     private let gate: Gate?
+    private let detailGate: Gate?
 
-    init(list: [DonorEvent], gate: Gate? = nil) { self.list = list; self.gate = gate }
+    init(list: [DonorEvent], gate: Gate? = nil, detailGate: Gate? = nil) {
+        self.list = list; self.gate = gate; self.detailGate = detailGate
+    }
     func setReserveError(_ error: Error?) { reserveError = error }
     func setCancelError(_ error: Error?) { cancelError = error }
     func setDetailError(_ error: Error?) { detailError = error }
@@ -30,7 +33,9 @@ private actor ScriptedEvents: EventsService {
     func events() async throws -> [DonorEvent] { listCalls += 1; return list }
     func event(id: String) async throws -> DonorEvent {
         if let detailError { throw detailError }
-        return list.first { $0.id == id }!
+        let result = list.first { $0.id == id }!
+        await detailGate?.pass()
+        return result
     }
     func reserve(eventID: String) async throws -> ReservationOutcome {
         reserveCalls += 1
@@ -45,6 +50,40 @@ private actor ScriptedEvents: EventsService {
 
 @MainActor
 final class EventsModelBehaviourTests: XCTestCase {
+    func testDetailRefreshUsesTheCurrentListAfterSuspension() async {
+        for mutation in [false, true] {
+            let gate = Gate()
+            let service = ScriptedEvents(list: [event()], detailGate: gate)
+            let model = EventsModel(service: service)
+            await model.load()
+            let request = Task {
+                if mutation { await model.reserve(eventID: "e1") }
+                else { await model.reloadEvent(eventID: "e1") }
+            }
+            await gate.waitUntilEntered()
+            await service.setList([event("e2")])
+            await model.load()
+            await gate.release()
+            await request.value
+            XCTAssertEqual(model.events.map(\.id), ["e2"], "the old index must not replace a different event")
+        }
+    }
+
+    func testRefreshHonorsSessionRevocationAndRemovedEvents() async {
+        let service = ScriptedEvents(list: [event()])
+        let model = EventsModel(service: service)
+        await model.load()
+        await service.setDetailError(AccountError.signedOut)
+        await model.reserve(eventID: "e1")
+        XCTAssertTrue(model.signedOut)
+
+        let removed = EventsModel(service: service)
+        await removed.load()
+        await service.setDetailError(AccountError.notFound)
+        await removed.reloadEvent(eventID: "e1")
+        XCTAssertTrue(removed.events.isEmpty)
+    }
+
     func testASecondReserveWhileOneIsInFlightIsIgnored() async {
         let gate = Gate()
         let service = ScriptedEvents(list: [event()], gate: gate)
@@ -192,6 +231,14 @@ final class EventMessageTests: XCTestCase {
 final class CheckInModelHardeningTests: XCTestCase {
     private let window = CheckInWindow(startsAt: at("2026-12-01T18:00:00Z"), endsAt: at("2026-12-01T20:00:00Z"))
     private let inside = at("2026-12-01T18:30:00Z")
+
+    func testCodeForAnotherEventDoesNotConfirmTheSelectedEvent() async {
+        let model = CheckInModel(service: ScriptedEvents(list: []))
+        await model.submit(code: validCheckInToken, window: window, now: inside, eventID: "e2")
+        XCTAssertEqual(model.state, .failed("That code belongs to a different event. Open that event to check your attendance."))
+        await model.submit(code: validCheckInToken, window: window, now: inside, eventID: "E1")
+        XCTAssertEqual(model.state, .success(alreadyCheckedIn: false))
+    }
 
     func testEmptyAndControlCharacterCodesNeverReachTheService() async {
         for code in ["", "   "] {

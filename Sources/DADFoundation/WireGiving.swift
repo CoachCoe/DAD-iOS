@@ -33,16 +33,19 @@ final class IdempotencyLedger: @unchecked Sendable {
 /// Starting a NEW gift (contract 2.6.0): `startRecurringCheckout` mints a Stripe-hosted Checkout
 /// session for the signed-in donor and the amount they chose; the app opens the returned `https` url
 /// in the secure browser view and then re-reads `recurring` (the return page does not prove payment).
+/// The referral token a link visit kept (contract 2.10) goes with it, crediting the referrer as the
+/// website's cookie would.
 public struct WireGiving: GivingService {
     private let product: ProductClient
     private let ledger: IdempotencyLedger
+    private let referral: @Sendable () -> String?
 
-    public init(origin: URL, session: AccountSession) throws {
-        self.init(product: try ProductClient(origin: origin, session: session))
+    public init(origin: URL, session: AccountSession, referral: @escaping @Sendable () -> String? = { nil }) throws {
+        self.init(product: try ProductClient(origin: origin, session: session), referral: referral)
     }
 
-    init(product: ProductClient, ledger: IdempotencyLedger = IdempotencyLedger()) {
-        self.product = product; self.ledger = ledger
+    init(product: ProductClient, ledger: IdempotencyLedger = IdempotencyLedger(), referral: @escaping @Sendable () -> String? = { nil }) {
+        self.product = product; self.ledger = ledger; self.referral = referral
     }
 
     public func recurring() async throws -> RecurringState {
@@ -168,11 +171,12 @@ public struct WireGiving: GivingService {
 
     public func beginGift(amountMinor: Int) async throws -> PaymentPath {
         guard GiftAmount(monthlyMinor: amountMinor) != nil else { throw AccountError.invalidInput }
-        // One key per distinct amount: a retry of the same choice reuses it (the server returns the same
-        // session), a different choice is a different checkout.
-        return try await command("gift-checkout:\(amountMinor)") { key in
+        // One key per distinct amount and referral: a retry of the same choice reuses it (the server returns
+        // the same session), a different choice is a different checkout.
+        let referral = referral()
+        return try await command("gift-checkout:\(amountMinor):\(referralFingerprint(referral))") { key in
             try await self.call { client -> PaymentPath in
-                let body = Operations.startRecurringCheckout.Input.Body.jsonPayload(amount_minor: Int64(amountMinor))
+                let body = Operations.startRecurringCheckout.Input.Body.jsonPayload(amount_minor: Int64(amountMinor), referral_token: referral)
                 switch try await client.startRecurringCheckout(.init(headers: .init(Idempotency_hyphen_Key: key), body: .json(body))) {
                 case .created(let response): return .webCheckoutHandoff(try Self.hostedURL(try response.body.json.url))
                 case .unauthorized: throw AccountError.signedOut

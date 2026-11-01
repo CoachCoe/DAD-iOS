@@ -2,13 +2,14 @@ import Foundation
 import OpenAPIRuntime
 
 /// Unauthenticated credential flows over the generated client: email signup (`postDonorSignup`),
+/// an emailed sign-in link for an existing donor (`login`),
 /// email + password sign-in (`postDonorPasswordSignIn`), Sign in with Apple/Google (`oidcSignIn`)
 /// and passkey sign-in (`beginDonorPasskeySignIn` / `finishDonorPasskeySignIn`).
 ///
 /// Same shape as `WireAuth`: sign-in methods return credentials but never store them; the caller
 /// passes the call to `AccountSession.establish { ... }` so the session owns the await and its
 /// epoch guard. No secret (password, id_token, assertion) is ever logged or placed in an error.
-public struct WireCredentialAuth: SignupService, PasswordSignInService, OIDCSignInService, PasskeySignInService {
+public struct WireCredentialAuth: SignupService, SignInLinkService, PasswordSignInService, OIDCSignInService, PasskeySignInService {
     private let origin: URL
     private let transport: any ClientTransport
     private let deviceName: String?
@@ -36,6 +37,17 @@ public struct WireCredentialAuth: SignupService, PasswordSignInService, OIDCSign
         // Contract 2.4 answers 200 `{"sent":true}`; an older server's 202 means the same thing (a
         // link was emailed), so any 2xx is accepted without reading the body.
         case .undocumented(let status, _) where (200..<300).contains(status): return
+        case .unprocessableContent: throw AccountError.invalidInput
+        case .tooManyRequests: throw AccountError.rateLimited
+        default: throw AccountError.unavailable
+        }
+    }
+
+    // MARK: Sign-in link
+
+    public func requestSignInLink(email: String) async throws {
+        switch try await client.login(.init(body: .json(.init(email: email)))) {
+        case .accepted: return
         case .unprocessableContent: throw AccountError.invalidInput
         case .tooManyRequests: throw AccountError.rateLimited
         default: throw AccountError.unavailable

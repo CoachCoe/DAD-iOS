@@ -49,6 +49,34 @@ final class WireSignupTests: XCTestCase {
     }
 }
 
+final class WireSignInLinkTests: XCTestCase {
+    func testSignInLinkPostsOnlyTheEmailUnauthenticated() async throws {
+        let transport = ScriptedTransport { _, _ in (.accepted, #"{"message":"Check your email"}"#) }
+        try await WireCredentialAuth(origin: testOrigin, transport: transport).requestSignInLink(email: "alex@example.org")
+        let call = try XCTUnwrap(transport.seen.first)
+        XCTAssertEqual(call.request.method, .post)
+        XCTAssertEqual(call.request.path, "/donor/login")
+        XCTAssertNil(call.request.headerFields[.authorization])
+        XCTAssertEqual(call.request.headerFields[nativeClientHeader], "native")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: Any])
+        XCTAssertEqual(sent as? [String: String], ["email": "alex@example.org"], "no return page: the app claims the link itself")
+    }
+
+    func testSignInLinkStatusMapping() async {
+        let cases: [(HTTPResponse.Status, AccountError)] = [
+            (.unprocessableContent, .invalidInput), (.tooManyRequests, .rateLimited),
+            (.serviceUnavailable, .unavailable), (.forbidden, .unavailable), (.internalServerError, .unavailable),
+        ]
+        for (status, expected) in cases {
+            let transport = ScriptedTransport { _, _ in (status, #"{"detail":"x"}"#) }
+            do {
+                try await WireCredentialAuth(origin: testOrigin, transport: transport).requestSignInLink(email: "alex@example.org")
+                XCTFail("\(status)")
+            } catch { XCTAssertEqual(error as? AccountError, expected, "\(status)") }
+        }
+    }
+}
+
 final class WirePasswordSignInTests: XCTestCase {
     func testPasswordSignInSendsEmailAndPasswordWithNoBearerAndReturnsNativeCredentials() async throws {
         let transport = ScriptedTransport { _, _ in (.ok, nativeSessionJSON) }
