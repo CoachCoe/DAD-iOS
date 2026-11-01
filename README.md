@@ -62,10 +62,11 @@ null/unknown figures are shown as such, never as zero), today's initiative (`tod
 in rotation), paged gift history (`gifts`, 50 a page, capped at 500 rows in memory) with a per-gift record
 (`receipt`) and the calendar-year total (`annualSummary`). Engagement is wired too (see Engagement). The
 partner portal is wired: an approved partner user signs in with an emailed link (`partnerRequestSignIn`, then
-`partnerAcceptInvite` from the tapped or pasted `/partner/accept` link), and the 12-hour partner session is kept
+`partnerAcceptInvite` from the tapped or pasted `/partner/accept` link; becoming a partner is the website's
+application, `applyWithReceipt`, linked from partner sign-in as `<public origin>/apply`), and the 12-hour partner session is kept
 in its own Keychain item. The portal reads the overview, initiatives, spend, our-people rollup and teams;
 admins edit the organization profile, workforce size and logo, invite and remove users, share the company
-code and export or re-download PDF reports. Still not wired: push registration and analytics upload. Native entry hooks
+code and export or re-download PDF reports. Analytics and push are described below. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next
@@ -94,9 +95,8 @@ System universal links/passkeys require a final bundle ID, signing team, Associa
 Domains (`applinks:` and `webcredentials:`), and matching DAD-Main association files.
 The app ships under `org.dad.foundation` (Release) and `org.dad.foundation.debug` (Debug); see
 "Bundle identifier" below. Neither is registered with a signing team or Associated Domains yet.
-Push registration and Wallet have integration protocols; this foundation does
-not request those permissions or configure provider accounts. The camera is requested only when a donor
-opens the check-in scanner (see Events). A reachable staging API
+Notification permission is asked only from Settings ("Turn on notifications"), never at launch. The camera is
+requested only when a donor opens the check-in scanner (see Events). A reachable staging API
 and real-device/provider acceptance remain separate from synthetic tests.
 
 The version 2 Swift input preserves nullable dashboard, recurring, and event values
@@ -171,8 +171,8 @@ Real `WireEvents` over the generated client, behind `EventsService`: the list (`
   offered through the system share sheet, where the donor picks Calendar. The app never reads or writes the
   calendar, so there is no calendar permission or entitlement.
 - **Report an issue.** The event's `report_issue_url` (mailto) opens the mail composer.
-- **Not covered.** Reminder pushes (E-7) wait for push registration (P7); E-1 volunteer opt-in is a settings
-  preference and is not part of this screen.
+- **Elsewhere.** Reminder pushes (E-7) are sent by the server to the registered device (see Analytics and push);
+  E-1 volunteer opt-in is a settings preference and is not part of this screen.
 - **Test stub.** `--stub-backend --stub-signed-in` serves five scripted events (`--stub-events-ungated`
   hides the invite-only one, `--stub-events-fail-first` fails the first list read).
 
@@ -221,8 +221,9 @@ retained.
 **Privacy disclosure (App Store Privacy "nutrition label").** The app collects: email and phone
 (account), approximate location via ZIP (streak day boundary, nearby events), and gift history.
 No third-party analytics SDK is embedded — analytics events go only to the first-party DAD-Main
-ingest endpoint. No tracking across apps/sites; no IDFA. Declare Contact Info, Coarse Location,
-and Financial Info as "used for app functionality", not linked to third-party advertising.
+ingest endpoint, and only after the donor allows them. No tracking across apps/sites; no IDFA. Declare Contact Info,
+Coarse Location, and Financial Info as "used for app functionality", and Product Interaction as "analytics",
+none of them used for third-party advertising (matching `App/PrivacyInfo.xcprivacy`).
 
 **Entitlements / capabilities** required before submission (not needed for simulator builds):
 Push Notifications (APNs) for §6.11 categories, Associated Domains (`applinks:` +
@@ -262,3 +263,26 @@ exercised only at archive/submission time. Pre-submission:
 - [ ] Produce an `ExportOptions.plist` for `xcodebuild -exportArchive` (method `app-store`, your
       team id) — gitignored, not committed.
 - [ ] Verify the archived build is signed with the distribution certificate before upload.
+
+## Analytics and push (contract 2.9.0)
+
+**Analytics are opt-in**, worded and counted as on the website. The start screen asks once ("Allow usage
+analytics?") and Settings has a "Usage analytics" switch; until the donor allows it nothing is recorded. Events go
+only to DAD-Main's `ingestAnalytics` (first party, `X-DAD-Platform: IOS`, attributed to the donor when signed in)
+through `AnalyticsRecorder`, in batches of up to 100 with a stable id each so a retried batch is not double-counted;
+declining drops anything still buffered. The app emits `app_opened`, `role_selected`, `invite_shared`
+(`share_sheet` / `copy`), `irl_code_shown` and `push_opened`; every other event is derived from the successful API
+call it stands for by the same rules as the website's `observeAPI` (`ObservingTransport`), e.g. `signup_started`
+for `POST /donor/signup`.
+
+**Push** registers the donor (`registerPushDevice`, at every launch and sign-in; the server drops the token when the
+session ends) and the partner (`partnerRegisterPushDevice`, unregistered on sign-out), with the APNs environment of
+the build (Debug `SANDBOX`, Release `PRODUCTION`). A tapped notification's `category` is counted as `push_opened`
+and its `path` opens the matching screen (`/account/gifts` gift history, `/account/payment-method` the gift sheet,
+`/account/profile` Settings), after sign-in if need be. **Owner dependency:** APNs issues a device token only to an
+app with the Push Notifications capability (`aps-environment` entitlement) under the signing team, and DAD-Main
+needs its APNs key; until then the permission can be granted but no token is registered. `--stub-push-tap-gifts`
+replays a tap in UI tests.
+
+**Referral attribution** is captured by the website (`/r/<code>`, `/c/<code>`). The mobile contract's signup has no
+attribution field, so the app keeps its capture seam (`AttributionCapture`) unused until DAD-Main adds one.

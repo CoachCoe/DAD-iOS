@@ -168,7 +168,7 @@ final class PartnerModelTests: XCTestCase {
             return Data("%PDF".utf8)
         }
         func signOut() async throws { signedOut = true }
-        func registerPushDevice(token: String) async throws { pushRegistered = true }
+        func registerPushDevice(token: String, environment: PushEnvironment) async throws { pushRegistered = true }
         func unregisterPushDevice() async throws { pushUnregistered = true }
     }
 
@@ -345,7 +345,7 @@ final class PartnerModelTests: XCTestCase {
     func testPushRegistersAndSignOutUnregistersBeforeEndingTheSession() async {
         let svc = FakeService()
         let model = PartnerModel(service: svc)
-        await model.registerPush(token: "t")
+        await model.registerPush(token: "t", environment: .sandbox)
         await model.signOut()
         XCTAssertTrue(svc.pushRegistered)
         XCTAssertTrue(svc.pushUnregistered)

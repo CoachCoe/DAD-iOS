@@ -2,6 +2,7 @@ import SwiftUI
 import DADFoundation
 import SafariServices
 import CryptoKit
+import UserNotifications
 
 /// Preview/UITest launch switches exist only in DEBUG builds: a release binary ignores them, so a
 /// shipped app can never be steered into synthetic data or a canned screen by launch arguments.
@@ -79,6 +80,13 @@ private final class AccountModel {
     private(set) var publicOrigin: URL?
     /// A tapped partner sign-in link waiting for the partner sign-in screen to accept it.
     var pendingPartnerToken: String?
+    /// Opt-in usage analytics; nil in the synthetic preview, which never sends anything.
+    private(set) var analytics: AnalyticsController?
+    private var donorPush: (any DonorPushService)?
+    /// The device token last registered for the current donor session.
+    private var registeredPush: String?
+    /// A screen a tapped notification or link asked for, opened by the donor shell once signed in.
+    var destination: AccountDestination?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -95,6 +103,7 @@ private final class AccountModel {
     /// A session whose credentials were found on launch: the donor shell (and its own loading and
     /// recovery states) is the right place to wait. A session with nothing stored goes straight to sign-in.
     var hasRestorableSession: Bool { session?.restoredCredentials == true }
+    var isReady: Bool { if case .ready = state { true } else { false } }
     func makeSettings() -> (any AccountSettingsService)? { settingsService }
     func hasPartnerSession() async -> Bool { await partnerSession?.isSignedIn ?? false }
     /// Runs sign-in verification INSIDE the session so it owns the await and the epoch guard.
@@ -157,6 +166,9 @@ private final class AccountModel {
                 partnerSignIn = services.partnerAuth
                 partnerSession = services.partnerSession
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
+                donorPush = services.push
+                installAnalytics(AnalyticsController(consent: MemoryAnalyticsConsent(choice: launchFlag("--stub-analytics-unset") ? nil : false),
+                                                     sink: services.analyticsSink))
                 state = .loading
             } catch { session = nil; state = .unavailable }
             return
@@ -216,13 +228,20 @@ private final class AccountModel {
                 partnerSignIn = try WirePartnerAuth(origin: origin, session: partner)
                 partnerService = try WirePartner(origin: origin, session: partner)
                 partnerSession = partner
+                donorPush = try WireDonorPush(origin: origin, session: built)
+                let analyticsSink = try WireAnalytics(origin: origin, access: { try? await built.accessToken() })
                 session = built
+                installAnalytics(AnalyticsController(consent: DefaultsAnalyticsConsent(), sink: analyticsSink))
             }
         } catch {
             session = nil
             state = .unavailable
             notice = "This build isn’t configured to reach DAD. Install a build with a valid API origin."
         }
+    }
+    private func installAnalytics(_ controller: AnalyticsController) {
+        analytics = controller
+        AnalyticsObservation.shared.install { controller.emit($0) }
     }
     func load() async {
         guard let session else { state = .unavailable; return }
@@ -231,11 +250,30 @@ private final class AccountModel {
         state = .loading
         do {
             let profile = try await session.profile()
-            if current == generation { state = .ready(profile) }
+            if current == generation {
+                state = .ready(profile)
+                if let pending = gate.signedIn() { destination = pending }
+            }
         }
         catch is CancellationError { return }
-        catch AccountError.signedOut { if current == generation { state = .signedOut } }
+        catch AccountError.signedOut { if current == generation { state = .signedOut; registeredPush = nil } }
         catch { if current == generation { state = .unavailable } }
+    }
+
+    /// Best-effort, once per token and donor session: platforms rotate tokens, so the server wants every launch.
+    func registerPush(_ token: String?) async {
+        guard let token, let donorPush, case .ready = state, registeredPush != token else { return }
+        registeredPush = token
+        do { try await donorPush.register(token: token, environment: .ofThisBuild) } catch { registeredPush = nil }
+    }
+
+    /// A tapped notification: counted (`push_opened`), then its screen is opened, after sign-in if need be.
+    func openNotification(_ tap: PushTap) {
+        analytics?.emit(.pushOpened, properties: ["type": tap.category])
+        guard let path = tap.path, let target = router?.notification(path: path) else { return }
+        let signedIn: Bool
+        if case .ready = state { signedIn = true } else { signedIn = false }
+        if let now = gate.receive(target, signedIn: signedIn) { destination = now }
     }
     /// A sign-in link pasted from the "check your email" screen (the email may have been opened on
     /// another device or in a browser). Only a plain claim link is accepted; it goes through the
@@ -263,7 +301,7 @@ private final class AccountModel {
         case .account(.profile):
             let signedIn: Bool
             if case .ready = state { signedIn = true } else { signedIn = false }
-            _ = gate.receive(.profile, signedIn: signedIn)
+            if let now = gate.receive(.profile, signedIn: signedIn) { destination = now }
             Task { await load() }
             return nil
         case .claim(let token, let next):
@@ -280,7 +318,6 @@ private final class AccountModel {
                 do {
                     try await session.claim(token: token)
                     completedProof = digest
-                    _ = gate.signedIn()
                     await load()
                 } catch {
                     if await session.isSignedIn { state = .unavailable }
@@ -295,6 +332,8 @@ private final class AccountModel {
         }
     }
 }
+
+private struct PushRegistrationKey: Equatable { let token: String?; let ready: Bool }
 
 private struct WebDestination: Identifiable { let id = UUID(); let url: URL }
 private struct WebFallback: UIViewControllerRepresentable {
@@ -316,6 +355,7 @@ private struct DonorLanding: View {
     var events: (any EventsService)?
     var engagement: (any EngagementService)?
     var wallet: (any WalletPassService)?
+    @Binding var destination: AccountDestination?
     var onSignedOut: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -347,7 +387,7 @@ private struct DonorLanding: View {
                     .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
             }
             if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, engagement: engagement, wallet: wallet,
-                                                                           onSignedOut: onSignedOut) }
+                                                                           destination: $destination, onSignedOut: onSignedOut) }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
@@ -358,6 +398,7 @@ private struct DonorLanding: View {
 private struct RoleSelect: View {
     let notice: String?
     let onSelect: (AppRole) -> Void
+    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
@@ -366,12 +407,54 @@ private struct RoleSelect: View {
                 Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("auth-notice")
             }
             VStack(spacing: 12) {
-                Button("I’m a donor") { onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
-                Button("I’m a partner") { onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
+                Button("I’m a donor") { analytics?.emit(.roleSelected); onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
+                Button("I’m a partner") { analytics?.emit(.roleSelected); onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
             }
+            if let analytics, analytics.choice == nil { AnalyticsChoice(analytics: analytics) }
         }
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
         .accessibilityIdentifier("role-select")
+    }
+}
+
+/// Asks iOS for notification permission only when the donor chooses to, never at launch; once allowed the app
+/// registers for a device token (see `PushAppDelegate`).
+private struct NotificationPermissionRow: View {
+    @State private var status: UNAuthorizationStatus?
+    var body: some View {
+        Group {
+            switch status {
+            case .notDetermined:
+                Button("Turn on notifications") {
+                    Task {
+                        let granted = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+                        if granted { UIApplication.shared.registerForRemoteNotifications() }
+                        status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+                    }
+                }.buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("notifications-allow")
+            case .denied:
+                Text("Notifications are off for DAD in iOS Settings.").font(.footnote).accessibilityIdentifier("notifications-denied")
+            default:
+                EmptyView()
+            }
+        }
+        .task { status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus }
+    }
+}
+
+/// The first-launch analytics question, worded as on the website; the answer can be changed in Settings.
+private struct AnalyticsChoice: View {
+    let analytics: AnalyticsController
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Allow first-party usage analytics? DAD uses a temporary journey ID to measure signup, sharing and giving. "
+                 + "No names, email addresses or payment details are sent. Observations are kept for 13 months. "
+                 + "You can change this choice in Settings.").font(.footnote)
+            Button("Allow usage analytics") { analytics.choose(true) }
+                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("analytics-allow")
+            Button("Decline usage analytics") { analytics.choose(false) }
+                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("analytics-decline")
+        }.accessibilityElement(children: .contain).accessibilityIdentifier("analytics-choice")
     }
 }
 
@@ -594,7 +677,7 @@ actor PreviewPartner: PartnerService {
     func report() async throws -> Data { Data("%PDF-1.4 preview".utf8) }
     func retainedReport(id: String) async throws -> Data { throw AccountError.notFound }
     func signOut() async throws {}
-    func registerPushDevice(token: String) async throws {}
+    func registerPushDevice(token: String, environment: PushEnvironment) async throws {}
     func unregisterPushDevice() async throws {}
 }
 
@@ -664,6 +747,7 @@ private struct AccountSettingsScreen: View {
     var giving: GivingKit?
     var onSignedOut: (() -> Void)?
     @State private var giftModel: GivingModel?
+    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
     @State private var confirmingDelete = false
     @State private var deleteTyped = ""
     var body: some View {
@@ -712,6 +796,7 @@ private struct AccountSettingsScreen: View {
         }
 
         // Notification toggles (§6.11) — payment-failure email is absent by design.
+        NotificationPermissionRow()
         ForEach(snapshot.preferences.pushToggles, id: \.key) { toggle in
             Toggle(toggle.label, isOn: Binding(
                 get: { toggle.value },
@@ -731,6 +816,12 @@ private struct AccountSettingsScreen: View {
             get: { snapshot.preferences.volunteer },
             set: { newValue in Task { await model.toggle("volunteer", newValue) } }
         )).disabled(model.isBusy).accessibilityIdentifier("pref-volunteer")
+        if let analytics {
+            Toggle("Usage analytics", isOn: Binding(get: { analytics.choice == true }, set: { analytics.choose($0) }))
+                .accessibilityIdentifier("analytics-toggle")
+            Text("First-party only: a temporary journey ID measures signup, sharing and giving. No names, email addresses "
+                 + "or payment details are sent.").font(.footnote).foregroundStyle(.secondary)
+        }
         ForEach(snapshot.preferences.emailToggles, id: \.key) { toggle in
             Toggle(toggle.label, isOn: Binding(
                 get: { toggle.value },
@@ -1113,6 +1204,7 @@ private struct UnauthenticatedStack: View {
     var partnerToken: String?
     var onPartnerTokenConsumed: () -> Void = {}
     var onPartnerSignedIn: () -> Void = {}
+    var publicOrigin: URL?
     let onSignedIn: () -> Void
     @State private var step: Step = .roleSelect
     @State private var external: ExternalRun?
@@ -1144,7 +1236,8 @@ private struct UnauthenticatedStack: View {
         case .partner:
             if let partnerSignIn {
                 PartnerSignInFlow(model: PartnerSignInModel(service: partnerSignIn), incomingToken: partnerToken,
-                                  onTokenConsumed: onPartnerTokenConsumed, onBack: { step = .roleSelect }, onSignedIn: onPartnerSignedIn)
+                                  onTokenConsumed: onPartnerTokenConsumed, onBack: { step = .roleSelect }, onSignedIn: onPartnerSignedIn,
+                                  applyURL: publicOrigin?.appending(path: "apply"))
             }
         }
     }
@@ -1192,8 +1285,56 @@ private struct SettingsSheet: View {
     }
 }
 
+/// UIKit's push callbacks, surfaced to SwiftUI: the device token once APNs issues one, and the latest tapped
+/// notification. Without the Push Notifications entitlement (it needs the signing team) APNs issues no token.
+@MainActor @Observable
+final class PushCenter {
+    static let shared = PushCenter()
+    var token: String?
+    var tap: PushTap?
+}
+
+extension PushEnvironment {
+    /// Development-signed (Debug) builds receive sandbox APNs tokens.
+    static var ofThisBuild: PushEnvironment {
+        #if DEBUG
+        .sandbox
+        #else
+        .production
+        #endif
+    }
+}
+
+final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        Task {
+            // Already allowed (asked from Settings on an earlier launch): fetch this launch's token. Never prompts.
+            let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+            if [.authorized, .provisional, .ephemeral].contains(status) { application.registerForRemoteNotifications() }
+        }
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        PushCenter.shared.token = pushTokenHex(deviceToken)
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard let tap = PushTap(userInfo: response.notification.request.content.userInfo) else { return }
+        await MainActor.run { PushCenter.shared.tap = tap }
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
+    }
+}
+
 @main
 struct DADApp: App {
+    @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var appDelegate
+    @State private var push = PushCenter.shared
     @State private var model = AccountModel()
     @State private var router = RoleRouter()
     @State private var web: WebDestination?
@@ -1222,12 +1363,14 @@ struct DADApp: App {
         DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
                      onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
                      dashboard: model.dashboardService, giving: model.givingKit, events: model.eventsService,
-                     engagement: model.engagementService, wallet: model.walletService, onSignedOut: { Task { await model.load() } })
+                     engagement: model.engagementService, wallet: model.walletService,
+                     destination: Binding(get: { model.destination }, set: { model.destination = $0 }),
+                     onSignedOut: { Task { await model.load() } })
     }
 
     @ViewBuilder private var partnerRoot: some View {
         if let service = model.partnerService {
-            PartnerPortal(model: PartnerModel(service: service), publicOrigin: model.publicOrigin) {
+            PartnerPortal(model: PartnerModel(service: service), publicOrigin: model.publicOrigin, pushToken: push.token) {
                 router.signedOut()
             }
         }
@@ -1266,7 +1409,8 @@ struct DADApp: App {
                                              onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
                                              partnerToken: model.pendingPartnerToken,
                                              onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
-                                             onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) }) {
+                                             onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) },
+                                             publicOrigin: model.publicOrigin) {
                             // The session already holds the established credentials; read the profile
                             // through it, then enter the donor shell (which owns load/recovery states).
                             Task {
@@ -1282,8 +1426,11 @@ struct DADApp: App {
             }
             .modifier(AppBackground())
             .tint(tokenColor("brand-ink"))
+            .environment(model.analytics)
             .task {
+                model.analytics?.emit(.appOpened)
                 #if DEBUG
+                if launchFlag("--stub-push-tap-gifts") { push.tap = PushTap(category: "STREAK_AT_RISK", path: "/account/gifts") }
                 // A preview screen is launched straight into its router state, before the profile
                 // await, so the target renders immediately instead of dwelling in `.restoring`.
                 if ["--preview-giving", "--preview-engagement", "--preview-events", "--preview-settings"].contains(where: launchFlag) {
@@ -1305,6 +1452,16 @@ struct DADApp: App {
                     if await model.hasPartnerSession() { router.signedIn(as: .partner) } else { router.restoredSignedOut() }
                 } else { router.signedIn(as: .donor) }
             }
+            .task(id: push.tap) {
+                guard let tap = push.tap else { return }
+                push.tap = nil
+                model.openNotification(tap)
+            }
+            .task(id: PushRegistrationKey(token: push.token, ready: model.isReady)) { await model.registerPush(push.token) }
+            .onChange(of: model.destination) { _, destination in
+                if destination == .profile, model.makeSettings() != nil { model.destination = nil; showSettings = true }
+                if destination == .dashboard { model.destination = nil }
+            }
             .onChange(of: model.state) { _, state in
                 switch state {
                 case .ready where router.currentRole == nil:
@@ -1319,6 +1476,7 @@ struct DADApp: App {
                 if let service = model.makeSettings() {
                     SettingsSheet(service: service, passwords: model.passwordSettings, management: model.management, giving: model.givingKit, onClose: { showSettings = false },
                                   onSignedOut: { showSettings = false; Task { await model.load() } })
+                    .environment(model.analytics)
                 }
             }
             .onOpenURL { if let url = model.receive($0, role: router.currentRole) { web = WebDestination(url: url) } }

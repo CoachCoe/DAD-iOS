@@ -37,6 +37,9 @@ public actor AnalyticsRecorder {
 
     public var pending: Int { buffer.count }
 
+    /// Drop everything not yet delivered (the donor declined analytics).
+    public func discardPending() { buffer.removeAll() }
+
     /// Flush the buffer in wire-legal (≤100) chunks. On success the delivered ids are remembered
     /// and the buffer cleared; on a sink failure the buffer is kept so the next flush retries,
     /// and already-delivered ids keep de-dup working across the retry.
@@ -46,7 +49,11 @@ public actor AnalyticsRecorder {
         var deliveredThisFlush: [UUID] = []
         do {
             for batch in batches {
-                try await sink.send(batch)
+                do {
+                    try await sink.send(batch)
+                } catch AccountError.invalidInput {
+                    // The server rejects the whole batch for one bad event, so resending it would fail forever.
+                }
                 deliveredThisFlush.append(contentsOf: batch.events.map(\.id))
             }
         } catch {

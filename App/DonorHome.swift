@@ -46,9 +46,13 @@ struct DonorHomeView: View {
         #endif
     }()
     @State private var giftModel: GivingModel?
+    /// A screen a tapped notification asked for; opened here and then cleared.
+    @Binding private var destination: AccountDestination?
 
     init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil,
-         engagement: (any EngagementService)? = nil, wallet: (any WalletPassService)? = nil, onSignedOut: @escaping () -> Void) {
+         engagement: (any EngagementService)? = nil, wallet: (any WalletPassService)? = nil,
+         destination: Binding<AccountDestination?> = .constant(nil), onSignedOut: @escaping () -> Void) {
+        _destination = destination
         self.service = service
         self.giving = giving
         self.events = events
@@ -113,6 +117,14 @@ struct DonorHomeView: View {
         .accessibilityElement(children: .contain).accessibilityIdentifier("donor-home")
         .task { await model.load() }
         .task { await giftModel?.load() }
+        .task(id: destination) {
+            switch destination {
+            case .gifts: showHistory = true
+            case .paymentMethod: showGift = giftModel != nil
+            default: return
+            }
+            destination = nil
+        }
         .refreshable { await model.load(); await giftModel?.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
         .sheet(isPresented: $showGift) {

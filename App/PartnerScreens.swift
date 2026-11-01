@@ -19,6 +19,8 @@ struct PartnerSignInFlow: View {
     let onTokenConsumed: () -> Void
     let onBack: () -> Void
     let onSignedIn: () -> Void
+    /// The website's partner application (`<public origin>/apply`); nil when no public origin is configured.
+    var applyURL: URL?
     @State private var pasted = ""
     @State private var sentTo: String?
 
@@ -44,6 +46,9 @@ struct PartnerSignInFlow: View {
                 Button(model.phase == .submitting ? "Sending…" : "Email me a sign-in link") { Task { await model.submit() } }
                     .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit)
                     .accessibilityIdentifier("partner-sign-in-submit")
+                if let applyURL {
+                    Link("New partner? Apply on the website", destination: applyURL).accessibilityIdentifier("partner-apply")
+                }
             }
             Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("partner-sign-in-back")
         }
@@ -92,6 +97,8 @@ struct PartnerPortal: View {
     @State var model: PartnerModel
     /// The public site, for the company sign-up link; nil hides the company code's link and QR.
     let publicOrigin: URL?
+    /// This device's APNs token once issued; the portal registers it for partner notifications.
+    var pushToken: String?
     let onSignedOut: () -> Void
     @State private var section: Section = .overview
 
@@ -135,6 +142,7 @@ struct PartnerPortal: View {
         .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain).accessibilityIdentifier("partner-portal")
         .task { await model.load() }
+        .task(id: pushToken) { if let pushToken { await model.registerPush(token: pushToken, environment: .ofThisBuild) } }
         .onChange(of: model.signedOut) { _, out in if out { onSignedOut() } }
     }
 

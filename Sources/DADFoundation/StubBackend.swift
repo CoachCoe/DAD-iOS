@@ -71,6 +71,9 @@ public enum StubBackend {
         public let partnerAuth: WirePartnerAuth
         public let partner: WirePartner
         public let partnerSession: PartnerSession
+        public let push: any DonorPushService
+        /// The ingest sink, on the bare transport so the upload itself is never observed.
+        public let analyticsSink: any AnalyticsSink
         /// Plays the Stripe webhook after the stubbed hosted page "finishes" (a gift starts, a card is applied).
         public let completeHandoff: @Sendable (HostedHandoff.Purpose) -> Void
     }
@@ -79,8 +82,9 @@ public enum StubBackend {
     public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, gift: GiftScenario = .none,
                             events: EventsScenario = .standard, engagement: EngagementScenario = .standard, signedIn: Bool = false,
                             partnerSignedIn: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
-        let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift, events: events,
-                                      engagement: engagement)
+        let stub = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift, events: events,
+                                 engagement: engagement)
+        let transport = ObservingTransport(inner: stub, observation: .shared)
         let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore(signedIn ? Credentials(
             access: "stub-access-0", refresh: "stub-refresh-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx", expiresAt: Date().addingTimeInterval(900)) : nil))
         let product = ProductClient(origin: origin, transport: transport, session: session)
@@ -101,7 +105,9 @@ public enum StubBackend {
             partnerAuth: WirePartnerAuth(origin: origin, transport: transport, session: partnerSession),
             partner: WirePartner(origin: origin, transport: transport, session: partnerSession),
             partnerSession: partnerSession,
-            completeHandoff: { transport.completeHandoff($0) })
+            push: WireDonorPush(product: product),
+            analyticsSink: WireAnalytics(origin: origin, transport: stub, access: { nil }),
+            completeHandoff: { stub.completeHandoff($0) })
     }
 }
 
@@ -629,6 +635,10 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         if let response = management(request, payload, authorized: authorized && !isDeleted, reply) { return response }
         if let response = partner(request, payload, reply) { return response }
         switch (request.method, request.path ?? "") {
+        case (.post, "/analytics/events"):
+            return reply(.ok, #"{"accepted":\#(payload.components(separatedBy: #""name""#).count - 1)}"#)
+        case (.post, "/donor/me/push-device"):
+            return authorized ? reply(.ok, #"{"registered":true,"platform":"IOS","environment":"SANDBOX"}"#) : reply(.unauthorized)
         case (.post, "/donor/phone/sign-in/options"): return reply(.ok, #"{"sent":true}"#)
         case (.post, "/donor/phone/sign-in"):
             if payload.contains("\"123456\"") { return reply(.ok, session()) }

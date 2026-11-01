@@ -32,7 +32,7 @@ public protocol PartnerService: Sendable {
     func retainedReport(id: String) async throws -> Data
     func signOut() async throws
     /// Partner push (§7.5, v2.2). Register on sign-in, clear on sign-out; both native-only.
-    func registerPushDevice(token: String) async throws
+    func registerPushDevice(token: String, environment: PushEnvironment) async throws
     func unregisterPushDevice() async throws
 }
 
@@ -313,8 +313,8 @@ public final class PartnerModel {
 
     /// Register this device for partner push after sign-in (§7.5). Best-effort — a push failure
     /// never blocks the portal.
-    public func registerPush(token: String) async {
-        try? await service.registerPushDevice(token: token)
+    public func registerPush(token: String, environment: PushEnvironment) async {
+        try? await service.registerPushDevice(token: token, environment: environment)
     }
 }
 

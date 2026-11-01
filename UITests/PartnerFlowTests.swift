@@ -82,6 +82,7 @@ import XCTest
         app.buttons["I’m a partner"].tap()
         let email = app.textFields["partner-sign-in-email"]
         XCTAssertTrue(email.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.links["partner-apply"].exists || app.buttons["partner-apply"].exists, "a new partner is pointed to the application")
         email.tap()
         email.typeText("ada@acme.com")
         app.buttons["partner-sign-in-submit"].tap()

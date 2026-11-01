@@ -28,6 +28,7 @@ struct EngagementHome: View {
     var onClose: (() -> Void)?
     var onSignedOut: () -> Void = {}
     @State private var showQR = false
+    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
     @State private var copied = false
     @State private var nameDraft = ""
 
@@ -212,11 +213,13 @@ struct EngagementHome: View {
                             ShareLink(item: link, message: Text(referral.shareMessage())) {
                                 Label("Share invite", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity)
                             }.buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("share-invite")
+                                .simultaneousGesture(TapGesture().onEnded { analytics?.emit(.inviteShared, properties: ["channel": "share_sheet"]) })
                             Button(copied ? "Copied" : "Copy link") {
                                 UIPasteboard.general.string = link.absoluteString
                                 copied = true
+                                analytics?.emit(.inviteShared, properties: ["channel": "copy"])
                             }.buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("copy-invite")
-                            Button("Show QR") { showQR = true }
+                            Button("Show QR") { showQR = true; analytics?.emit(.irlCodeShown) }
                                 .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("show-qr")
                             if let wallet { WalletPassButton(model: wallet) }
                         }

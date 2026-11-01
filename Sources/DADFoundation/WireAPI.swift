@@ -12,7 +12,7 @@ private final class NoRedirect: NSObject, URLSessionTaskDelegate, Sendable {
 
 /// The one URLSession shape every native call uses: ephemeral, no cookies/credential/URL cache,
 /// bounded timeouts, and redirects refused so a bearer can never be replayed to another location.
-func makeNativeTransport() -> any ClientTransport {
+func makeNativeTransport(observed: Bool = true) -> any ClientTransport {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.httpShouldSetCookies = false
     configuration.httpCookieStorage = nil
@@ -21,13 +21,18 @@ func makeNativeTransport() -> any ClientTransport {
     configuration.timeoutIntervalForRequest = 20
     configuration.timeoutIntervalForResource = 30
     let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
-    return URLSessionTransport(configuration: .init(session: session))
+    let transport = URLSessionTransport(configuration: .init(session: session))
+    return observed ? ObservingTransport(inner: transport, observation: .shared) : transport
 }
 
 extension HTTPField.Name {
     // Valid by construction; asserting once here avoids a force-unwrap at every request.
     fileprivate static let dadClient: HTTPField.Name = {
         guard let name = HTTPField.Name("X-DAD-Client") else { preconditionFailure("invalid header name literal") }
+        return name
+    }()
+    fileprivate static let dadPlatform: HTTPField.Name = {
+        guard let name = HTTPField.Name("X-DAD-Platform") else { preconditionFailure("invalid header name literal") }
         return name
     }()
     fileprivate static let origin: HTTPField.Name = {
@@ -45,6 +50,7 @@ struct NativeHeaders: ClientMiddleware {
                    next: @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)) async throws -> (HTTPResponse, HTTPBody?) {
         var request = request
         request.headerFields[.dadClient] = "native"
+        request.headerFields[.dadPlatform] = "IOS"
         request.headerFields[.cookie] = nil
         request.headerFields[.origin] = nil
         request.headerFields[.authorization] = try await access().map { "Bearer \($0)" }

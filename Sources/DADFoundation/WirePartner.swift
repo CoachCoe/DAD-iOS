@@ -332,9 +332,11 @@ public struct WirePartner: PartnerService {
         _ = try? await client.partnerSignOut(.init(body: .json(.init())))
     }
 
-    public func registerPushDevice(token: String) async throws {
+    public func registerPushDevice(token: String, environment: PushEnvironment) async throws {
         try await perform { client in
-            switch try await client.partnerRegisterPushDevice(.init(body: .json(.init(platform: .IOS, token: token)))) {
+            let body = Operations.partnerRegisterPushDevice.Input.Body.jsonPayload(
+                platform: .IOS, token: token, environment: environment == .sandbox ? .SANDBOX : .PRODUCTION)
+            switch try await client.partnerRegisterPushDevice(.init(body: .json(body))) {
             case .ok: return
             case .unauthorized: throw AccountError.signedOut
             case .unprocessableContent: throw AccountError.invalidInput
