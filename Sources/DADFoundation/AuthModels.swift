@@ -6,6 +6,7 @@ import Foundation
 public enum SignInMethod: String, Sendable, Equatable, CaseIterable, Identifiable {
     case passkey
     case phone
+    case emailLink
     case apple
     case google
     case password
@@ -15,6 +16,7 @@ public enum SignInMethod: String, Sendable, Equatable, CaseIterable, Identifiabl
         switch self {
         case .passkey: "Sign in with a passkey"
         case .phone: "Sign in with your phone"
+        case .emailLink: "Email me a sign-in link"
         case .apple: "Sign in with Apple"
         case .google: "Sign in with Google"
         case .password: "Sign in with email & password"

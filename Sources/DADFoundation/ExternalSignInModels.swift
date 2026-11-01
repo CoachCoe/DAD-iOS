@@ -45,7 +45,7 @@ public struct SignInCapabilities: Sendable, Equatable {
 
     public func isAvailable(_ method: SignInMethod) -> Bool {
         switch method {
-        case .phone, .password: true
+        case .phone, .emailLink, .password: true
         case .apple: apple
         case .google: google
         case .passkey: passkey

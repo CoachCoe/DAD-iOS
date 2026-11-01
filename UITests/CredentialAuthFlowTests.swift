@@ -1,6 +1,6 @@
 import XCTest
 
-/// Runs the REAL signup, password sign-in, set-password and session conformers against the DEBUG-only
+/// Runs the REAL signup, email-link and password sign-in, set-password and session conformers against the DEBUG-only
 /// scripted transport (`--stub-backend`). Script: password `correct horse battery` signs in; anything
 /// else is the server's 401; the signup link is claimed with a token starting `stubclaim`.
 @MainActor final class CredentialAuthFlowTests: XCTestCase {
@@ -61,6 +61,20 @@ import XCTest
         XCTAssertTrue(app.staticTexts["Welcome, Alex"].waitForExistence(timeout: 10))
     }
 
+    func testEmailLinkSignInThenClaimingTheLinkLandsInDonorShell() {
+        let app = launch()
+        app.buttons["Email me a sign-in link"].tap()
+        XCTAssertTrue(app.otherElements["email-link-sign-in"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["email-link-submit"].isEnabled, "an empty address must not submit")
+        type("alex@example.org", into: app.textFields["Email"], in: app)
+        app.buttons["email-link-submit"].tap()
+
+        XCTAssertTrue(app.staticTexts["signup-sent"].waitForExistence(timeout: 10), "the app must say a link was emailed")
+        type(stubClaimLink, into: app.textFields["Paste your sign-in link"], in: app)
+        app.buttons["signup-continue"].tap()
+        XCTAssertTrue(app.buttons["open-settings"].waitForExistence(timeout: 15), "claiming the link must land in the donor shell")
+    }
+
     func testPasswordSignInSuccessLandsInDonorShell() {
         let app = launch()
         signInWithPassword(app, password: "correct horse battery")
@@ -110,6 +124,7 @@ import XCTest
         }
         XCTAssertTrue(app.buttons["Sign in with your phone"].isEnabled)
         XCTAssertTrue(app.buttons["Sign in with email & password"].isEnabled)
+        XCTAssertTrue(app.buttons["Email me a sign-in link"].isEnabled)
         XCTAssertTrue(app.staticTexts["methods-unavailable-note"].exists, "the reason must be visible text, not only a hint")
     }
 }

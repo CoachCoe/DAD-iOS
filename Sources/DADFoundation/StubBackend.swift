@@ -64,6 +64,8 @@ public enum StubBackend {
         public let giving: any GivingService
         public let events: any EventsService
         public let engagement: any EngagementService
+        public let management: any AccountManagementService
+        public let wallet: any WalletPassService
         /// Plays the Stripe webhook after the stubbed hosted page "finishes" (a gift starts, a card is applied).
         public let completeHandoff: @Sendable (HostedHandoff.Purpose) -> Void
     }
@@ -87,6 +89,8 @@ public enum StubBackend {
             giving: WireGiving(product: product),
             events: WireEvents(product: product),
             engagement: WireEngagement(product: product),
+            management: WireAccountManagement(product: product),
+            wallet: WireWalletPass(product: product),
             completeHandoff: { transport.completeHandoff($0) })
     }
 }
@@ -138,6 +142,13 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private let engagementScenario: StubBackend.EngagementScenario
     private var publicName: String?
     private static let initiativeID = "11111111-1111-4111-8111-111111111111"
+
+    // Account management: contact details, other sessions, and the employer link. Company code
+    // `ACME42` links "Acme"; any other code is unrecognized.
+    private var contact = (zip: "78701", city: "Austin", phone: Optional<String>.none)
+    private var otherSessions = [#"{"id":"22222222-2222-4222-8222-222222222222","client":"BROWSER","platform":null,"label":"Web browser","created_at":"2026-10-02T10:00:00Z","last_used_at":"2026-10-29T10:00:00Z","current":false}"#]
+    private var employer: String?
+    private var team: String?
 
     init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario, events: StubBackend.EventsScenario,
          engagement: StubBackend.EngagementScenario) {
@@ -358,6 +369,67 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         }
     }
 
+    private func management(_ request: HTTPRequest, _ payload: String, authorized: Bool,
+                            _ reply: (HTTPResponse.Status, String) -> (HTTPResponse, HTTPBody?)) -> (HTTPResponse, HTTPBody?)? {
+        guard let path = request.path, request.method == .post || request.method == .get else { return nil }
+        let routes = ["/donor/me/sessions", "/donor/logout-all", "/donor/me/email-change", "/donor/me/employer", "/donor/me/team",
+                      "/donor/me/wallet"]
+        let saveProfile = request.method == .post && path == "/donor/me/profile"
+        guard saveProfile || routes.contains(where: { path.hasPrefix($0) }) else { return nil }
+        guard authorized else { return reply(.unauthorized, "{}") }
+        let fields = Self.object(payload)
+        func sessions() -> String {
+            let current = #"{"id":"11111111-1111-4111-8111-111111111111","client":"APP","platform":"IOS","label":"iPhone","created_at":"2026-10-01T10:00:00Z","last_used_at":"2026-10-30T10:00:00Z","current":true}"#
+            return #"{"sessions":[\#(([current] + lock.withLock { otherSessions }).joined(separator: ","))]}"#
+        }
+        switch (request.method, path) {
+        case (.post, "/donor/me/profile"):
+            let zip = fields["zip"] as? String ?? "", city = fields["city"] as? String ?? "", phone = fields["phone"] as? String ?? ""
+            guard zip.isEmpty || zip.range(of: "^[0-9]{5}(-[0-9]{4})?$", options: .regularExpression) != nil else { return reply(.unprocessableContent, "{}") }
+            lock.withLock { contact = (zip, city, phone.isEmpty ? nil : phone) }
+            return reply(.ok, profile())
+        case (.post, "/donor/me/email-change"):
+            let email = fields["email"] as? String ?? ""
+            if email.hasPrefix("taken") { return reply(.conflict, "{}") }
+            return email.contains("@") ? reply(.ok, #"{"stage":"CURRENT"}"#) : reply(.unprocessableContent, "{}")
+        case (.get, "/donor/me/wallet"): return reply(.ok, #"{"apple":true,"google":false}"#)
+        // Not a signed pass, so Wallet refuses it and the screen must say so.
+        case (.post, "/donor/me/wallet/apple"):
+            return (HTTPResponse(status: .ok, headerFields: [.contentType: "application/vnd.apple.pkpass"]), HTTPBody("unsigned"))
+        case (.get, "/donor/me/sessions"): return reply(.ok, sessions())
+        case (.post, "/donor/me/sessions/revoke-others"):
+            lock.withLock { otherSessions = [] }
+            return reply(.ok, sessions())
+        case (.post, _) where path.hasPrefix("/donor/me/sessions/") && path.hasSuffix("/revoke"):
+            let id = path.dropFirst("/donor/me/sessions/".count).dropLast("/revoke".count)
+            let removed = lock.withLock { () -> Bool in
+                let before = otherSessions.count
+                otherSessions.removeAll { $0.contains(#""id":"\#(id)""#) }
+                return otherSessions.count < before
+            }
+            return removed ? reply(.ok, sessions()) : reply(.notFound, "{}")
+        case (.post, "/donor/logout-all"):
+            lock.withLock { otherSessions = [] }
+            return reply(.ok, #"{"signed_out":true}"#)
+        case (.get, "/donor/me/team"):
+            let (org, name) = lock.withLock { (employer, team) }
+            guard let org else { return reply(.ok, #"{"partner_id":"","organization":"","leaderboard":[]}"#) }
+            let mine = name.map { #","team_id":"33333333-3333-4333-8333-333333333333","team_name":"\#($0)""# } ?? ""
+            return reply(.ok, #"{"partner_id":"44444444-4444-4444-8444-444444444444","organization":"\#(org)"\#(mine),"leaderboard":[{"team_id":"55555555-5555-4555-8555-555555555555","name":"Design","active_givers":7,"annualized_minor":420000,"avg_streak_days":21,"volunteer_minutes":180}]}"#)
+        case (.post, "/donor/me/employer"):
+            guard fields["company_code"] as? String == "ACME42" else { return reply(.unprocessableContent, "{}") }
+            lock.withLock { employer = "Acme" }
+            return reply(.ok, #"{"organization":"Acme"}"#)
+        case (.post, "/donor/me/team"):
+            guard let name = fields["name"] as? String, !name.isEmpty, name.count <= 80, lock.withLock({ employer }) != nil else {
+                return reply(.unprocessableContent, "{}")
+            }
+            lock.withLock { team = name }
+            return reply(.ok, #"{"team_id":"33333333-3333-4333-8333-333333333333"}"#)
+        default: return reply(.notFound, "{}")
+        }
+    }
+
     private func session() -> String {
         lock.withLock { generation += 1; return """
         {"access_token":"stub-access-\(generation)","expires_in":900,"refresh_token":"stub-refresh-\(generation)-xxxxxxxxxxxxxxxxxxxxxxxxxxxx","refresh_expires_in":5184000}
@@ -367,7 +439,8 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private func profile() -> String {
         lock.withLock {
             let flags = prefs.map { "\"\($0.key)\":\($0.value)" }.sorted().joined(separator: ",")
-            return "{\"email\":\"alex@example.org\",\"public_name\":\"Alex\",\"account_role\":\"DONOR\",\"zip\":\"78701\",\"city\":\"Austin\",\"timezone\":null,\"phone\":null,\(flags),\"volunteer_interests\":[],\"version\":\(version),\"consent_version\":\"stub-v1\"}"
+            let phone = contact.phone.map { "\"\($0)\"" } ?? "null"
+            return "{\"email\":\"alex@example.org\",\"public_name\":\"Alex\",\"account_role\":\"DONOR\",\"zip\":\"\(contact.zip)\",\"city\":\"\(contact.city)\",\"timezone\":null,\"phone\":\(phone),\(flags),\"volunteer_interests\":[],\"version\":\(version),\"consent_version\":\"stub-v1\"}"
         }
     }
 
@@ -457,6 +530,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         if let response = giving(request, payload, authorized: authorized, reply) { return response }
         if let response = events(request, payload, authorized: authorized, reply) { return response }
         if let response = engagement(request, payload, authorized: authorized, reply) { return response }
+        if let response = management(request, payload, authorized: authorized && !isDeleted, reply) { return response }
         switch (request.method, request.path ?? "") {
         case (.post, "/donor/phone/sign-in/options"): return reply(.ok, #"{"sent":true}"#)
         case (.post, "/donor/phone/sign-in"):
@@ -469,6 +543,10 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
                 return reply(.unprocessableContent)
             }
             return email.hasPrefix("throttled") ? reply(.tooManyRequests) : reply(.ok, #"{"sent":true}"#)
+        case (.post, "/donor/login"):
+            let fields = Self.object(payload)
+            guard let email = fields["email"] as? String, email.contains("@"), fields.count == 1 else { return reply(.unprocessableContent) }
+            return email.hasPrefix("throttled") ? reply(.tooManyRequests) : reply(.accepted, #"{"message":"stub"}"#)
         case (.post, "/donor/claim"):
             let token = Self.object(payload)["token"] as? String ?? ""
             return token.hasPrefix("stubclaim") ? reply(.ok, session()) : reply(.unauthorized)

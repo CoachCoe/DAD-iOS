@@ -59,6 +59,8 @@ private final class AccountModel {
     private var settingsService: (any AccountSettingsService)?
     /// Set/change password in Settings; nil in previews, where there is no real account to change.
     private(set) var passwordSettings: (any PasswordSettingsService)?
+    /// Contact details, account email, sessions and employer in Settings; nil in previews.
+    private(set) var management: (any AccountManagementService)?
     /// Donor-home reads (dashboard, today's initiative, gift history): real `WireDashboard` or the
     /// scripted stub; nil in the synthetic DEBUG preview, which has no account to read.
     private(set) var dashboardService: (any DashboardService)?
@@ -67,6 +69,8 @@ private final class AccountModel {
     /// Events (list, reserve, cancel, check-in, calendar): real `WireEvents` or the scripted stub; nil in previews.
     private(set) var eventsService: (any EventsService)?
     private(set) var engagementService: (any EngagementService)?
+    /// The referral code as an Apple Wallet pass; nil in previews.
+    private(set) var walletService: (any WalletPassService)?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -122,13 +126,16 @@ private final class AccountModel {
                                                     signedIn: launchFlag("--stub-signed-in"),
                                                     onLocalWipe: { DefaultsAttributionStore().clear() })
                 session = services.session
-                kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, password: services.credentialAuth,
+                kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, link: services.credentialAuth,
+                                password: services.credentialAuth,
                                 oidc: nil, passkey: nil, capabilities: .none)
                 settingsService = services.settings
                 passwordSettings = services.passwords
+                management = services.management
                 dashboardService = services.dashboard
                 eventsService = services.events
                 engagementService = services.engagement
+                walletService = services.wallet
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 state = .loading
             } catch { session = nil; state = .unavailable }
@@ -173,16 +180,18 @@ private final class AccountModel {
                     appleFlag: Bundle.main.object(forInfoDictionaryKey: "DADAppleSignInEnabled") as? String,
                     googleClientID: Bundle.main.object(forInfoDictionaryKey: "DADGoogleClientID") as? String,
                     passkeyRelyingParty: Bundle.main.object(forInfoDictionaryKey: "DADPasskeyRelyingParty") as? String))
-                kit = SignInKit(phone: auth, signup: credentialAuth, password: credentialAuth,
+                kit = SignInKit(phone: auth, signup: credentialAuth, link: credentialAuth, password: credentialAuth,
                                 oidc: capabilities.apple || capabilities.google ? credentialAuth : nil,
                                 passkey: capabilities.passkey ? credentialAuth : nil, capabilities: capabilities,
                                 passkeyRelyingParty: (Bundle.main.object(forInfoDictionaryKey: "DADPasskeyRelyingParty") as? String) ?? "")
                 settingsService = settings
                 passwordSettings = try WirePasswordSettings(origin: origin, session: built)
+                management = try WireAccountManagement(origin: origin, session: built)
                 dashboardService = try WireDashboard(origin: origin, session: built)
                 givingKit = GivingKit(service: try WireGiving(origin: origin, session: built))
                 eventsService = try WireEvents(origin: origin, session: built)
                 engagementService = try WireEngagement(origin: origin, session: built)
+                walletService = try WireWalletPass(origin: origin, session: built)
                 session = built
             }
         } catch {
@@ -272,6 +281,7 @@ private struct DonorLanding: View {
     var giving: GivingKit?
     var events: (any EventsService)?
     var engagement: (any EngagementService)?
+    var wallet: (any WalletPassService)?
     var onSignedOut: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -302,7 +312,8 @@ private struct DonorLanding: View {
                 Button("Settings", action: onSettings)
                     .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
             }
-            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, engagement: engagement, onSignedOut: onSignedOut) }
+            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, engagement: engagement, wallet: wallet,
+                                                                           onSignedOut: onSignedOut) }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
@@ -345,8 +356,9 @@ private struct RoleSelect: View {
 /// Preview sign-in transport — returns a handle and preview credentials so the auth journey
 /// runs in the simulator with no backend. The wire implementation replaces this once the
 /// phone/OIDC endpoints are consumed; the screens bind to the protocol, not this type.
-private actor PreviewSignIn: SignInService, SignupService, PasswordSignInService {
+private actor PreviewSignIn: SignInService, SignupService, SignInLinkService, PasswordSignInService {
     func requestSignup(_ form: SignupForm) async throws { try await Task.sleep(for: .milliseconds(150)) }
+    func requestSignInLink(email: String) async throws { try await Task.sleep(for: .milliseconds(150)) }
     func signIn(email: String, password: String) async throws -> Credentials {
         try await Task.sleep(for: .milliseconds(150))
         return Credentials(access: "preview", refresh: "preview-refresh", expiresAt: .distantFuture)
@@ -734,6 +746,7 @@ private struct AccountSettingsScreen: View {
     @State var model: AccountSettingsModel
     /// Set/change password; nil where there is no real account to change (previews).
     var passwords: (any PasswordSettingsService)?
+    var management: (any AccountManagementService)?
     /// The real cancel-gift flow, offered when the server refuses deletion because a gift is still renewing.
     var giving: GivingKit?
     var onSignedOut: (() -> Void)?
@@ -778,7 +791,12 @@ private struct AccountSettingsScreen: View {
 
     @ViewBuilder private func settingsBody(_ snapshot: AccountSettingsSnapshot) -> some View {
         Text(snapshot.profile.email).font(.headline).accessibilityIdentifier("settings-email")
-        Text("ZIP: \(snapshot.profile.zipLabel)").font(.footnote)
+        if let management {
+            EmailChangeSection(current: snapshot.profile.email, service: management)
+            ProfileDetailsSection(profile: snapshot.profile, service: management)
+        } else {
+            Text("ZIP: \(snapshot.profile.zipLabel)").font(.footnote)
+        }
 
         // Notification toggles (§6.11) — payment-failure email is absent by design.
         ForEach(snapshot.preferences.pushToggles, id: \.key) { toggle in
@@ -792,9 +810,27 @@ private struct AccountSettingsScreen: View {
             get: { snapshot.preferences.showRanking },
             set: { newValue in Task { await model.toggle("rankings_opted_out", !newValue) } }
         )).disabled(model.isBusy).accessibilityIdentifier("ranking-toggle")
+        Toggle("Show me in my network", isOn: Binding(
+            get: { snapshot.preferences.networkVisible },
+            set: { newValue in Task { await model.toggle("network_visible", newValue) } }
+        )).disabled(model.isBusy).accessibilityIdentifier("pref-network_visible")
+        Toggle("I’d like to volunteer", isOn: Binding(
+            get: { snapshot.preferences.volunteer },
+            set: { newValue in Task { await model.toggle("volunteer", newValue) } }
+        )).disabled(model.isBusy).accessibilityIdentifier("pref-volunteer")
+        ForEach(snapshot.preferences.emailToggles, id: \.key) { toggle in
+            Toggle(toggle.label, isOn: Binding(
+                get: { toggle.value },
+                set: { newValue in Task { await model.toggle(toggle.key, newValue) } }
+            )).disabled(model.isBusy).accessibilityIdentifier("pref-\(toggle.key)")
+        }
 
         if let passwords {
             PasswordSection(service: passwords, onSignedOut: { onSignedOut?() })
+        }
+        if let management {
+            EmployerSection(service: management)
+            SessionsSection(service: management, onSignedOut: { onSignedOut?() })
         }
 
         Button("Sign out") { Task { await model.signOut() } }
@@ -964,13 +1000,13 @@ private struct SignupView: View {
     let notice: String?
     let onBack: () -> Void
     let onPasteLink: (String) -> Bool
-    @State private var pasted = ""
-    @State private var pasteFailed = false
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Create your account").font(.title.bold()).accessibilityAddTraits(.isHeader)
             if case .sent(let email) = model.phase {
-                sentBody(email)
+                CheckEmailView(
+                    message: "We sent a sign-in link to \(email). Open it on this device to finish creating your account. The link works once and expires in 15 minutes.",
+                    notice: notice, onPasteLink: onPasteLink, onEdit: { model.edit() })
             } else {
                 formBody
             }
@@ -1000,10 +1036,20 @@ private struct SignupView: View {
             .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit)
         if model.phase == .submitting { ProgressView() }
     }
+}
 
-    @ViewBuilder private func sentBody(_ email: String) -> some View {
+/// "Check your email" after a link was requested (signup or sign-in): the emailed link opens the app,
+/// and a link opened on another device can be pasted here instead.
+private struct CheckEmailView: View {
+    let message: String
+    let notice: String?
+    let onPasteLink: (String) -> Bool
+    let onEdit: () -> Void
+    @State private var pasted = ""
+    @State private var pasteFailed = false
+    var body: some View {
         Text("Check your email").font(.headline).accessibilityIdentifier("signup-sent")
-        Text("We sent a sign-in link to \(email). Open it on this device to finish creating your account. The link works once and expires in 15 minutes.")
+        Text(message)
         if let notice {
             Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("signup-link-error")
         }
@@ -1017,7 +1063,39 @@ private struct SignupView: View {
         }
         Button("Continue") { pasteFailed = !onPasteLink(pasted) }
             .buttonStyle(DADButtonStyle(.primary)).disabled(pasted.isEmpty).accessibilityIdentifier("signup-continue")
-        Button("Use a different email") { model.edit() }.buttonStyle(DADButtonStyle(.secondary))
+        Button("Use a different email", action: onEdit).buttonStyle(DADButtonStyle(.secondary))
+    }
+}
+
+/// An existing donor asks for a single-use sign-in link by email (`login`). The server never says
+/// whether the address has an account, so the same "check your email" step follows either way.
+private struct EmailLinkSignIn: View {
+    @State var model: SignInLinkModel
+    let notice: String?
+    let onBack: () -> Void
+    let onPasteLink: (String) -> Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Sign in with an email link").font(.title.bold()).accessibilityAddTraits(.isHeader)
+            if case .sent(let email) = model.phase {
+                CheckEmailView(
+                    message: "If \(email) belongs to a DAD account, we sent it a sign-in link. Open it on this device to sign in. The link works once and expires in 15 minutes.",
+                    notice: notice, onPasteLink: onPasteLink, onEdit: { model.edit() })
+            } else {
+                TextField("Email", text: $model.email)
+                    .textFieldStyle(.roundedBorder).textContentType(.emailAddress).keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
+                if case .failed(let message) = model.phase {
+                    Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("email-link-error")
+                }
+                Button("Email me a link") { Task { await model.submit() } }
+                    .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit).accessibilityIdentifier("email-link-submit")
+                if model.phase == .submitting { ProgressView() }
+            }
+            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain).accessibilityIdentifier("email-link-sign-in")
     }
 }
 
@@ -1083,10 +1161,11 @@ private struct ExternalSignInView: View {
 }
 
 /// Used when no API origin is configured (Release): sign-in fails clearly instead of inheriting a preview double.
-private struct UnconfiguredSignIn: SignInService, SignupService, PasswordSignInService {
+private struct UnconfiguredSignIn: SignInService, SignupService, SignInLinkService, PasswordSignInService {
     func requestPhoneCode(phone: String) async throws -> String { throw AccountError.invalidConfiguration }
     func verifyPhone(handle: String, code: String) async throws -> Credentials { throw AccountError.invalidConfiguration }
     func requestSignup(_ form: SignupForm) async throws { throw AccountError.invalidConfiguration }
+    func requestSignInLink(email: String) async throws { throw AccountError.invalidConfiguration }
     func signIn(email: String, password: String) async throws -> Credentials { throw AccountError.invalidConfiguration }
 }
 
@@ -1094,16 +1173,18 @@ private struct UnconfiguredSignIn: SignInService, SignupService, PasswordSignInS
 private struct SignInKit {
     let phone: any SignInService
     let signup: any SignupService
+    let link: any SignInLinkService
     let password: any PasswordSignInService
     let oidc: (any OIDCSignInService)?
     let passkey: (any PasskeySignInService)?
     let capabilities: SignInCapabilities
     var passkeyRelyingParty = ""
 
-    static let unconfigured = SignInKit(phone: UnconfiguredSignIn(), signup: UnconfiguredSignIn(), password: UnconfiguredSignIn(),
+    static let unconfigured = SignInKit(phone: UnconfiguredSignIn(), signup: UnconfiguredSignIn(), link: UnconfiguredSignIn(),
+                                        password: UnconfiguredSignIn(),
                                         oidc: nil, passkey: nil, capabilities: .none)
     #if DEBUG
-    static let preview = SignInKit(phone: PreviewSignIn(), signup: PreviewSignIn(), password: PreviewSignIn(),
+    static let preview = SignInKit(phone: PreviewSignIn(), signup: PreviewSignIn(), link: PreviewSignIn(), password: PreviewSignIn(),
                                    oidc: nil, passkey: nil, capabilities: .none)
     #endif
 }
@@ -1133,7 +1214,7 @@ private struct UnauthenticatedStack: View {
     let onSignedIn: () -> Void
     @State private var step: Step = .roleSelect
     @State private var external: ExternalRun?
-    private enum Step: Equatable { case roleSelect, methods, phone, password, signup, external, partner }
+    private enum Step: Equatable { case roleSelect, methods, phone, emailLink, password, signup, external, partner }
 
     var body: some View {
         switch step {
@@ -1146,6 +1227,8 @@ private struct UnauthenticatedStack: View {
         case .password:
             PasswordSignIn(model: PasswordSignInModel(service: kit.password, establish: establish),
                            onBack: { step = .methods }, onSignedIn: onSignedIn)
+        case .emailLink:
+            EmailLinkSignIn(model: SignInLinkModel(service: kit.link), notice: notice, onBack: { step = .methods }, onPasteLink: onPasteLink)
         case .signup:
             SignupView(model: SignupModel(service: kit.signup), notice: notice, onBack: { step = .methods }, onPasteLink: onPasteLink)
         case .external:
@@ -1160,6 +1243,7 @@ private struct UnauthenticatedStack: View {
     private func select(_ method: SignInMethod) {
         switch method {
         case .phone: step = .phone
+        case .emailLink: step = .emailLink
         case .password: step = .password
         case .apple, .google:
             guard let oidc = kit.oidc else { return }
@@ -1183,6 +1267,7 @@ private struct UnauthenticatedStack: View {
 private struct SettingsSheet: View {
     let service: any AccountSettingsService
     let passwords: (any PasswordSettingsService)?
+    var management: (any AccountManagementService)?
     var giving: GivingKit?
     let onClose: () -> Void
     let onSignedOut: () -> Void
@@ -1191,7 +1276,8 @@ private struct SettingsSheet: View {
             VStack(alignment: .leading, spacing: 0) {
                 Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
                     .accessibilityIdentifier("settings-close")
-                AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, giving: giving, onSignedOut: onSignedOut)
+                AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, management: management,
+                                      giving: giving, onSignedOut: onSignedOut)
             }
         }.modifier(AppBackground()).tint(tokenColor("brand-ink"))
     }
@@ -1227,7 +1313,7 @@ struct DADApp: App {
         DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
                      onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
                      dashboard: model.dashboardService, giving: model.givingKit, events: model.eventsService,
-                     engagement: model.engagementService, onSignedOut: { Task { await model.load() } })
+                     engagement: model.engagementService, wallet: model.walletService, onSignedOut: { Task { await model.load() } })
     }
 
     @ViewBuilder private var partnerRoot: some View {
@@ -1324,7 +1410,7 @@ struct DADApp: App {
             }
             .sheet(isPresented: $showSettings) {
                 if let service = model.makeSettings() {
-                    SettingsSheet(service: service, passwords: model.passwordSettings, giving: model.givingKit, onClose: { showSettings = false },
+                    SettingsSheet(service: service, passwords: model.passwordSettings, management: model.management, giving: model.givingKit, onClose: { showSettings = false },
                                   onSignedOut: { showSettings = false; Task { await model.load() } })
                 }
             }

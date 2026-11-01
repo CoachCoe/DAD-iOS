@@ -21,6 +21,7 @@ struct DonorHomeView: View {
     private let giving: GivingKit?
     private let events: (any EventsService)?
     private let engagement: (any EngagementService)?
+    private let wallet: (any WalletPassService)?
     @State private var showEngagement: Bool = {
         #if DEBUG
         ProcessInfo.processInfo.arguments.contains("--stub-open-engagement")   // screenshot/UITest aid, DEBUG only
@@ -47,11 +48,12 @@ struct DonorHomeView: View {
     @State private var giftModel: GivingModel?
 
     init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil,
-         engagement: (any EngagementService)? = nil, onSignedOut: @escaping () -> Void) {
+         engagement: (any EngagementService)? = nil, wallet: (any WalletPassService)? = nil, onSignedOut: @escaping () -> Void) {
         self.service = service
         self.giving = giving
         self.events = events
         self.engagement = engagement
+        self.wallet = wallet
         self.onSignedOut = onSignedOut
         _model = State(initialValue: DashboardModel(service: service))
         _giftModel = State(initialValue: giving?.makeModel())
@@ -121,7 +123,8 @@ struct DonorHomeView: View {
         }
         .sheet(isPresented: $showEngagement) {
             if let engagement {
-                EngagementHome(model: EngagementModel(service: engagement), onClose: { showEngagement = false },
+                EngagementHome(model: EngagementModel(service: engagement), wallet: wallet.map { WalletPassModel(service: $0) },
+                               onClose: { showEngagement = false },
                                onSignedOut: { showEngagement = false; onSignedOut() })
             }
         }

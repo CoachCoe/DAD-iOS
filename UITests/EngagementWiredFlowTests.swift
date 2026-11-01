@@ -3,7 +3,7 @@ import XCTest
 /// Runs the REAL `WireEngagement`, `WireDashboard`, `AccountSession` and `WireAPI` against the DEBUG-only
 /// scripted transport (`--stub-backend`): badges earned and locked with a perk, the rank label, the rankings
 /// choice (saved, and a refused save reverting), the network list, the invite link, copy/share/QR, choosing a
-/// public name, a partly unavailable screen and the initiative spend drill-in.
+/// public name, the Wallet pass failure path, a partly unavailable screen and the initiative spend drill-in.
 @MainActor final class EngagementWiredFlowTests: XCTestCase {
     private func launch(_ extra: String...) -> XCUIApplication {
         let app = XCUIApplication()
@@ -112,6 +112,16 @@ import XCTest
         XCTAssertTrue(app.images["qr-code"].waitForExistence(timeout: 10))
         app.buttons["qr-close"].tap()
         XCTAssertTrue(app.otherElements["engagement-home"].waitForExistence(timeout: 5))
+    }
+
+    func testAPassWalletCannotReadSaysTheCodeStillWorks() {
+        let app = launch()
+        openEngagement(app)
+        let add = app.buttons["wallet-add"]
+        XCTAssertTrue(add.waitForExistence(timeout: 10), "the deployment issues Apple Wallet passes")
+        add.tap()
+        XCTAssertTrue(app.staticTexts["wallet-error"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["wallet-error"].label.contains("on-screen code still works"))
     }
 
     func testChoosingAPublicNameCreatesTheInviteLink() {
