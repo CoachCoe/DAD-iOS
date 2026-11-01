@@ -37,6 +37,12 @@ public final class AccountSettingsModel {
     /// True once deleted or signed out — the UI leaves the settings shell.
     public private(set) var signedOut = false
     public private(set) var actionError: String?
+    /// The server refused deletion (409) because a monthly gift is still set to renew or a checkout is
+    /// open. The screen then offers the real cancel-gift flow instead of a dead end; a retry after the
+    /// gift is cancelled clears it.
+    public private(set) var deletionBlocked = false
+    /// A save or delete is in flight; the UI disables its controls so requests cannot overlap.
+    public private(set) var isBusy = false
 
     private let service: any AccountSettingsService
 
@@ -48,18 +54,22 @@ public final class AccountSettingsModel {
             snapshot = try await service.load()
             phase = .ready
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
     }
 
     /// Flip one preference toggle and persist; the snapshot is replaced in place on success.
+    /// Saves are serialized: each one carries the optimistic `version` it read, so a second save
+    /// started before the first returns would be rejected as stale.
     public func toggle(_ key: String, _ value: Bool) async {
-        guard let current = snapshot else { return }
+        guard let current = snapshot, !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
         actionError = nil
         do {
             snapshot = try await service.savePreferences(current.preferences.with(key, value))
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
     }
 
@@ -69,27 +79,34 @@ public final class AccountSettingsModel {
             actionError = "Type \(DeleteAccountGate.confirmWord) to confirm."
             return
         }
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
         actionError = nil
+        deletionBlocked = false
         do {
             try await service.deleteAccount()
-            try await service.signOut()
-            signedOut = true
         } catch {
-            actionError = Self.message(error)
+            if case AccountError.deletionBlocked = error { deletionBlocked = true }
+            actionError = error.userMessage
+            return
         }
+        // The account is gone server-side, so the donor must leave the shell even if the remote
+        // logout then fails (the deleted account's token is typically already rejected): the
+        // service clears local credentials before it contacts the server.
+        try? await service.signOut()
+        signedOut = true
     }
 
     public func signOut() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
         do {
             try await service.signOut()
             signedOut = true
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
-    }
-
-    static func message(_ error: Error) -> String {
-        if let account = error as? AccountError, account == .signedOut { return "Please sign in again." }
-        return "Something went wrong. Please try again."
     }
 }

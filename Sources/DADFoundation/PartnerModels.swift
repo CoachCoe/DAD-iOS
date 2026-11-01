@@ -46,36 +46,79 @@ public final class PartnerModel {
     public private(set) var users: [PartnerUser] = []
     /// A transient action error (invite/remove) shown inline without losing the portal.
     public private(set) var actionError: String?
+    /// True when the overview loaded but at least one secondary section failed to load.
+    public private(set) var sectionsUnavailable = false
+
+    /// The user awaiting an inline remove confirmation, if any.
+    public private(set) var pendingRemoval: PartnerUser?
 
     private let service: any PartnerService
+    /// The signed-in partner user's id (from the overview, contract 2.3.0), so an admin can never
+    /// remove themselves. Nil until the overview loads.
+    public var currentUserID: String? { overview?.userID }
 
-    public init(service: any PartnerService) { self.service = service }
+    public init(service: any PartnerService) {
+        self.service = service
+    }
+
+    /// Plausible-address check for the invite field (same rule as Android): trimmed, at most 254
+    /// characters, no whitespace, exactly one `@`, a non-empty local part and a domain of at least
+    /// two non-empty dot-separated labels. The server remains the authority on deliverability.
+    public static func isPlausibleEmail(_ raw: String) -> Bool { CredentialRules.isPlausibleEmail(raw) }
+
+    /// Why this user cannot be removed, or nil when removal is allowed: never yourself, and never
+    /// the last admin (the partner would be left with nobody able to manage users).
+    private func removalBlock(for id: String) -> String? {
+        if id == currentUserID { return "You can’t remove yourself." }
+        if let user = users.first(where: { $0.id == id }), user.role == .admin,
+           users.filter({ $0.role == .admin }).count <= 1 { return "You can’t remove the last admin." }
+        return nil
+    }
+
+    public func canRemove(_ user: PartnerUser) -> Bool { role.canManageUsers && removalBlock(for: user.id) == nil }
 
     /// The current role, defaulting to the least-privileged VIEWER until the overview loads, so
     /// capability gates never open early.
     public var role: PartnerRole { overview?.role ?? .viewer }
 
+    /// Runs one secondary section load. A lost session still fails the whole load; any other
+    /// failure degrades just that section and raises `sectionsUnavailable`, so a failed fetch is
+    /// never shown as a genuinely empty section.
+    private func optional<T: Sendable>(_ call: @Sendable () async throws -> T) async throws -> T? {
+        do { return try await call() }
+        catch AccountError.signedOut { throw AccountError.signedOut }
+        catch where error.isCancellation { throw CancellationError() }
+        catch {
+            sectionsUnavailable = true
+            return nil
+        }
+    }
+
     public func load() async {
+        let prior = phase
         phase = .loading
         do {
             // Overview first — it carries the role and is the gate for everything else. A
             // pending-approval account throws before any portal data is fetched (P-2).
             let overview = try await service.overview()
             self.overview = overview
-            async let initiatives = service.initiatives()
-            async let spend = service.spend()
-            async let people = service.people()
+            sectionsUnavailable = false
+            async let initiatives = optional { try await self.service.initiatives() }
+            async let spend = optional { try await self.service.spend() }
+            async let people = optional { try await self.service.people() }
             // Users are admin-managed but readable by both roles; load them with the rest.
-            async let users = service.users()
-            self.initiatives = (try? await initiatives) ?? []
-            self.spend = (try? await spend) ?? []
-            self.people = try? await people
-            self.users = (try? await users) ?? []
+            async let users = optional { try await self.service.users() }
+            self.initiatives = try await initiatives ?? []
+            self.spend = try await spend ?? []
+            self.people = try await people
+            self.users = try await users ?? []
             phase = .ready
         } catch is PartnerPendingApproval {
             phase = .pending
+        } catch where error.isCancellation {
+            phase = prior
         } catch {
-            phase = .failed(Self.message(error))
+            phase = .failed(error.userMessage)
         }
     }
 
@@ -83,23 +126,45 @@ public final class PartnerModel {
     /// is a no-op that surfaces the gate rather than hitting the network.
     public func inviteUser(email: String, role: PartnerRole) async {
         guard self.role.canManageUsers else { actionError = "Only an admin can invite users."; return }
+        guard Self.isPlausibleEmail(email) else { actionError = "Enter a valid email address."; return }
         actionError = nil
         do {
-            try await service.inviteUser(email: email, role: role)
+            try await service.inviteUser(email: email.trimmingCharacters(in: .whitespacesAndNewlines), role: role)
             users = (try? await service.users()) ?? users
+        } catch where error.isCancellation {
+            return
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
+    }
+
+    /// Step one of removal: stage the user for the inline confirmation. Nothing is sent yet.
+    public func requestRemoval(id: String) {
+        guard role.canManageUsers else { actionError = "Only an admin can remove users."; return }
+        if let block = removalBlock(for: id) { actionError = block; return }
+        actionError = nil
+        pendingRemoval = users.first { $0.id == id }
+    }
+
+    public func cancelRemoval() { pendingRemoval = nil }
+
+    public func confirmRemoval() async {
+        guard let user = pendingRemoval else { return }
+        pendingRemoval = nil
+        await removeUser(id: user.id)
     }
 
     public func removeUser(id: String) async {
         guard role.canManageUsers else { actionError = "Only an admin can remove users."; return }
+        if let block = removalBlock(for: id) { actionError = block; return }
         actionError = nil
         do {
             try await service.removeUser(id: id)
             users.removeAll { $0.id == id }
+        } catch where error.isCancellation {
+            return
         } catch {
-            actionError = Self.message(error)
+            actionError = error.userMessage
         }
     }
 
@@ -112,10 +177,5 @@ public final class PartnerModel {
     /// Clear the push registration on sign-out (§7.5).
     public func unregisterPush() async {
         try? await service.unregisterPushDevice()
-    }
-
-    static func message(_ error: Error) -> String {
-        if let account = error as? AccountError, account == .signedOut { return "Please sign in again." }
-        return "Something went wrong. Please try again."
     }
 }

@@ -14,7 +14,14 @@ final class AnalyticsRecordTests: XCTestCase {
         XCTAssertThrowsError(try AnalyticsRecord(.attributionCaptured)) { error in
             XCTAssertEqual(error as? AnalyticsRecord.ValidationError, .missingRequiredProperty("source"))
         }
-        XCTAssertNoThrow(try AnalyticsRecord(.attributionCaptured, properties: ["source": "link"]))
+        for source in ["link", "IRL", "company"] {
+            XCTAssertNoThrow(try AnalyticsRecord(.attributionCaptured, properties: ["source": source]))
+        }
+        for bad in ["share", "irl", "Link", "organic"] {
+            XCTAssertThrowsError(try AnalyticsRecord(.attributionCaptured, properties: ["source": bad])) { error in
+                XCTAssertEqual(error as? AnalyticsRecord.ValidationError, .invalidValue("source"))
+            }
+        }
         XCTAssertNoThrow(try AnalyticsRecord(.inviteShared, properties: ["channel": "sms"]))
         XCTAssertNoThrow(try AnalyticsRecord(.pushOpened, properties: ["type": "reminder"]))
     }
@@ -33,6 +40,12 @@ final class AnalyticsRecordTests: XCTestCase {
 final class AnalyticsBatchTests: XCTestCase {
     private func records(_ n: Int) -> [AnalyticsRecord] {
         (0..<n).map { _ in try! AnalyticsRecord(.appOpened) }
+    }
+
+    func testBatchRejectsEmptyAndOversizedInput() throws {
+        XCTAssertThrowsError(try AnalyticsBatch([])) { XCTAssertEqual($0 as? AnalyticsBatch.BatchError, .empty) }
+        XCTAssertThrowsError(try AnalyticsBatch(records(101))) { XCTAssertEqual($0 as? AnalyticsBatch.BatchError, .tooLarge) }
+        XCTAssertEqual(try AnalyticsBatch(records(100)).events.count, 100)
     }
 
     func testChunkRespectsThe100Cap() {

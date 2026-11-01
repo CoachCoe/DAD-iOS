@@ -69,7 +69,11 @@ public struct AnalyticsRecord: Sendable, Equatable, Identifiable {
     public enum ValidationError: Error, Equatable {
         case missingRequiredProperty(String)
         case unexpectedProperties
+        case invalidValue(String)
     }
+
+    /// The only `attribution_captured.source` values the ingest accepts (case-sensitive).
+    public static let attributionSources: Set<String> = ["link", "IRL", "company"]
 
     /// Build a validated record. Throws when a carrier event is missing its required key, or when
     /// a no-property event is given properties — mirroring what the server would reject.
@@ -80,6 +84,9 @@ public struct AnalyticsRecord: Sendable, Equatable, Identifiable {
         if let key = name.requiredPropertyKey {
             guard let value = properties[key], !value.isEmpty else {
                 throw ValidationError.missingRequiredProperty(key)
+            }
+            if name == .attributionCaptured, !Self.attributionSources.contains(value) {
+                throw ValidationError.invalidValue(key)
             }
         } else if !properties.isEmpty {
             throw ValidationError.unexpectedProperties
@@ -101,15 +108,25 @@ public struct AnalyticsBatch: Sendable, Equatable {
 
     public let events: [AnalyticsRecord]
 
-    public init(_ events: [AnalyticsRecord]) {
-        precondition(events.count >= 1 && events.count <= Self.maxEvents, "batch must hold 1...100 events")
+    public enum BatchError: Error, Equatable {
+        case empty
+        case tooLarge
+    }
+
+    public init(_ events: [AnalyticsRecord]) throws {
+        guard !events.isEmpty else { throw BatchError.empty }
+        guard events.count <= Self.maxEvents else { throw BatchError.tooLarge }
         self.events = events
+    }
+
+    private init(validated events: ArraySlice<AnalyticsRecord>) {
+        self.events = Array(events)
     }
 
     /// Split a buffer into wire-legal batches (1...100 each), preserving order.
     public static func chunk(_ records: [AnalyticsRecord]) -> [AnalyticsBatch] {
         stride(from: 0, to: records.count, by: maxEvents).map { start in
-            AnalyticsBatch(Array(records[start..<min(start + maxEvents, records.count)]))
+            AnalyticsBatch(validated: records[start..<min(start + maxEvents, records.count)])
         }
     }
 }

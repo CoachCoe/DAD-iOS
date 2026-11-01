@@ -4,7 +4,7 @@ import XCTest
 /// screen (a dedicated preview arg that doesn't disturb the other donor tests) and exercises
 /// impact, the badges summary, and the rankings opt-out toggle (which renders inline — no OS
 /// action sheet — so it is deterministic under XCUITest).
-final class EngagementFlowTests: XCTestCase {
+@MainActor final class EngagementFlowTests: XCTestCase {
     func testEngagementHomeRendersImpactAndBadges() {
         let app = XCUIApplication()
         app.launchArguments = ["--preview-engagement"]

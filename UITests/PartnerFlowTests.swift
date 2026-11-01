@@ -5,7 +5,7 @@ import XCTest
 /// cases: verified-or-hidden Overview figures (§7.3), admin-vs-viewer capability gating (§7.2),
 /// the <5 suppression path (EM-3 — exercised in unit tests; here the unsuppressed preview shows
 /// figures), and the pending-approval gate (P-2).
-final class PartnerFlowTests: XCTestCase {
+@MainActor final class PartnerFlowTests: XCTestCase {
     func testAdminPortalRendersVerifiedFiguresAndCanManage() {
         let app = XCUIApplication()
         app.launchArguments = ["--preview-partner"]
@@ -22,6 +22,35 @@ final class PartnerFlowTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["partner-verified-line"].exists)
         // Admin can manage users.
         XCTAssertTrue(app.buttons["partner-invite"].waitForExistence(timeout: 3))
+    }
+
+    func testInviteNeedsValidEmailAndRemoveNeedsConfirmation() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-partner"]
+        app.launch()
+
+        let invite = app.buttons["partner-invite"]
+        XCTAssertTrue(invite.waitForExistence(timeout: 5))
+        XCTAssertFalse(invite.isEnabled, "invite stays disabled until the email is plausible")
+        let field = app.textFields["partner-invite-email"]
+        field.tap()
+        field.typeText("not-an-email")
+        XCTAssertFalse(invite.isEnabled)
+        field.typeText("@acme.com")
+        field.clearAndType("new@acme.com")
+        XCTAssertTrue(invite.isEnabled)
+
+        XCTAssertFalse(app.buttons["partner-remove-u1"].exists, "an admin cannot remove themselves")
+        let remove = app.buttons["partner-remove-u2"]
+        XCTAssertTrue(remove.exists)
+        remove.tap()
+        XCTAssertTrue(app.otherElements["partner-remove-prompt"].waitForExistence(timeout: 3))
+        app.buttons["partner-remove-cancel"].tap()
+        XCTAssertFalse(app.buttons["partner-remove-confirm"].exists)
+        XCTAssertTrue(remove.exists, "cancelling keeps the user")
+        remove.tap()
+        app.buttons["partner-remove-confirm"].tap()
+        XCTAssertFalse(app.buttons["partner-remove-u2"].waitForExistence(timeout: 2), "confirmed removal drops the row")
     }
 
     func testViewerIsReadOnly() {
@@ -44,5 +73,13 @@ final class PartnerFlowTests: XCTestCase {
         // P-2: pending account shows the pending notice and nothing else — no overview figures.
         XCTAssertTrue(app.otherElements["partner-pending"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.staticTexts["partner-committed"].exists, "pending must not render portal data")
+    }
+}
+
+private extension XCUIElement {
+    func clearAndType(_ text: String) {
+        guard let current = value as? String, !current.isEmpty else { typeText(text); return }
+        typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
+        typeText(text)
     }
 }

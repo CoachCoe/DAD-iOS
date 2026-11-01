@@ -44,4 +44,43 @@ private struct TestTransport: ClientTransport {
             XCTFail("unbounded response accepted")
         } catch { XCTAssertFalse(error is CancellationError) }
     }
+
+    func testMiddlewareStripsAmbientCredentialsAndAttachesOnlyTheProvidedBearer() async throws {
+        var incoming = HTTPRequest(method: .get, scheme: "https", authority: "api.test", path: "/p")
+        incoming.headerFields[.cookie] = "session=ambient"
+        incoming.headerFields[.authorization] = "Bearer stale"
+        incoming.headerFields[HTTPField.Name("Origin")!] = "https://evil.test"
+        let seen = SeenRequest()
+        let next: @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?) = { request, _, _ in
+            seen.set(request)
+            return (HTTPResponse(status: .ok), nil)
+        }
+        let base = URL(string: "https://api.test")!
+        _ = try await NativeHeaders(access: { nil }).intercept(incoming, body: nil, baseURL: base, operationID: "t", next: next)
+        XCTAssertNil(seen.value?.headerFields[.authorization], "an unauthenticated call must not inherit a stale bearer")
+        XCTAssertNil(seen.value?.headerFields[.cookie])
+        XCTAssertNil(seen.value?.headerFields[HTTPField.Name("Origin")!])
+        _ = try await NativeHeaders(access: { "fresh" }).intercept(incoming, body: nil, baseURL: base, operationID: "t", next: next)
+        XCTAssertEqual(seen.value?.headerFields[.authorization], "Bearer fresh")
+    }
+    func testMiddlewareFailsTheCallWhenTheSessionCannotProvideAToken() async {
+        let request = HTTPRequest(method: .get, scheme: "https", authority: "api.test", path: "/p")
+        let sent = SeenRequest()
+        do {
+            _ = try await NativeHeaders(access: { throw AccountError.signedOut }).intercept(
+                request, body: nil, baseURL: URL(string: "https://api.test")!, operationID: "t") { request, _, _ in
+                sent.set(request)
+                return (HTTPResponse(status: .ok), nil)
+            }
+            XCTFail("request sent without credentials")
+        } catch { XCTAssertEqual(error as? AccountError, .signedOut) }
+        XCTAssertNil(sent.value, "nothing may reach the network when the bearer cannot be resolved")
+    }
+}
+
+private final class SeenRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: HTTPRequest?
+    func set(_ value: HTTPRequest) { lock.withLock { request = value } }
+    var value: HTTPRequest? { lock.withLock { request } }
 }

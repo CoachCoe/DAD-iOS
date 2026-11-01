@@ -4,7 +4,7 @@ import XCTest
 /// dedicated preview arg that doesn't disturb the other donor tests) and exercises the list,
 /// an invite-only marker, a reserve → inline confirmation, and the inline cancel confirmation
 /// (no OS action sheet — deterministic under XCUITest, per the lesson from Phase C PR #4).
-final class EventsFlowTests: XCTestCase {
+@MainActor final class EventsFlowTests: XCTestCase {
     func testEventsHomeRendersListAndInviteOnlyMarker() {
         let app = XCUIApplication()
         app.launchArguments = ["--preview-events"]

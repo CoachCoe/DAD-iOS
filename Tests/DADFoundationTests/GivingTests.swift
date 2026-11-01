@@ -75,6 +75,9 @@ final class GivingModelTests: XCTestCase {
             return state
         }
         func beginPayment() async throws -> PaymentPath { payment }
+        func amountOffer() async throws -> AmountOffer? { nil }
+        func paymentMethod() async throws -> PaymentMethodState { PaymentMethodState(kind: .none) }
+        func beginGift(amountMinor: Int) async throws -> PaymentPath { payment }
     }
 
     @MainActor
@@ -152,5 +155,21 @@ final class CancelCopyTests: XCTestCase {
         let copy = CancelCopy.confirmation(periodEnd: date, calendar: calendar)
         XCTAssertTrue(copy.contains("2027"))
         XCTAssertTrue(copy.lowercased().contains("streak ends"))
+    }
+}
+
+final class RecurringHeadingTests: XCTestCase {
+    private let date = Date(timeIntervalSince1970: 0)
+
+    func testHeadingBeforeLoadIgnoresState() {
+        XCTAssertEqual(RecurringState.none.heading(hasLoaded: false), "Your monthly gift")
+        XCTAssertEqual(RecurringState.ending(subscriptionID: "s", amountMinor: 500, periodEnd: date, stopsAt: date).heading(hasLoaded: false), "Your monthly gift")
+    }
+
+    func testHeadingPerLoadedState() {
+        XCTAssertEqual(RecurringState.none.heading(hasLoaded: true), "Start a monthly gift")
+        XCTAssertEqual(RecurringState.preparing.heading(hasLoaded: true), "Your gift is on its way")
+        XCTAssertEqual(RecurringState.active(subscriptionID: "s", amountMinor: 500, periodEnd: date).heading(hasLoaded: true), "Your monthly gift")
+        XCTAssertEqual(RecurringState.ending(subscriptionID: "s", amountMinor: 500, periodEnd: date, stopsAt: date).heading(hasLoaded: true), "Your gift is ending")
     }
 }

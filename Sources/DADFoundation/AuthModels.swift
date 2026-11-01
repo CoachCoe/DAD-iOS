@@ -53,12 +53,38 @@ public final class PhoneSignInModel {
     /// instead of requesting a fresh code. Cleared only when returning to the phone screen.
     private var activeHandle: String?
 
-    private let service: any SignInService
-    private let onEstablish: @Sendable (Credentials) async -> Void
+    /// True once a code has been sent and not abandoned, including after a wrong code: the
+    /// screen stays on code entry so the donor retries without requesting a fresh SMS.
+    public var isAwaitingCode: Bool {
+        switch phase {
+        case .enterCode, .verifying: true
+        case .failed: activeHandle != nil
+        default: false
+        }
+    }
 
+    /// Runs the credential-producing work inside the session (`AccountSession.establish`) so the
+    /// session owns the await and its epoch guard: a sign-in that resolves after a sign-out is
+    /// discarded instead of clobbering state. Returns the credentials that were installed.
+    public typealias Establish = @Sendable (@Sendable () async throws -> Credentials) async throws -> Credentials
+
+    private let service: any SignInService
+    private let establish: Establish
+
+    public init(service: any SignInService, establish: @escaping Establish) {
+        self.service = service
+        self.establish = establish
+    }
+
+    /// Back-compat shape: the model verifies first, then hands the finished credentials over.
+    /// Prefer `init(service:establish:)`, which keeps the network await inside the session.
     public init(service: any SignInService, onEstablish: @escaping @Sendable (Credentials) async -> Void) {
         self.service = service
-        self.onEstablish = onEstablish
+        self.establish = { produce in
+            let credentials = try await produce()
+            await onEstablish(credentials)
+            return credentials
+        }
     }
 
     /// E.164-ish: a leading + and 8–15 digits. Keeps obviously-bad input off the wire.
@@ -90,8 +116,8 @@ public final class PhoneSignInModel {
         if case .verifying = phase { return }
         phase = .verifying(handle: handle)
         do {
-            let credentials = try await service.verifyPhone(handle: handle, code: code)
-            await onEstablish(credentials)
+            let service = self.service
+            let credentials = try await establish { try await service.verifyPhone(handle: handle, code: code) }
             phase = .signedIn(credentials)
         } catch {
             // Keep the handle so the user can re-enter the code without re-requesting.
@@ -109,6 +135,8 @@ public final class PhoneSignInModel {
         switch error {
         case AccountError.signedOut: "That code didn’t match. Check it and try again."
         case AccountError.unavailable: "We couldn’t reach DAD. Please try again in a moment."
+        case AccountError.invalidInput: "That phone number doesn’t look right. Check it and try again."
+        case AccountError.rateLimited: "Too many attempts. Please wait a moment and try again."
         default: "Something went wrong. Please try again."
         }
     }

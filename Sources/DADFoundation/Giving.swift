@@ -86,6 +86,8 @@ public func formatUSDMinor(_ minor: Int) -> String {
 /// subscription, or one scheduled to stop at period end (the cancel path, G-8/G-9).
 public enum RecurringState: Sendable, Equatable {
     case none
+    /// The server has a gift in progress but has not counted it yet (`state: preparing`).
+    case preparing
     case active(subscriptionID: String, amountMinor: Int, periodEnd: Date)
     /// Cancelled but still running until `stopsAt` — the streak continues until then.
     case ending(subscriptionID: String, amountMinor: Int, periodEnd: Date, stopsAt: Date)
@@ -93,19 +95,63 @@ public enum RecurringState: Sendable, Equatable {
     /// The subscription id recurring commands (change amount, cancel) need, when one exists.
     public var subscriptionID: String? {
         switch self {
-        case .none: return nil
+        case .none, .preparing: return nil
         case let .active(id, _, _), let .ending(id, _, _, _): return id
         }
     }
 
     public var amountMinor: Int? {
         switch self {
-        case .none: return nil
+        case .none, .preparing: return nil
         case let .active(_, amount, _), let .ending(_, amount, _, _): return amount
         }
     }
 
     public var isEnding: Bool { if case .ending = self { return true }; return false }
+
+    public func heading(hasLoaded: Bool) -> String {
+        guard hasLoaded else { return "Your monthly gift" }
+        switch self {
+        case .none: return "Start a monthly gift"
+        case .preparing: return "Your gift is on its way"
+        case .active: return "Your monthly gift"
+        case .ending: return "Your gift is ending"
+        }
+    }
+}
+
+/// What the amount endpoint offers for the subscription: the amount the next renewal will charge,
+/// when, and a change that is already on its way (queued but not yet confirmed, or confirmed and
+/// waiting for its effective date). Minor units are integer USD cents.
+public struct AmountOffer: Sendable, Equatable {
+    public struct Pending: Sendable, Equatable {
+        public let amountMinor: Int
+        public let previousMinor: Int
+        public let effectiveAt: Date
+        public let confirmed: Bool
+        public init(amountMinor: Int, previousMinor: Int, effectiveAt: Date, confirmed: Bool) {
+            self.amountMinor = amountMinor; self.previousMinor = previousMinor
+            self.effectiveAt = effectiveAt; self.confirmed = confirmed
+        }
+    }
+    public let subscriptionID: String
+    public let nextAmountMinor: Int
+    public let effectiveAt: Date
+    public let pending: Pending?
+    public init(subscriptionID: String, nextAmountMinor: Int, effectiveAt: Date, pending: Pending? = nil) {
+        self.subscriptionID = subscriptionID; self.nextAmountMinor = nextAmountMinor
+        self.effectiveAt = effectiveAt; self.pending = pending
+    }
+}
+
+/// Where the payment-method update (the hosted card page) stands, from `GET /donor/me/payment-method`.
+public struct PaymentMethodState: Sendable, Equatable {
+    public enum Kind: String, Sendable, Equatable { case none, pending, open, applied, expired, cancelled }
+    public let kind: Kind
+    public let completedAt: Date?
+    public init(kind: Kind, completedAt: Date? = nil) { self.kind = kind; self.completedAt = completedAt }
+    /// An update is in flight: the donor started it and the server has not finished it.
+    public var isInFlight: Bool { kind == .pending || kind == .open }
 }
 
 /// Copy for the cancel confirmation (G-8/G-9): cancelling ends the recurring gift at the

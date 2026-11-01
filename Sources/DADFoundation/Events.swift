@@ -33,6 +33,8 @@ public enum ReservationStatus: String, Sendable, Equatable, Codable {
 public enum EventAvailability: Sendable, Equatable {
     /// Booking has not opened yet (early-booking gate) — show the open time, no action.
     case notYetOpen(opensAt: Date)
+    /// The event has started and the donor holds nothing — the server refuses new reservations (409).
+    case started
     /// Spots remain — offer Reserve.
     case reservable(spotsLeft: Int)
     /// Full — offer Join waitlist (E-4).
@@ -69,12 +71,21 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
     public let cancelled: Bool
     public let bookingOpensAt: Date?
     public let earlyBooking: Bool
+    /// Free text from the organiser (E-3); empty when the server sent none.
+    public let details: String
+    /// Street address (E-3); empty when the server sent none.
+    public let address: String
+    /// IANA identifier of the venue's time zone (contract `time_zone`); empty when unknown.
+    public let timeZoneID: String
+    /// When the signed-in donor checked in (E-8); nil until they do.
+    public let checkedInAt: Date?
 
     public init(
         id: String, slug: String, title: String, type: String, venue: String, city: String,
         startsAt: Date, endsAt: Date, capacity: Int, spotsLeft: Int, status: ReservationStatus,
         invitationNote: String? = nil, reportIssueURL: String? = nil, cancelled: Bool = false,
-        bookingOpensAt: Date? = nil, earlyBooking: Bool = false
+        bookingOpensAt: Date? = nil, earlyBooking: Bool = false, details: String = "", address: String = "",
+        timeZoneID: String = "", checkedInAt: Date? = nil
     ) {
         self.id = id
         self.slug = slug
@@ -92,10 +103,42 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
         self.cancelled = cancelled
         self.bookingOpensAt = bookingOpensAt
         self.earlyBooking = earlyBooking
+        self.details = details
+        self.address = address
+        self.timeZoneID = timeZoneID
+        self.checkedInAt = checkedInAt
     }
 
-    /// Whether this event is invite-only (E-5): it carries an invitation note / guest-list marker.
-    public var isInviteOnly: Bool { invitationNote != nil }
+    /// The venue's zone, or nil when the identifier is empty or unknown to this device.
+    public var timeZone: TimeZone? { TimeZone(identifier: timeZoneID) }
+
+    /// Whether this event is invite-only (E-5): the contract's INVITE_ONLY type, or an invitation note.
+    public var isInviteOnly: Bool { invitationNote != nil || type.lowercased() == "invite_only" }
+
+    /// The contract's `capacity` is 0 for an uncapped event (and `spots_left` is then null).
+    public var isUncapped: Bool { capacity == 0 }
+
+    /// "Volunteer" / "Community" / "Invite-only" (E-3), from the contract's upper-case type.
+    public var typeLabel: String {
+        switch type.lowercased() {
+        case "volunteer": return "Volunteer"
+        case "community": return "Community"
+        case "invite_only": return "Invite-only"
+        default: return type.isEmpty ? "Event" : type.prefix(1).uppercased() + type.dropFirst().lowercased()
+        }
+    }
+
+    /// The signed-in donor's reservation or waitlist place can still be cancelled until the event
+    /// starts (E-9); a cancelled event has nothing left to cancel.
+    public func canCancel(now: Date) -> Bool {
+        !cancelled && (status == .reserved || status == .waitlisted) && now < startsAt
+    }
+
+    /// The window in which check-in is accepted (E-8), exactly as the server enforces it.
+    public var checkInWindow: CheckInWindow { CheckInWindow(startsAt: startsAt, endsAt: endsAt, timeZone: timeZone) }
+
+    /// Check-in is for a held seat, not a waitlist place (the server answers 422 otherwise).
+    public var canAttemptCheckIn: Bool { !cancelled && status == .reserved }
 
     /// The primary-action decision (E-3/E-4/E-9). `now` is injected so tests are deterministic.
     public func availability(now: Date) -> EventAvailability {
@@ -105,7 +148,9 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
         case .reserved: return .reserved
         case .waitlisted: return .waitlisted
         case .none:
-            if let opens = bookingOpensAt, now < opens { return .notYetOpen(opensAt: opens) }
+            if now >= startsAt { return .started }
+            if let opens = bookingOpensAt, now < opens, !earlyBooking { return .notYetOpen(opensAt: opens) }
+            if isUncapped { return .reservable(spotsLeft: Int.max) }
             return spotsLeft > 0 ? .reservable(spotsLeft: spotsLeft) : .waitlistable
         }
     }
@@ -113,6 +158,7 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
     /// "3 spots left" / "Full" line for the list row and detail header.
     public var spotsLabel: String {
         if cancelled { return "Cancelled" }
+        if isUncapped { return "Open to everyone" }
         if spotsLeft <= 0 { return "Full" }
         return spotsLeft == 1 ? "1 spot left" : "\(spotsLeft) spots left"
     }
@@ -122,18 +168,22 @@ public struct DonorEvent: Sendable, Equatable, Identifiable {
 
 /// The client-side check-in gate. The server is authoritative, but the scanner should only
 /// *offer* check-in inside the window and give a clear reason when it is too early / too late,
-/// rather than firing a request that is bound to 422. The window opens `earlyGrace` before
-/// start and closes at `endsAt` (configurable to match the server's rule).
+/// rather than firing a request that is bound to 422. The window opens at `startsAt` and closes
+/// at `endsAt`, matching the contract.
 public struct CheckInWindow: Sendable, Equatable {
-    /// How long before `startsAt` check-in opens. Server rule: doors open 60 min early.
-    public static let earlyGrace: TimeInterval = 60 * 60
+    /// How long before `startsAt` check-in opens. The contract accepts a check-in only between the
+    /// event's start and end (E-8), so there is no early grace; the server stays authoritative.
+    public static let earlyGrace: TimeInterval = 0
 
     public let startsAt: Date
     public let endsAt: Date
+    /// The event's zone, used only to word "opens at ..." messages; nil falls back to the device zone.
+    public let timeZone: TimeZone?
 
-    public init(startsAt: Date, endsAt: Date) {
+    public init(startsAt: Date, endsAt: Date, timeZone: TimeZone? = nil) {
         self.startsAt = startsAt
         self.endsAt = endsAt
+        self.timeZone = timeZone
     }
 
     public var opensAt: Date { startsAt.addingTimeInterval(-Self.earlyGrace) }
@@ -174,5 +224,54 @@ public enum ReservationOutcome: Sendable, Equatable {
         self == .waitlisted
             ? "We'll notify you if a spot opens up."
             : "Your spot is confirmed. Add it to your calendar so you don't miss it."
+    }
+}
+
+// MARK: - Time display (E-3)
+
+/// Event times in the EVENT's time zone with the donor's locale (E-3), always with the zone abbreviation
+/// so a time is never ambiguous. An explicit `timeZone` wins; otherwise the event's `time_zone`; the
+/// device zone is only the fallback for an identifier this device does not know. Pure, so it is unit-tested.
+public enum EventTime {
+    public static func start(_ event: DonorEvent, timeZone: TimeZone? = nil, locale: Locale = .current) -> String {
+        moment(event.startsAt, in: event, timeZone: timeZone, locale: locale)
+    }
+
+    /// "Wed, Nov 4, 3:00 PM CST" for any instant (booking opens, check-in opens) in the event's zone.
+    public static func moment(_ date: Date, in event: DonorEvent, timeZone: TimeZone? = nil, locale: Locale = .current) -> String {
+        moment(date, timeZone: resolve(event, timeZone), locale: locale)
+    }
+
+    public static func moment(_ date: Date, timeZone: TimeZone?, locale: Locale = .current) -> String {
+        let zone = timeZone ?? .current
+        let text = date.formatted(Self.style(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), zone, locale))
+        return "\(text) \(abbreviation(date, zone, locale))"
+    }
+
+    /// "Sat, Nov 7, 10:00 AM – 12:00 PM CST" (the end carries its date only when it is another day).
+    public static func range(_ event: DonorEvent, timeZone: TimeZone? = nil, locale: Locale = .current) -> String {
+        let zone = resolve(event, timeZone)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let startText = event.startsAt.formatted(Self.style(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), zone, locale))
+        let sameDay = calendar.isDate(event.startsAt, inSameDayAs: event.endsAt)
+        let endText = event.endsAt.formatted(Self.style(sameDay
+            ? .dateTime.hour().minute()
+            : .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute(), zone, locale))
+        return "\(startText) – \(endText) \(abbreviation(event.endsAt, zone, locale))"
+    }
+
+    private static func resolve(_ event: DonorEvent, _ explicit: TimeZone?) -> TimeZone { explicit ?? event.timeZone ?? .current }
+
+    private static func style(_ format: Date.FormatStyle, _ timeZone: TimeZone, _ locale: Locale) -> Date.FormatStyle {
+        var style = format
+        style.timeZone = timeZone
+        style.locale = locale
+        return style
+    }
+
+    private static func abbreviation(_ date: Date, _ timeZone: TimeZone, _ locale: Locale) -> String {
+        timeZone.localizedName(for: timeZone.isDaylightSavingTime(for: date) ? .shortDaylightSaving : .shortStandard, locale: locale)
+            ?? timeZone.abbreviation(for: date) ?? timeZone.identifier
     }
 }

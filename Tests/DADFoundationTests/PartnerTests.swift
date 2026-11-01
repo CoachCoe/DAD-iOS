@@ -30,6 +30,7 @@ final class VerifiedFigureTests: XCTestCase {
 
     func testVerifiedCountHiddenWhenUnverified() {
         XCTAssertEqual(VerifiedCount(value: 42, verified: true).label, "42")
+        XCTAssertEqual(VerifiedCount(value: 12_400, verified: true).label, "12,400")
         XCTAssertNil(VerifiedCount(value: 42, verified: false).label)
     }
 }
@@ -37,7 +38,7 @@ final class VerifiedFigureTests: XCTestCase {
 final class PartnerOverviewTests: XCTestCase {
     private func overview(enrolled: Int64?, role: PartnerRole = .admin) -> PartnerOverview {
         PartnerOverview(
-            organization: "Acme", description: "desc", role: role, companyCode: "ACME",
+            organization: "Acme", description: "desc", userID: "u1", role: role, companyCode: "ACME",
             committed: VerifiedMoney(amountMinor: 500_000, verified: true),
             deployed: VerifiedMoney(amountMinor: 300_000, verified: false),
             deployedPercent: 60,
@@ -51,7 +52,7 @@ final class PartnerOverviewTests: XCTestCase {
         let o = overview(enrolled: 42)
         XCTAssertEqual(o.committed.label, "$5,000")   // verified -> shown
         XCTAssertNil(o.deployed.label)                 // unverified -> hidden, never estimated (§7.3)
-        XCTAssertEqual(o.peopleReached.label, "1200")
+        XCTAssertEqual(o.peopleReached.label, "1,200")
     }
 
     func testSuppressedEnrollmentShowsNoCount() {
@@ -102,8 +103,12 @@ final class PartnerInitiativeTests: XCTestCase {
 final class PartnerModelTests: XCTestCase {
     private final class FakeService: PartnerService, @unchecked Sendable {
         var role: PartnerRole = .admin
+        var userID = "u1"
         var pending = false
         var fail = false
+        var failSpend = false
+        var overviewError: Error?
+        var spendSignedOut = false
         private(set) var invited: [(String, PartnerRole)] = []
         private(set) var removed: [String] = []
         private(set) var pushRegistered = false
@@ -112,15 +117,20 @@ final class PartnerModelTests: XCTestCase {
 
         func overview() async throws -> PartnerOverview {
             if pending { throw PartnerPendingApproval() }
+            if let overviewError { throw overviewError }
             if fail { throw AccountError.signedOut }
-            return PartnerOverview(organization: "Acme", description: "d", role: role, companyCode: "AC",
+            return PartnerOverview(organization: "Acme", description: "d", userID: userID, role: role, companyCode: "AC",
                 committed: VerifiedMoney(amountMinor: 1, verified: true),
                 deployed: VerifiedMoney(amountMinor: 1, verified: true), deployedPercent: 1,
                 peopleReached: VerifiedCount(value: 1, verified: true), employeesEnrolled: 42,
                 workforceSize: 120, enrolledPercent: 35, updatedAt: Date(), hasLogo: false)
         }
         func initiatives() async throws -> [PartnerInitiative] { [] }
-        func spend() async throws -> [PartnerSpendCategory] { [] }
+        func spend() async throws -> [PartnerSpendCategory] {
+            if spendSignedOut { throw AccountError.signedOut }
+            if failSpend { throw AccountError.unavailable }
+            return []
+        }
         func people() async throws -> PartnerPeople {
             PartnerPeople(enrolled: 42, workforceSize: 120, givenMinor: 0, matchedMinor: 0,
                           avgStreakDays: 0, volunteerMinutes: 0, teams: 0, suppressed: false)
@@ -154,6 +164,29 @@ final class PartnerModelTests: XCTestCase {
         guard case .failed = model.phase else { return XCTFail("expected failed") }
     }
 
+    func testSecondarySectionFailureIsFlaggedNotShownAsEmpty() async {
+        let svc = FakeService(); svc.failSpend = true
+        let model = PartnerModel(service: svc)
+        await model.load()
+        XCTAssertEqual(model.phase, .ready, "the portal still renders with what did load")
+        XCTAssertTrue(model.sectionsUnavailable)
+        XCTAssertNotNil(model.people)
+        XCTAssertEqual(model.users.count, 1)
+    }
+
+    func testCleanLoadDoesNotFlagSections() async {
+        let model = PartnerModel(service: FakeService())
+        await model.load()
+        XCTAssertFalse(model.sectionsUnavailable)
+    }
+
+    func testLostSessionInASectionFailsTheWholeLoad() async {
+        let svc = FakeService(); svc.spendSignedOut = true
+        let model = PartnerModel(service: svc)
+        await model.load()
+        XCTAssertEqual(model.phase, .failed("Please sign in again."))
+    }
+
     func testViewerCannotInviteOrRemove() async {
         let svc = FakeService(); svc.role = .viewer
         let model = PartnerModel(service: svc)
@@ -172,6 +205,117 @@ final class PartnerModelTests: XCTestCase {
         await model.inviteUser(email: "b@x.com", role: .viewer)
         XCTAssertEqual(svc.invited.count, 1)
         XCTAssertEqual(svc.invited.first?.0, "b@x.com")
+    }
+
+    func testCancelledLoadKeepsPriorPhaseInsteadOfFailing() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc)
+        await model.load()
+        svc.overviewError = CancellationError()
+        await model.load()
+        XCTAssertEqual(model.phase, .ready)
+    }
+
+    func testInviteRejectsInvalidEmailWithoutCallingService() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc)
+        await model.load()
+        for bad in ["", "nobody", "a@b", "a@@b.com", "a b@x.com", "@x.com", "a@x..com"] {
+            await model.inviteUser(email: bad, role: .viewer)
+            XCTAssertEqual(model.actionError, "Enter a valid email address.", bad)
+        }
+        XCTAssertTrue(svc.invited.isEmpty)
+    }
+
+    func testInviteTrimsAndSendsTheTypedEmail() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc)
+        await model.load()
+        await model.inviteUser(email: "  new@acme.com ", role: .viewer)
+        XCTAssertEqual(svc.invited.first?.0, "new@acme.com")
+        XCTAssertNil(model.actionError)
+    }
+
+    func testPlausibleEmail() {
+        XCTAssertTrue(PartnerModel.isPlausibleEmail("a.b+c@sub.acme.co"))
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("a@b"))
+        XCTAssertTrue(PartnerModel.isPlausibleEmail("  a@b.co  "))      // trimmed
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("a@b..c"))         // empty label
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("a@.b.c"))
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("@b.co"))
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("a b@c.co"))
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("a@@b.co"))
+        let local = String(repeating: "a", count: 64)
+        let ok = local + "@" + String(repeating: "b", count: 254 - 64 - 1 - 3) + ".co"
+        XCTAssertEqual(ok.count, 254)
+        XCTAssertTrue(PartnerModel.isPlausibleEmail(ok))
+        XCTAssertFalse(PartnerModel.isPlausibleEmail("a" + ok))         // 255 characters
+    }
+
+    func testSelfIdComesFromOverviewNotInit() async {
+        let svc = FakeService(); svc.userID = "u2"
+        svc.users = [PartnerUser(id: "u1", email: "a@x.com", name: "A", role: .admin),
+                     PartnerUser(id: "u2", email: "b@x.com", name: "B", role: .admin)]
+        let model = PartnerModel(service: svc)
+        XCTAssertNil(model.currentUserID)
+        await model.load()
+        XCTAssertEqual(model.currentUserID, "u2")
+        XCTAssertFalse(model.canRemove(model.users[1]))
+        XCTAssertTrue(model.canRemove(model.users[0]))
+    }
+
+    func testLastAdminCannotBeRemoved() async {
+        let svc = FakeService(); svc.userID = "u2"
+        svc.users = [PartnerUser(id: "u1", email: "a@x.com", name: "A", role: .admin),
+                     PartnerUser(id: "u2", email: "b@x.com", name: "B", role: .admin),
+                     PartnerUser(id: "u3", email: "c@x.com", name: "C", role: .viewer)]
+        let model = PartnerModel(service: svc)
+        await model.load()
+        await model.removeUser(id: "u1")                 // two admins: allowed
+        XCTAssertEqual(svc.removed, ["u1"])
+        let admin = FakeService(); admin.userID = "u9"
+        admin.users = [PartnerUser(id: "u2", email: "b@x.com", name: "B", role: .admin),
+                       PartnerUser(id: "u3", email: "c@x.com", name: "C", role: .viewer)]
+        let m2 = PartnerModel(service: admin)
+        await m2.load()
+        XCTAssertFalse(m2.canRemove(m2.users[0]))
+        m2.requestRemoval(id: "u2")
+        XCTAssertNil(m2.pendingRemoval)
+        await m2.removeUser(id: "u2")
+        XCTAssertTrue(admin.removed.isEmpty)
+        XCTAssertEqual(m2.actionError, "You can’t remove the last admin.")
+        XCTAssertTrue(m2.canRemove(m2.users[1]))
+    }
+
+    func testRemovalNeedsConfirmationAndCanBeCancelled() async {
+        let svc = FakeService()
+        svc.users = [PartnerUser(id: "u1", email: "a@x.com", name: "A", role: .admin),
+                     PartnerUser(id: "u2", email: "v@x.com", name: "V", role: .viewer)]
+        let model = PartnerModel(service: svc)
+        await model.load()
+        model.requestRemoval(id: "u2")
+        XCTAssertEqual(model.pendingRemoval?.id, "u2")
+        XCTAssertTrue(svc.removed.isEmpty, "staging a removal must not call the service")
+        model.cancelRemoval()
+        await model.confirmRemoval()
+        XCTAssertTrue(svc.removed.isEmpty)
+        model.requestRemoval(id: "u2")
+        await model.confirmRemoval()
+        XCTAssertEqual(svc.removed, ["u2"])
+        XCTAssertNil(model.pendingRemoval)
+        XCTAssertEqual(model.users.map(\.id), ["u1"])
+    }
+
+    func testAdminCannotRemoveThemselves() async {
+        let svc = FakeService()
+        let model = PartnerModel(service: svc)
+        await model.load()
+        XCTAssertFalse(model.canRemove(model.users[0]))
+        model.requestRemoval(id: "u1")
+        XCTAssertNil(model.pendingRemoval)
+        await model.removeUser(id: "u1")
+        XCTAssertTrue(svc.removed.isEmpty)
+        XCTAssertEqual(model.actionError, "You can’t remove yourself.")
     }
 
     func testPushRegisterAndUnregister() async {

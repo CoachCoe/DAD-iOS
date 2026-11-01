@@ -21,14 +21,25 @@ final class AttributionTests: XCTestCase {
         XCTAssertNil(a.source)        // slashes rejected
     }
 
-    func testCaptureMergesFirstWriterWinsPerField() {
+    func testCaptureMergesLastTouchWinsPerField() {
         let capture = AttributionCapture(store: MemoryStore())
         capture.capture(Attribution(inviteCode: "INV1", source: "share"))
-        // A later touch supplies a company code and a DIFFERENT invite; invite must not change.
+        // A later touch supplies a company code and a DIFFERENT invite; PRD R-4: the most recent wins.
         let merged = capture.capture(Attribution(inviteCode: "INV2", companyCode: "ACME"))
-        XCTAssertEqual(merged.inviteCode, "INV1")   // first writer wins
-        XCTAssertEqual(merged.companyCode, "ACME")  // empty slot filled
-        XCTAssertEqual(merged.source, "share")
+        XCTAssertEqual(merged.inviteCode, "INV2")   // last touch wins
+        XCTAssertEqual(merged.companyCode, "ACME")  // new field added
+        XCTAssertEqual(merged.source, "share")      // untouched field keeps its stored value
+        XCTAssertEqual(capture.current()?.inviteCode, "INV2")
+    }
+
+    func testAnalyticsSourceMapsToServerEnum() {
+        XCTAssertEqual(Attribution(inviteCode: "A").analyticsSource, "link")
+        XCTAssertEqual(Attribution(irlCode: "A").analyticsSource, "IRL")
+        XCTAssertEqual(Attribution(companyCode: "A").analyticsSource, "company")
+        XCTAssertNil(Attribution(source: "share").analyticsSource)
+        for source in Attribution(inviteCode: "A", irlCode: "B", companyCode: "C").analyticsSource.map({ [$0] }) ?? [] {
+            XCTAssertTrue(AnalyticsRecord.attributionSources.contains(source))
+        }
     }
 
     func testEmptyCaptureIsNotPersisted() {
@@ -118,6 +129,7 @@ final class PhoneSignInModelTests: XCTestCase {
         model.code = "000000"
         await model.verify()
         guard case .failed = model.phase else { return XCTFail("expected failed, got \(model.phase)") }
+        XCTAssertTrue(model.isAwaitingCode, "a wrong code keeps the screen on code entry, not back at the phone field")
         model.retryCodeEntry()
         // Retry returns to code entry WITHOUT re-requesting a code (same handle).
         guard case .enterCode(let handle) = model.phase else { return XCTFail("expected enterCode, got \(model.phase)") }
@@ -130,6 +142,7 @@ final class PhoneSignInModelTests: XCTestCase {
         model.phone = "+14155551234"
         await model.requestCode()
         guard case .failed = model.phase else { return XCTFail("expected failed, got \(model.phase)") }
+        XCTAssertFalse(model.isAwaitingCode, "a failed SMS request has no code to wait for")
         // retry with no handle falls back to the phone screen.
         model.retryCodeEntry()
         XCTAssertEqual(model.phase, .enterPhone)

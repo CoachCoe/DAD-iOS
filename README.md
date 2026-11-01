@@ -14,11 +14,14 @@ node scripts/prepare-client.mjs
 open DAD.xcodeproj
 ```
 
-Select the shared DAD scheme and an iPhone simulator. The default app uses a clearly
-labeled synthetic account through the same session API as a configured deployment.
+Select the shared DAD scheme and an iPhone simulator. A Debug build with no `DAD_API_ORIGIN` uses a clearly
+labeled synthetic account through the same session API as a configured deployment. Release
+builds compile out every preview double and ignore `--preview-*` launch arguments; an
+unconfigured Release build shows the unavailable state instead of sample data.
 Run `bash scripts/check-ios.sh` for contract verification, Swift unit tests, and simulator
 journeys. `DAD_SIMULATOR_ID`, `DAD_SWIFT_BUILD`, and `DAD_XCODE_BUILD` override the simulator
-and disposable build paths. Unit tests alone: `swift test --scratch-path /tmp/dad-ios-swift`.
+and disposable build paths. Unit tests alone: `swift test --scratch-path /tmp/dad-ios-swift` (add `--disable-sandbox`
+when running inside a tool that already sandboxes processes).
 
 CI executes that same script. The pinned Apple generator plugin is trusted explicitly
 with `-skipPackagePluginValidation`; compilation and tests remain enabled. Xcode's benign
@@ -26,7 +29,7 @@ AppIntents metadata-extraction diagnostic is not suppressed; this app defines no
 
 ## Shared contract and native boundaries
 
-`foundation.lock.json` pins mobile foundation 2.0.0 and its manifest digest. The vendored
+`foundation.lock.json` pins mobile foundation 2.5.0 and its manifest digest. The vendored
 release is verified before generation. `prepare-client.mjs` copies the Swift generator input, null-only Codable adapter, tokens,
 and link policy into ignored generator inputs. Apple's pinned Swift generator produces
 types and a client during the build, scoped to profile, claim, refresh, and logout.
@@ -45,18 +48,51 @@ cleanup; errors propagate rather than claiming a confirmed remote revocation.
 
 Set Xcode build settings `DAD_API_ORIGIN` and `DAD_PUBLIC_ORIGIN` to the direct HTTPS API
 origin and public website origin for a real environment. No production hostname or secret
-is compiled by default. An existing live session can read the profile; a plain account
-claim link can establish one. UI sign-in forms/passkeys are PRD work. Native entry hooks
+is compiled by default. A Release build with no API origin shows an unavailable state and sign-in fails
+with a clear message; it never serves synthetic data. Wired against the API: donor phone + SMS sign-in
+(`beginPhoneSignIn`/`finishPhoneSignIn`, existing accounts only), claim-link sign-in, profile read,
+settings load/save, refresh, logout and account deletion. All authenticated calls go through
+`AccountSession.authorized` (single-flight refresh, one bounded 401 retry, epoch-guarded). Also wired
+(P1b): new-donor email signup (`postDonorSignup`; the emailed link is claimed in-app, tapped or pasted),
+email + password sign-in (`postDonorPasswordSignIn`) and set/change password in Settings
+(`postDonorMePassword`). Built and tested but **switched off until configured**: Sign in with Apple, Google
+and passkeys (see below). Also wired (P2, donor home reads): the dashboard (`dashboard`: streak card with
+30-day bar and next milestone, rank line, total given, network, referral totals; `preparing` and the
+null/unknown figures are shown as such, never as zero), today's initiative (`todayInitiative`, 404 = nothing
+in rotation), paged gift history (`gifts`, 50 a page, capped at 500 rows in memory) with a per-gift record
+(`receipt`) and the calendar-year total (`annualSummary`). Engagement is wired too (see Engagement). Still on
+in-memory previews and not wired: the partner portal, push registration and analytics upload. Partner sign-in is not wired yet. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next
 destination stay on the web before their one-use proof is consumed.
 
+### Switching on Apple, Google and passkeys
+
+These methods are implemented (Wire conformers, models, UI states, stub-transport tests) but show
+"Not available yet" because the build carries none of the account-held configuration. Nothing here is
+invented or committed; supply, per method:
+
+- **Sign in with Apple:** a signing team, the "Sign in with Apple" capability
+  (`com.apple.developer.applesignin` entitlement) on the app ID, then build setting
+  `DAD_APPLE_SIGNIN_ENABLED=YES`. DAD-Main must also have Apple configured (`oidcSignIn` is 503 otherwise).
+- **Passkeys:** the Associated Domains entitlement `webcredentials:<domain>`, an
+  `apple-app-site-association` file for that domain listing the final bundle ID, and build setting
+  `DAD_PASSKEY_RP_ID=<domain>` (bare hostname, the relying-party ID DAD-Main uses).
+- **Google:** build setting `DAD_GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com` **and** a Google id_token
+  provider. The official SDK is a new dependency, so none is linked; Google stays off (a client ID alone
+  does not enable it) until that decision is made and the provider replaces `UnavailableIDTokenProvider`.
+
+Passkey list/delete are wired and tested in `WirePasswordSettings`; their Settings UI and passkey
+registration (`beginDonorPasskeyRegister`/`finishDonorPasskeyRegister`) follow with the entitlement.
+
 System universal links/passkeys require a final bundle ID, signing team, Associated
 Domains (`applinks:` and `webcredentials:`), and matching DAD-Main association files.
-The preview ID `org.dad.foundation.preview` is not a registered production identity.
-Camera, push registration, and Wallet have integration protocols; this foundation does
-not request those permissions or configure provider accounts. A reachable staging API
+The app ships under `org.dad.foundation` (Release) and `org.dad.foundation.debug` (Debug); see
+"Bundle identifier" below. Neither is registered with a signing team or Associated Domains yet.
+Push registration and Wallet have integration protocols; this foundation does
+not request those permissions or configure provider accounts. The camera is requested only when a donor
+opens the check-in scanner (see Events). A reachable staging API
 and real-device/provider acceptance remain separate from synthetic tests.
 
 The version 2 Swift input preserves nullable dashboard, recurring, and event values
@@ -73,6 +109,90 @@ its source and changes, then replace the vendored snapshot and lock together. Ne
 fetch a moving branch during builds. `node scripts/check-foundation.mjs` verifies every
 file hash, source revision, and version; its tests demonstrate tamper detection.
 
+## Giving (recurring gift, payment method)
+
+The donor home shows a "Your monthly gift" card; "Manage gift" opens the gift screen, bound to the real
+`WireGiving` (`recurring`, `amountOptions`, `changeAmount`, `cancelRecurring`, `paymentMethod`,
+`beginPaymentUpdate`) through the same authorized session as every other read.
+
+- **Card data never enters the app.** Starting a gift and updating the card both open a page hosted outside
+  the app in the system's secure Safari view (`SFSafariViewController`). When it closes (Done or swipe down)
+  the app re-reads the server a bounded number of times until it reflects the outcome, then says what it found.
+  No callback URL, custom scheme or Associated Domain is needed for this, so nothing extra is required from you.
+- **Commands are idempotent.** Each command carries a version 4 `Idempotency-Key`; a retry after a timeout,
+  429 or 503 reuses the key, and a success or a definitive refusal (403/409/422) retires it. Buttons are
+  disabled while a request is in flight.
+- **Starting a gift is native** (contract 2.6.0). The donor picks a daily amount ($1-$30) and "Start a monthly gift"
+  calls `startRecurringCheckout` (`POST /donor/me/recurring/checkout`, bearer plus the native client header,
+  body `{amount_minor}` = the chosen amount, with an `Idempotency-Key` under the same reuse/retire rules as the other
+  commands). The returned Stripe-hosted `url` opens in the same in-app Safari view. Closing it starts the bounded
+  re-read of `GET /donor/me/recurring`; the return page does not prove payment, only the server's state does.
+  409 (gift already active, checkout still open, or key reused for another amount) re-reads and tells the donor;
+  503 with `PAYMENTS_UNCONFIGURED` shows "Giving isn't available right now". There is no `/donate` website fallback.
+- **Return-to-app link (optional).** Checkout returns to `<DONOR_NATIVE_RETURN_ORIGIN>/app/return`. For that link to
+  reopen the app you need Associated Domains (`applinks:<return host>`) and `/app/return` in the
+  apple-app-site-association `components` (see DAD-Main `docs/operations.md`). Without it the donor closes the
+  Safari view and the re-read picks the gift up.
+- **`Subscription.status` is an open set.** The contract enumerates six values but Stripe can also send `paused`,
+  `trialing`, ...; `prepare-client.mjs` strips that enum (like `Problem.code`) so an unknown value decodes as a string.
+- **Account deletion and gifts.** A deletion refused with 409 ("monthly gift still renews / checkout open")
+  now offers "Cancel my monthly gift", which opens the real cancel flow; deleting again then goes through.
+- Not covered: pause/resume (not in the contract), Apple Pay in-app (gated on the nonprofit decision), and the
+  real Stripe pages (device/staging acceptance).
+
+## Events (P4)
+
+Real `WireEvents` over the generated client, behind `EventsService`: the list (`donorEvents` merged with
+`inviteOnlyEvents`, de-duplicated, soonest first), detail (`donorEventDetail`), reserve / join waitlist
+(`reserveEvent`), cancel (`cancelEvent`), check-in (`checkInEvent`) and the authenticated `.ics`
+(`donorEventCalendar`). The donor home has an Events card; the list opens an in-place detail.
+
+- **Statuses.** 401 refreshes once then signs out; 403 reads "not eligible" (reserve / cancel / check-in);
+  404 "no longer available" (also what the server answers for an invite-only event the donor has not
+  unlocked); 409 (full, started, booking not open, reservation changed) refreshes the list and says so;
+  422 on check-in explains the three real causes; 429 with or without a body is "too many attempts".
+  A failed command never changes what is on screen, and a second tap while one is running is ignored.
+- **Idempotency.** The contract defines no `Idempotency-Key` for these commands, so none is sent.
+- **Booking rules.** Cancel is offered until the event starts (E-9); a started event offers no new
+  reservation; `early_booking` lets a Team Captain reserve before it opens to everyone (B-3); capacity 0
+  is "open to everyone". Times show the zone abbreviation and the donor's locale; the contract has no
+  event time zone yet, so the device zone is used.
+- **Check-in.** Only a held seat, only between the event's start and end (the contract's window, not an
+  assumed early grace). Outside it the panel says when it opens or that it closed. A typed code always
+  works; "Scan QR code" opens the camera scanner (AVFoundation, QR only). The camera is requested at that
+  moment through `CameraPermission`; denied or no camera falls back to the typed code. Needs
+  `NSCameraUsageDescription` (set); no entitlement. **The live camera capture itself needs a device to
+  verify**: the simulator has no camera, so CI covers the typed-code path and the permission states only.
+- **Add to calendar.** The `.ics` is fetched with the donor's bearer, written to a temporary file and
+  offered through the system share sheet, where the donor picks Calendar. The app never reads or writes the
+  calendar, so there is no calendar permission or entitlement.
+- **Report an issue.** The event's `report_issue_url` (mailto) opens the mail composer.
+- **Not covered.** Reminder pushes (E-7) wait for push registration (P7); E-1 volunteer opt-in is a settings
+  preference and is not part of this screen.
+- **Test stub.** `--stub-backend --stub-signed-in` serves five scripted events (`--stub-events-ungated`
+  hides the invite-only one, `--stub-events-fail-first` fails the first list read).
+
+## Engagement (P5)
+
+Real `WireEngagement` behind `EngagementService`, opened from the donor home ("See your impact"):
+lifetime impact and rank from `dashboard`, the 24-badge grid (`donorBadges`; earned / locked and the perk are
+stated in text, perk gating follows the server catalog codes F / 1K / TC), the referral network
+(`donorNetwork`: invitees by first name and last initial, anonymous count, next milestone), the invite
+(`sharing` + `conversions`) and the rankings choice (`profile` + `savePreferences`, explicit
+`rankings_opted_out`; the card flips at once and reverts with an inline notice if the save fails). Today's
+initiative card opens the spend drill-in (`initiativeSpend`, A-3).
+
+- **Unknown is not zero.** Each section the server did not give shows "can't be shown right now" (or "—"); an
+  unreadable section never becomes an empty grid, a zero or "not ranked".
+- **Rank label.** `national_percentile` is already the top bucket, so 2 reads "Top 2% nationally".
+- **Invite links** are `<DAD_PUBLIC_ORIGIN>/r/<code>` (the route the web app and the router serve), the QR adds
+  `?via=irl` and is drawn locally with CoreImage. With no configured public origin there is no link, never an
+  invented one. A donor with no public name gets a prompt to choose one (`saveSharing`).
+- **Not covered.** The `referralCode` SVG op is unused (the QR is local). Contract enum `Conversion.kind` is
+  generated as an open string (`prepare-client.mjs` fails if it is not found).
+- **Test stub.** `--stub-backend --stub-signed-in` serves badges, network, sharing, conversions and a spend
+  (`--stub-rankings-fail-toggle`, `--stub-no-public-name`, `--stub-badges-down`).
+
 ## Real backend acceptance
 
 From the matching DAD-Main checkout, run `make test-native-clients` with
@@ -87,13 +207,12 @@ The test runner removes the private proof fixtures after either success or failu
 ## Release readiness (App Store)
 
 **In-app account deletion (required).** The settings screen offers in-app account deletion
-(§6.12): it calls `POST /donor/me/delete` (the server removes personal data and keeps the
-legally-required gift records) and then wipes the local session through `AccountSession`'s
-logout path. The action is gated behind a typed-word confirmation, so it cannot fire by
-accident. This satisfies App Store Review Guideline 5.1.1(v) (apps with account creation must
-let users delete their account from within the app). Disclose the retained gift records in the
-App Store "Account Deletion" question: personal data is deleted; aggregate/receipt records
-required by law are retained.
+(§6.12) behind a typed-word confirmation, and the flow wipes the local session through
+`AccountSession`. In a configured build the confirmed deletion calls `POST /donor/me/delete`, and only on
+success wipes the local session and attribution state and returns to sign-in; a 409 (an active monthly gift or
+open checkout) is surfaced as a recoverable error and nothing local is wiped. Disclose in the App Store "Account Deletion"
+question that personal data is deleted while aggregate/receipt records required by law are
+retained.
 
 **Privacy disclosure (App Store Privacy "nutrition label").** The app collects: email and phone
 (account), approximate location via ZIP (streak day boundary, nearby events), and gift history.
@@ -122,6 +241,8 @@ checklist; they cannot run on the CI simulator:
 - [ ] Performance on a throttled network: dashboards < 2s, checkout < 60s (PRD §10).
 - [ ] Real-device APNs delivery; Apple Pay or the Stripe web handoff end-to-end.
 - [ ] Universal-link + deferred-attribution acceptance on a clean install.
+- [ ] Confirm `App/PrivacyInfo.xcprivacy` (collected data types, UserDefaults reason `CA92.1`) matches the
+      final App Store privacy answers before submission; counsel owns the disclosure wording.
 
 ### Signing (manual, account-held — not committed, not CI-verified)
 

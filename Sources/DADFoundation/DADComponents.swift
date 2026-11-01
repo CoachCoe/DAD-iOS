@@ -13,15 +13,9 @@ public extension Color {
     }
 
     init(dadHex hex: String) {
-        // Supports #rrggbb and rgba(r,g,b,a); anything else resolves to .primary via a clear scale.
-        if hex.hasPrefix("#"), hex.count == 7, let value = UInt32(hex.dropFirst(), radix: 16) {
-            self = Color(
-                .sRGB,
-                red: Double((value >> 16) & 0xFF) / 255,
-                green: Double((value >> 8) & 0xFF) / 255,
-                blue: Double(value & 0xFF) / 255,
-                opacity: 1
-            )
+        // Supports #rgb, #rrggbb and rgba(r,g,b,a); anything else resolves to .primary so it is visible.
+        if let rgb = Color.parseHex(hex) {
+            self = rgb
         } else if hex.hasPrefix("rgba("), let parsed = Color.parseRGBA(hex) {
             self = parsed
         } else {
@@ -29,7 +23,22 @@ public extension Color {
         }
     }
 
-    private static func parseRGBA(_ hex: String) -> Color? {
+    /// `#rgb` shorthand expands each digit (e.g. the `card` token `#fff`).
+    static func parseHex(_ hex: String) -> Color? {
+        guard hex.hasPrefix("#") else { return nil }
+        var digits = String(hex.dropFirst())
+        if digits.count == 3 { digits = digits.map { "\($0)\($0)" }.joined() }
+        guard digits.count == 6, let value = UInt32(digits, radix: 16) else { return nil }
+        return Color(
+            .sRGB,
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255,
+            opacity: 1
+        )
+    }
+
+    static func parseRGBA(_ hex: String) -> Color? {
         let inner = hex.dropFirst(5).dropLast()
         let parts = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count == 4,
@@ -63,15 +72,23 @@ public extension View {
 public struct DADButtonStyle: ButtonStyle {
     public enum Kind { case primary, secondary }
     private let kind: Kind
+    private let fillsWidth: Bool
     @Environment(\.colorScheme) private var scheme
-    public init(_ kind: Kind = .primary) { self.kind = kind }
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.dynamicTypeSize) private var typeSize
+    /// `fillsWidth: false` sizes the button to its label, for actions that sit inside a row.
+    public init(_ kind: Kind = .primary, fillsWidth: Bool = true) {
+        self.kind = kind
+        self.fillsWidth = fillsWidth
+    }
 
     public func makeBody(configuration: Configuration) -> some View {
         let background: Color
         let foreground: Color
         switch kind {
         case .primary:
-            background = .dad("brand")
+            // `brand` (#ff4a22) under paper text is 3.19:1, below AA 4.5:1; `brand-ink` is 5.04:1.
+            background = .dad("brand-ink")
             foreground = .dad("paper")
         case .secondary:
             background = .dad(scheme == .dark ? "ink" : "card")
@@ -79,13 +96,25 @@ public struct DADButtonStyle: ButtonStyle {
         }
         return configuration.label
             .font(.body.weight(.semibold))
+            .multilineTextAlignment(.center)
+            // Accessibility sizes wrap labels onto several lines: pad them and drop the full pill
+            // radius so wrapped text is not clipped by the corners.
+            .padding(.vertical, typeSize.isAccessibilitySize ? 14 : 0)
             .frame(minHeight: 44)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: fillsWidth ? .infinity : nil)
             .padding(.horizontal, .dadSpace("4"))
             .background(background.opacity(configuration.isPressed ? 0.82 : 1))
             .foregroundStyle(foreground)
-            .clipShape(RoundedRectangle(cornerRadius: .dadRadius("pill"), style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: typeSize.isAccessibilitySize ? 28 : .dadRadius("pill"), style: .continuous))
+            .overlay {
+                // Secondary buttons sit on same-coloured cards; the outline keeps them visible.
+                if kind == .secondary {
+                    RoundedRectangle(cornerRadius: typeSize.isAccessibilitySize ? 28 : .dadRadius("pill"), style: .continuous)
+                        .strokeBorder(Color.dad(scheme == .dark ? "ghost-line-dark" : "ghost-line"), lineWidth: 1)
+                }
+            }
             .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.45)
     }
 }
 

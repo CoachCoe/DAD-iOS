@@ -16,6 +16,7 @@ private func makeEvent(
     invitationNote: String? = nil,
     cancelled: Bool = false,
     bookingOpensAt: Date? = nil,
+    earlyBooking: Bool = false,
     startsAt: Date = date("2026-12-01T18:00:00Z"),
     endsAt: Date = date("2026-12-01T20:00:00Z")
 ) -> DonorEvent {
@@ -23,7 +24,7 @@ private func makeEvent(
         id: id, slug: "slug-\(id)", title: "Event \(id)", type: "volunteer", venue: "Hall", city: "Austin",
         startsAt: startsAt, endsAt: endsAt, capacity: capacity, spotsLeft: spotsLeft, status: status,
         invitationNote: invitationNote, reportIssueURL: "mailto:help@dad.org", cancelled: cancelled,
-        bookingOpensAt: bookingOpensAt, earlyBooking: bookingOpensAt != nil
+        bookingOpensAt: bookingOpensAt, earlyBooking: earlyBooking
     )
 }
 
@@ -57,6 +58,41 @@ final class EventAvailabilityTests: XCTestCase {
         XCTAssertEqual(makeEvent(bookingOpensAt: opens).availability(now: date("2026-11-20T10:00:00Z")), .reservable(spotsLeft: 5))
     }
 
+    func testEarlyBookingDonorMayReserveBeforeItOpensToEveryone() {
+        // `early_booking` is true while THIS donor (a Team Captain) may book before the public opening (B-3).
+        let opens = date("2026-11-20T09:00:00Z")
+        XCTAssertEqual(makeEvent(bookingOpensAt: opens, earlyBooking: true).availability(now: now), .reservable(spotsLeft: 5))
+    }
+
+    func testStartedEventOffersNoNewReservation() {
+        let event = makeEvent(startsAt: date("2026-11-15T11:00:00Z"), endsAt: date("2026-11-15T14:00:00Z"))
+        XCTAssertEqual(event.availability(now: now), .started)
+        // ...but a donor who already holds a seat still sees it.
+        XCTAssertEqual(makeEvent(status: .reserved, startsAt: date("2026-11-15T11:00:00Z"), endsAt: date("2026-11-15T14:00:00Z")).availability(now: now), .reserved)
+    }
+
+    func testUncappedEventIsAlwaysReservable() {
+        let open = makeEvent(spotsLeft: 0, capacity: 0)
+        XCTAssertTrue(open.isUncapped)
+        XCTAssertEqual(open.availability(now: now), .reservable(spotsLeft: Int.max))
+        XCTAssertEqual(open.spotsLabel, "Open to everyone")
+    }
+
+    func testCancelUntilStartOnly() {
+        let held = makeEvent(status: .reserved)   // starts 2026-12-01T18:00Z
+        XCTAssertTrue(held.canCancel(now: now))
+        XCTAssertTrue(makeEvent(status: .waitlisted).canCancel(now: now))
+        XCTAssertFalse(held.canCancel(now: date("2026-12-01T18:00:00Z")))
+        XCTAssertFalse(makeEvent(status: .none).canCancel(now: now))
+        XCTAssertFalse(makeEvent(status: .reserved, cancelled: true).canCancel(now: now))
+    }
+
+    func testOnlyAHeldSeatCanAttemptCheckIn() {
+        XCTAssertTrue(makeEvent(status: .reserved).canAttemptCheckIn)
+        XCTAssertFalse(makeEvent(status: .waitlisted).canAttemptCheckIn)
+        XCTAssertFalse(makeEvent(status: .none).canAttemptCheckIn)
+    }
+
     func testSpotsLabel() {
         XCTAssertEqual(makeEvent(spotsLeft: 3).spotsLabel, "3 spots left")
         XCTAssertEqual(makeEvent(spotsLeft: 1).spotsLabel, "1 spot left")
@@ -73,6 +109,13 @@ final class InviteOnlyGatingTests: XCTestCase {
         XCTAssertFalse(makeEvent(invitationNote: nil).isInviteOnly)
     }
 
+    func testInviteOnlyTypeAloneMarksTheEvent() {
+        let event = DonorEvent(id: "x", slug: "x", title: "x", type: "invite_only", venue: "", city: "", startsAt: Date(), endsAt: Date(),
+                               capacity: 1, spotsLeft: 1, status: .none)
+        XCTAssertTrue(event.isInviteOnly)
+        XCTAssertEqual(event.typeLabel, "Invite-only")
+    }
+
     func testReservationStatusDecodesUnknownToNone() {
         XCTAssertEqual(ReservationStatus(contract: "reserved"), .reserved)
         XCTAssertEqual(ReservationStatus(contract: "checked_in"), .checkedIn)
@@ -86,25 +129,28 @@ final class CheckInWindowTests: XCTestCase {
     private let starts = date("2026-12-01T18:00:00Z")
     private let ends = date("2026-12-01T20:00:00Z")
 
-    func testWindowOpensAnHourBeforeStart() {
+    func testWindowOpensAtStartLikeTheContract() {
+        // Contract: check-in is accepted only between the event's start and end (no early grace).
         let window = CheckInWindow(startsAt: starts, endsAt: ends)
-        XCTAssertEqual(window.opensAt, date("2026-12-01T17:00:00Z"))
+        XCTAssertEqual(window.opensAt, starts)
     }
 
     func testTooEarlyBeforeWindow() {
         let window = CheckInWindow(startsAt: starts, endsAt: ends)
-        if case .tooEarly(let opensAt) = window.state(now: date("2026-12-01T16:30:00Z")) {
-            XCTAssertEqual(opensAt, date("2026-12-01T17:00:00Z"))
+        if case .tooEarly(let opensAt) = window.state(now: date("2026-12-01T17:30:00Z")) {
+            XCTAssertEqual(opensAt, starts)
         } else {
             XCTFail("expected tooEarly")
         }
-        XCTAssertFalse(window.isOpen(now: date("2026-12-01T16:30:00Z")))
+        XCTAssertFalse(window.isOpen(now: date("2026-12-01T17:30:00Z")))
+        XCTAssertFalse(window.isOpen(now: date("2026-12-01T17:59:59Z")))
     }
 
     func testOpenInsideWindow() {
         let window = CheckInWindow(startsAt: starts, endsAt: ends)
         XCTAssertTrue(window.isOpen(now: date("2026-12-01T18:30:00Z")))
-        XCTAssertTrue(window.isOpen(now: date("2026-12-01T17:15:00Z"))) // within early grace
+        XCTAssertTrue(window.isOpen(now: starts))   // inclusive at both ends
+        XCTAssertTrue(window.isOpen(now: ends))
     }
 
     func testTooLateAfterEnd() {
@@ -139,6 +185,8 @@ private actor FakeEventsService: EventsService {
     var checkInResult: CheckInResultValue
     var throwOnReserve: Error?
     var throwOnCheckIn: Error?
+    var throwOnList: Error?
+    private(set) var checkInCalls = 0
     /// What `event(id:)` returns after a mutation — lets a test model the waitlist→reserved promotion.
     var refreshed: [String: DonorEvent] = [:]
 
@@ -155,15 +203,21 @@ private actor FakeEventsService: EventsService {
     func setRefreshed(_ event: DonorEvent) { refreshed[event.id] = event }
     func setThrowOnReserve(_ error: Error?) { throwOnReserve = error }
     func setThrowOnCheckIn(_ error: Error?) { throwOnCheckIn = error }
+    func setThrowOnList(_ error: Error?) { throwOnList = error }
 
-    func events() async throws -> [DonorEvent] { list }
+    func events() async throws -> [DonorEvent] {
+        if let error = throwOnList { throw error }
+        return list
+    }
     func event(id: String) async throws -> DonorEvent { refreshed[id] ?? list.first { $0.id == id }! }
     func reserve(eventID: String) async throws -> ReservationOutcome {
         if let error = throwOnReserve { throw error }
         return reserveOutcome
     }
     func cancel(eventID: String) async throws {}
+    func calendar(eventID: String) async throws -> Data { Data("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".utf8) }
     func checkIn(code: String) async throws -> CheckInResultValue {
+        checkInCalls += 1
         if let error = throwOnCheckIn { throw error }
         return checkInResult
     }
@@ -203,6 +257,25 @@ final class EventsModelTests: XCTestCase {
         XCTAssertEqual(model.events.first?.status, .reserved)
     }
 
+    func testCancelledLoadKeepsPriorEventsAndPhase() async {
+        let service = FakeEventsService(list: [makeEvent(id: "e1")])
+        let model = EventsModel(service: service)
+        await model.load()
+        await service.setThrowOnList(CancellationError())
+        await model.load()
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.events.count, 1)
+    }
+
+    func testCancelledReserveIsNotAnActionError() async {
+        let service = FakeEventsService(list: [makeEvent(id: "e1")])
+        await service.setThrowOnReserve(URLError(.cancelled))
+        let model = EventsModel(service: service)
+        await model.load()
+        await model.reserve(eventID: "e1")
+        XCTAssertNil(model.actionError)
+    }
+
     func testReserveErrorSurfacesInlineWithoutLosingList() async {
         let service = FakeEventsService(list: [makeEvent(id: "e1")])
         await service.setThrowOnReserve(AccountError.unavailable)
@@ -220,28 +293,35 @@ final class CheckInModelTests: XCTestCase {
     private let window = CheckInWindow(startsAt: date("2026-12-01T18:00:00Z"), endsAt: date("2026-12-01T20:00:00Z"))
 
     func testRejectsBeforeWindowWithoutCallingService() async {
-        let model = CheckInModel(service: FakeEventsService(list: []))
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T16:00:00Z"))
-        if case .outsideWindow = model.state {} else { XCTFail("expected outsideWindow (too early)") }
+        let service = FakeEventsService(list: [])
+        let model = CheckInModel(service: service)
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T16:00:00Z"))
+        guard case .outsideWindow(let reason) = model.state else { return XCTFail("expected outsideWindow (too early)") }
+        XCTAssertTrue(reason.hasPrefix("Check-in opens "))
+        let calls = await service.checkInCalls
+        XCTAssertEqual(calls, 0)
     }
 
     func testRejectsAfterWindow() async {
-        let model = CheckInModel(service: FakeEventsService(list: []))
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T21:00:00Z"))
-        if case .outsideWindow = model.state {} else { XCTFail("expected outsideWindow (too late)") }
+        let service = FakeEventsService(list: [])
+        let model = CheckInModel(service: service)
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T21:00:00Z"))
+        XCTAssertEqual(model.state, .outsideWindow(reason: "Check-in for this event has closed."))
+        let calls = await service.checkInCalls
+        XCTAssertEqual(calls, 0)
     }
 
     func testChecksInInsideWindow() async {
         let service = FakeEventsService(list: [], checkInResult: CheckInResultValue(eventID: "e1", checkedIn: true, alreadyCheckedIn: false))
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T18:30:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T18:30:00Z"))
         XCTAssertEqual(model.state, .success(alreadyCheckedIn: false))
     }
 
     func testAlreadyCheckedInSurfaced() async {
         let service = FakeEventsService(list: [], checkInResult: CheckInResultValue(eventID: "e1", checkedIn: false, alreadyCheckedIn: true))
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T18:30:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T18:30:00Z"))
         XCTAssertEqual(model.state, .success(alreadyCheckedIn: true))
     }
 
@@ -249,7 +329,7 @@ final class CheckInModelTests: XCTestCase {
         let service = FakeEventsService(list: [])
         await service.setThrowOnCheckIn(AccountError.invalidResponse)
         let model = CheckInModel(service: service)
-        await model.submit(code: "QR123", window: window, now: date("2026-12-01T18:30:00Z"))
+        await model.submit(code: validCheckInToken, window: window, now: date("2026-12-01T18:30:00Z"))
         if case .failed = model.state {} else { XCTFail("expected failed") }
     }
 }

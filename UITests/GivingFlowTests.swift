@@ -3,7 +3,7 @@ import XCTest
 /// Phase C — the donor giving journey. Launches straight into the set-gift screen (a
 /// dedicated preview arg that doesn't disturb the signed-in donor-landing tests) and
 /// exercises the $1–$30/day stepper and the cancel confirmation.
-final class GivingFlowTests: XCTestCase {
+@MainActor final class GivingFlowTests: XCTestCase {
     func testSetGiftScreenRendersAndSteps() {
         let app = XCUIApplication()
         app.launchArguments = ["--preview-giving"]

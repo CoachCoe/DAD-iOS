@@ -4,7 +4,7 @@ import XCTest
 /// account-deletion flow iOS was missing. Launches straight into the signed-in settings screen
 /// via a dedicated preview arg. Covers: renders profile + toggles, the delete-account confirm
 /// gate stays disabled until the exact word is typed (§6.12), and sign-out leaves the shell.
-final class AccountSettingsFlowTests: XCTestCase {
+@MainActor final class AccountSettingsFlowTests: XCTestCase {
     func testSettingsRendersProfileAndToggles() {
         let app = XCUIApplication()
         app.launchArguments = ["--preview-settings"]
@@ -48,5 +48,48 @@ final class AccountSettingsFlowTests: XCTestCase {
         XCTAssertTrue(signout.waitForExistence(timeout: 3))
         signout.tap()
         XCTAssertTrue(app.staticTexts["settings-signed-out"].waitForExistence(timeout: 3))
+    }
+
+    func testConfirmedDeleteLeavesTheShell() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-settings"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["delete-start"].waitForExistence(timeout: 5))
+        app.buttons["delete-start"].tap()
+        let field = app.textFields["delete-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        field.tap()
+        field.typeText("DELETE")
+        app.buttons["delete-confirm"].tap()
+        XCTAssertTrue(app.staticTexts["settings-signed-out"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["delete-confirm"].exists)
+    }
+
+    func testKeepMyAccountBacksOutAndClearsTheTypedWord() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-settings"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["delete-start"].waitForExistence(timeout: 5))
+        app.buttons["delete-start"].tap()
+        let field = app.textFields["delete-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        field.tap()
+        field.typeText("DELETE")
+        app.buttons["Keep my account"].tap()
+        XCTAssertTrue(app.buttons["delete-start"].waitForExistence(timeout: 3))
+        app.buttons["delete-start"].tap()
+        XCTAssertFalse(app.buttons["delete-confirm"].waitForExistence(timeout: 1) && app.buttons["delete-confirm"].isEnabled,
+                       "the typed word must not survive backing out")
+    }
+
+    func testLargestAccessibilityTextStillReachesSignOut() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview-settings", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["settings-signout"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["delete-start"].exists)
     }
 }

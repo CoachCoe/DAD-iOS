@@ -687,6 +687,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -924,6 +927,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -1040,6 +1046,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -1444,6 +1453,9 @@
           "422": {
             "$ref": "#/components/responses/Unprocessable"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -1478,6 +1490,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -1597,6 +1612,9 @@
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -1639,6 +1657,9 @@
           },
           "422": {
             "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -1696,6 +1717,9 @@
           "422": {
             "$ref": "#/components/responses/Unprocessable"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -1752,6 +1776,9 @@
           "422": {
             "$ref": "#/components/responses/Unprocessable"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -1799,6 +1826,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -1947,6 +1977,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -1982,6 +2015,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -2093,6 +2129,93 @@
         }
       }
     },
+    "/donor/me/recurring/checkout": {
+      "post": {
+        "operationId": "startRecurringCheckout",
+        "summary": "Start a monthly gift in Stripe-hosted Checkout",
+        "description": "For a signed-in donor with no active or pending monthly gift. The donor's account supplies the email, so the body carries only the amount. Idempotent: retry with the same `Idempotency-Key` and amount to get the same session; a different amount under a used key is 409. Open `url` in the system browser (ASWebAuthenticationSession or a Custom Tab). Checkout returns to `<DONOR_NATIVE_RETURN_ORIGIN>/app/return?result=success&session_id=<session_id>` after payment, or `?result=cancel` if the donor backs out; the app may watch for that address. The gift becomes active only when Stripe's verified webhook arrives, so after returning poll GET /donor/me/recurring until `subscription` is present. Starting again while the donor's own earlier checkout is still open and unpaid, as when they closed the hosted page, does not lock them out: the same amount returns that session (201, same `url`, `session_id` and `expires_at`); a different amount expires it at Stripe and returns a new session. 409 means a monthly gift is active, the earlier checkout was paid just as this request arrived, or another start for this donor is mid-flight (retry). 503 also covers a failure to expire the earlier session: nothing changed, retry. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.",
+        "tags": [
+          "Recurring"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-rate-limit": "account",
+        "x-clients": [
+          "native"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "amount_minor": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "The monthly charge in integer USD cents: a whole number of dollars a day from $1 to $30, times 30 (3000 to 90000 in steps of 3000).",
+                    "minimum": 3000,
+                    "maximum": 90000,
+                    "multipleOf": 3000
+                  }
+                },
+                "required": [
+                  "amount_minor"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; open `url` in the system browser.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeCheckout"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/donor/me/payment-method": {
       "get": {
         "operationId": "paymentMethod",
@@ -2122,6 +2245,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -2623,26 +2749,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    {
-                      "type": "object",
-                      "description": "Browser request: the session is set only as the `dad_donor_session` cookie.",
-                      "properties": {
-                        "signed_in": {
-                          "type": "boolean",
-                          "const": true
-                        }
-                      },
-                      "required": [
-                        "signed_in"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "$ref": "#/components/schemas/NativeSession",
-                      "description": "Native request."
-                    }
-                  ]
+                  "$ref": "#/components/schemas/SignInResult"
                 }
               }
             },
@@ -2707,6 +2814,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -3066,6 +3176,9 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -3113,6 +3226,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -3148,7 +3264,10 @@
                 "properties": {
                   "token": {
                     "type": "string",
-                    "description": "The event's QR check-in token."
+                    "description": "The event's QR check-in token, exactly as the QR code encodes it: 66 characters, `<22 base64url characters>.<43 base64url characters>` (alphabet `A-Z a-z 0-9 - _`, one `.`), the event id then its HMAC-SHA256 signature. The same code serves every attendee. Pass it through unchanged; any other length or shape answers 422, as does a token for an event that is cancelled, not yet started, ended, or where the donor holds no seat.",
+                    "minLength": 66,
+                    "maxLength": 66,
+                    "pattern": "^[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}$"
                   }
                 },
                 "required": [
@@ -3172,6 +3291,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "415": {
             "$ref": "#/components/responses/UnsupportedMediaType"
@@ -3210,25 +3332,16 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "events": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/EventView"
-                      }
-                    }
-                  },
-                  "required": [
-                    "events"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/components/schemas/InviteOnlyEvents"
                 }
               }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -3278,6 +3391,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -3330,11 +3446,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -3388,11 +3510,17 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -3429,6 +3557,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -3463,6 +3594,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -3512,16 +3646,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "message"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/components/schemas/PartnerSignInLinkSent"
                 }
               }
             }
@@ -3636,6 +3761,10 @@
                 "schema": {
                   "type": "object",
                   "properties": {
+                    "user_id": {
+                      "type": "string",
+                      "description": "The calling partner user's own id, as listed by partnerUsers."
+                    },
                     "organization": {
                       "type": "string"
                     },
@@ -3705,6 +3834,7 @@
                     }
                   },
                   "required": [
+                    "user_id",
                     "organization",
                     "description",
                     "role",
@@ -3732,6 +3862,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -3889,6 +4022,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -3953,6 +4089,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -4024,6 +4163,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -4203,6 +4345,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -4242,6 +4387,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -4280,6 +4428,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -4415,17 +4566,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "signed_out": {
-                      "type": "boolean",
-                      "const": true
-                    }
-                  },
-                  "required": [
-                    "signed_out"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/components/schemas/PartnerSignedOut"
                 }
               }
             }
@@ -4586,6 +4727,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -4743,6 +4887,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -4793,6 +4940,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -4931,17 +5081,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "saved": {
-                      "type": "boolean",
-                      "const": true
-                    }
-                  },
-                  "required": [
-                    "saved"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/components/schemas/PartnerSaved"
                 }
               }
             }
@@ -4998,6 +5138,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -5051,6 +5194,9 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -5102,17 +5248,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "saved": {
-                      "type": "boolean",
-                      "const": true
-                    }
-                  },
-                  "required": [
-                    "saved"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/components/schemas/PartnerSaved"
                 }
               }
             }
@@ -5247,6 +5383,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -5423,6 +5562,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedByIngress"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -5433,7 +5575,7 @@
       "post": {
         "operationId": "postDonorSignup",
         "summary": "/donor/signup",
-        "description": "503 `EMAIL_UNCONFIGURED` when the deployment has no email. Never reveals whether the address exists. The link (`/account/claim#token=…`) is single-use and expires after 15 minutes; the app should handle it as a universal/app link and call POST /donor/claim.",
+        "description": "Starts account creation by emailing a verification link; no session is issued here. Answers 200 `{\"sent\":true}` whether or not the address already has an account, so it never reveals which. 503 `EMAIL_UNCONFIGURED` when the deployment has no email. The link (`/account/claim#token=…`) is single-use and expires after 15 minutes; the app should handle it as a universal/app link and call POST /donor/claim, which takes the optional `device_name` and `platform` that label the resulting session.",
         "tags": [
           "Account"
         ],
@@ -5475,21 +5617,12 @@
           }
         },
         "responses": {
-          "202": {
-            "description": "Accepted, whether or not the address has an account.",
+          "200": {
+            "description": "Link emailed (or silently not, for an address that already has a donor profile).",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "message"
-                  ],
-                  "additionalProperties": false
+                  "$ref": "#/components/schemas/SignupSent"
                 }
               }
             }
@@ -5519,7 +5652,7 @@
       "post": {
         "operationId": "postDonorPasswordSignIn",
         "summary": "/donor/password/sign-in",
-        "description": "Verifies the SMS code and signs the donor in. 401 covers a wrong, expired, or over-tried code and a phone with no account alike, so none reveals whether an account exists. 503 when no SMS provider is configured.",
+        "description": "Signs in with an email and password. 401 covers a wrong password, an unknown email, an unclaimed account and a disabled account alike, so none reveals whether an account exists. A browser request receives an HttpOnly cookie; a native request (`X-DAD-Client: native`, no Origin, no cookies) receives NativeSession and may describe its device so the donor can recognize the session later.",
         "tags": [
           "Account"
         ],
@@ -5543,6 +5676,19 @@
                   "password": {
                     "type": "string",
                     "maxLength": 72
+                  },
+                  "device_name": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "Native requests only, optional: the device's user-visible name, shown to the donor in their session list. Ignored for browser requests."
+                  },
+                  "platform": {
+                    "type": "string",
+                    "enum": [
+                      "IOS",
+                      "ANDROID"
+                    ],
+                    "description": "Native requests only, optional. Ignored for browser requests."
                   }
                 },
                 "required": [
@@ -5585,7 +5731,7 @@
       "post": {
         "operationId": "postDonorMePassword",
         "summary": "/donor/me/password",
-        "description": "Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. 409 when `version` is stale: re-read the profile and retry.",
+        "description": "Sets or changes the signed-in donor's password. `current_password` is required unless the session proved its password within the last 15 minutes; leave it empty when setting a first password right after signing in by email link. 401 means the session is missing, expired or revoked: sign in again. 422 with `code` `CURRENT_PASSWORD_INCORRECT` means the session is fine but `current_password` was missing or wrong: keep the donor signed in and let them retry (attempts are rate limited). Contract versions before 2.4 answered 401 with the same `detail` (\"The email or password is incorrect\"); a client that must still talk to such a server should treat that 401 on this route as a wrong current password when the access token is otherwise valid.",
         "tags": [
           "Donor"
         ],
@@ -5662,7 +5808,14 @@
             "$ref": "#/components/responses/UnsupportedMediaType"
           },
           "422": {
-            "$ref": "#/components/responses/Unprocessable"
+            "description": "The body or password is invalid (12 to 72 bytes), or `code` is `CURRENT_PASSWORD_INCORRECT` for a missing or wrong `current_password`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -5812,6 +5965,9 @@
           }
         }
       },
+      "RateLimitedByIngress": {
+        "description": "The ingress rate limit rejected the request before it reached the API. The body is not guaranteed to be JSON and `Retry-After` may be absent. Back off and retry."
+      },
       "NotFound": {
         "description": "No such record for this session, or no such route. A malformed record ID or referral code is also 404.",
         "content": {
@@ -5827,26 +5983,7 @@
         "content": {
           "application/json": {
             "schema": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "description": "Browser request: the session is set only as the `dad_donor_session` cookie.",
-                  "properties": {
-                    "signed_in": {
-                      "type": "boolean",
-                      "const": true
-                    }
-                  },
-                  "required": [
-                    "signed_in"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "$ref": "#/components/schemas/NativeSession",
-                  "description": "Native request."
-                }
-              ]
+              "$ref": "#/components/schemas/SignInResult"
             }
           }
         },
@@ -5871,11 +6008,12 @@
           },
           "code": {
             "type": "string",
-            "description": "Present only on a 503 for a feature this deployment has deliberately not configured. Such a 503 is not transient: do not retry; show the feature as unavailable.",
+            "description": "Present on a 503 for a feature this deployment has deliberately not configured (not transient: do not retry; show the feature as unavailable), and on the 422 of POST /donor/me/password when `current_password` is missing or wrong.",
             "enum": [
               "PAYMENTS_UNCONFIGURED",
               "EMAIL_UNCONFIGURED",
-              "SOURCE_STORAGE_UNCONFIGURED"
+              "SOURCE_STORAGE_UNCONFIGURED",
+              "CURRENT_PASSWORD_INCORRECT"
             ]
           },
           "errors": {
@@ -5883,7 +6021,7 @@
             "items": {
               "$ref": "#/components/schemas/PublicationProblem"
             },
-            "description": "Present only on a 422 from POST /donor/staff/content/publish: every problem found, up to 100."
+            "description": "Present only on a 422 from POST /donor/staff/founding-claims: every problem found, up to 100."
           }
         },
         "required": [
@@ -5896,7 +6034,7 @@
         "properties": {
           "sheet": {
             "type": "string",
-            "description": "`initiatives` or `ledger`, or empty for a request field named by `column`."
+            "description": "The spreadsheet the problem is in, or empty for a request field named by `column`."
           },
           "row": {
             "type": "integer",
@@ -6225,7 +6363,11 @@
                   "computed_at"
                 ],
                 "additionalProperties": false,
-                "description": "The donor's own ranking (S-4), or null when unranked."
+                "description": "The donor's own ranking (S-4), or null when unranked or opted out."
+              },
+              "rankings_opted_out": {
+                "type": "boolean",
+                "description": "True when the donor opted out of rankings. A null `rank` with this false means opted in but not yet ranked."
               },
               "network": {
                 "type": [
@@ -6267,6 +6409,7 @@
               "state",
               "streak",
               "rank",
+              "rankings_opted_out",
               "network",
               "impact"
             ],
@@ -7106,7 +7249,16 @@
                 "format": "date-time"
               },
               "status": {
-                "type": "string"
+                "type": "string",
+                "description": "Stripe's subscription status. `active`, `past_due` and `unpaid` renew; `incomplete` awaits the first payment; `canceled` and `incomplete_expired` have ended. Clients must tolerate a value not listed here and treat it as not active.",
+                "enum": [
+                  "active",
+                  "past_due",
+                  "unpaid",
+                  "incomplete",
+                  "canceled",
+                  "incomplete_expired"
+                ]
               },
               "stops_at": {
                 "type": [
@@ -7157,7 +7309,16 @@
             "format": "date-time"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "Stripe's subscription status. `active`, `past_due` and `unpaid` renew; `incomplete` awaits the first payment; `canceled` and `incomplete_expired` have ended. Clients must tolerate a value not listed here and treat it as not active.",
+            "enum": [
+              "active",
+              "past_due",
+              "unpaid",
+              "incomplete",
+              "canceled",
+              "incomplete_expired"
+            ]
           },
           "stops_at": {
             "type": [
@@ -7295,6 +7456,31 @@
         ],
         "additionalProperties": false
       },
+      "NativeCheckout": {
+        "type": "object",
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "description": "When the hosted page stops accepting payment; after this a new Idempotency-Key starts a new checkout.",
+            "format": "date-time"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "The Stripe Checkout session, echoed back on the return address."
+          },
+          "url": {
+            "type": "string",
+            "description": "Stripe-hosted Checkout page. Open it in the system browser.",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "expires_at",
+          "session_id",
+          "url"
+        ],
+        "additionalProperties": false
+      },
       "PaymentMethodStatus": {
         "type": "object",
         "properties": {
@@ -7396,6 +7582,28 @@
         ],
         "additionalProperties": false
       },
+      "SignInResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Browser request: the session is set only as the `dad_donor_session` cookie.",
+            "properties": {
+              "signed_in": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "signed_in"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "$ref": "#/components/schemas/NativeSession",
+            "description": "Native request."
+          }
+        ]
+      },
       "PasskeyList": {
         "type": "object",
         "properties": {
@@ -7487,7 +7695,8 @@
               "VOLUNTEER",
               "COMMUNITY",
               "INVITE_ONLY"
-            ]
+            ],
+            "description": "Event kind. Clients must tolerate a value not listed here."
           },
           "description": {
             "type": "string"
@@ -7508,6 +7717,10 @@
           "ends_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "time_zone": {
+            "type": "string",
+            "description": "IANA time zone of the venue, such as `America/New_York`. Show `starts_at` and `ends_at` in this zone, not the device's."
           },
           "capacity": {
             "type": "integer",
@@ -7532,7 +7745,15 @@
               "WAITLISTED",
               null
             ],
-            "description": "The signed-in donor's own status for this event; null on an anonymous read or no active reservation."
+            "description": "The signed-in donor's own status for this event; null on an anonymous read or no active reservation. Clients must tolerate a value not listed here."
+          },
+          "checked_in_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the signed-in donor checked in (E-8); null until they do, and on an anonymous read. `reservation_status` stays `RESERVED` after check-in."
           },
           "invitation_note": {
             "type": [
@@ -7576,9 +7797,11 @@
           "city",
           "starts_at",
           "ends_at",
+          "time_zone",
           "capacity",
           "spots_left",
           "reservation_status",
+          "checked_in_at",
           "invitation_note",
           "report_issue_url",
           "cancelled",
@@ -7734,6 +7957,21 @@
         ],
         "additionalProperties": false
       },
+      "InviteOnlyEvents": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventView"
+            }
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "additionalProperties": false
+      },
       "ReservationResult": {
         "type": "object",
         "description": "The outcome of a reserve or cancel (E-4).",
@@ -7744,7 +7982,8 @@
               "RESERVED",
               "WAITLISTED",
               "CANCELLED"
-            ]
+            ],
+            "description": "The donor's place after the call. Clients must tolerate a value not listed here."
           }
         },
         "required": [
@@ -7908,6 +8147,31 @@
         ],
         "additionalProperties": false
       },
+      "PartnerSignInLinkSent": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "PartnerSignedOut": {
+        "type": "object",
+        "properties": {
+          "signed_out": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "signed_out"
+        ],
+        "additionalProperties": false
+      },
       "TeamLeaderboardRow": {
         "type": "object",
         "properties": {
@@ -7941,6 +8205,19 @@
           "annualized_minor",
           "avg_streak_days",
           "volunteer_minutes"
+        ],
+        "additionalProperties": false
+      },
+      "PartnerSaved": {
+        "type": "object",
+        "properties": {
+          "saved": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "saved"
         ],
         "additionalProperties": false
       },
@@ -8020,6 +8297,19 @@
             ]
           }
         }
+      },
+      "SignupSent": {
+        "type": "object",
+        "properties": {
+          "sent": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "sent"
+        ],
+        "additionalProperties": false
       },
       "DADLiteralNull": {
         "type": "string",

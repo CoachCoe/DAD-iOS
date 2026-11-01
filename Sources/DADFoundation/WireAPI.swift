@@ -10,15 +10,44 @@ private final class NoRedirect: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
-private struct NativeHeaders: ClientMiddleware {
-    let access: String?
+/// The one URLSession shape every native call uses: ephemeral, no cookies/credential/URL cache,
+/// bounded timeouts, and redirects refused so a bearer can never be replayed to another location.
+func makeNativeTransport() -> any ClientTransport {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.httpShouldSetCookies = false
+    configuration.httpCookieStorage = nil
+    configuration.urlCredentialStorage = nil
+    configuration.urlCache = nil
+    configuration.timeoutIntervalForRequest = 20
+    configuration.timeoutIntervalForResource = 30
+    let session = URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)
+    return URLSessionTransport(configuration: .init(session: session))
+}
+
+extension HTTPField.Name {
+    // Valid by construction; asserting once here avoids a force-unwrap at every request.
+    fileprivate static let dadClient: HTTPField.Name = {
+        guard let name = HTTPField.Name("X-DAD-Client") else { preconditionFailure("invalid header name literal") }
+        return name
+    }()
+    fileprivate static let origin: HTTPField.Name = {
+        guard let name = HTTPField.Name("Origin") else { preconditionFailure("invalid header name literal") }
+        return name
+    }()
+}
+
+/// Native request shaping shared by session bootstrap and product calls: native client marker,
+/// no cookies, no Origin, a per-request bearer (nil for unauthenticated calls), and a response
+/// body bounded to 1 MiB.
+struct NativeHeaders: ClientMiddleware {
+    let access: @Sendable () async throws -> String?
     func intercept(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String,
                    next: @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)) async throws -> (HTTPResponse, HTTPBody?) {
         var request = request
-        request.headerFields[.init("X-DAD-Client")!] = "native"
+        request.headerFields[.dadClient] = "native"
         request.headerFields[.cookie] = nil
-        request.headerFields[.init("Origin")!] = nil
-        request.headerFields[.authorization] = access.map { "Bearer \($0)" }
+        request.headerFields[.origin] = nil
+        request.headerFields[.authorization] = try await access().map { "Bearer \($0)" }
         let (response, responseBody) = try await next(request, body, baseURL)
         guard let responseBody else { return (response, nil) }
         let bytes = try await ArraySlice<UInt8>(collecting: responseBody, upTo: 1_048_576)
@@ -33,19 +62,12 @@ public struct WireAPI: AccountAPI {
     public init(origin: URL) throws {
         guard origin.isBareHTTPSOrigin else { throw AccountError.invalidConfiguration }
         self.origin = origin
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 30
-        self.transport = URLSessionTransport(configuration: .init(session: URLSession(configuration: configuration, delegate: NoRedirect(), delegateQueue: nil)))
+        self.transport = makeNativeTransport()
     }
 
     init(origin: URL, transport: any ClientTransport) { self.origin = origin; self.transport = transport }
     private func client(_ access: String? = nil) -> Client {
-        Client(serverURL: origin, transport: transport, middlewares: [NativeHeaders(access: access)])
+        Client(serverURL: origin, transport: transport, middlewares: [NativeHeaders(access: { access })])
     }
     public func profile(access: String) async throws -> AccountProfile {
         switch try await client(access).profile(.init()) {
@@ -75,8 +97,5 @@ public struct WireAPI: AccountAPI {
     public func logout(access: String) async throws {
         guard case .ok = try await client(access).logout(.init()) else { throw AccountError.unavailable }
     }
-    private func credentials(_ value: Components.Schemas.NativeSession) throws -> Credentials {
-        guard !value.access_token.isEmpty, !value.refresh_token.isEmpty, value.expires_in > 0 else { throw AccountError.invalidResponse }
-        return Credentials(access: value.access_token, refresh: value.refresh_token, expiresAt: Date().addingTimeInterval(Double(value.expires_in)))
-    }
+    private func credentials(_ value: Components.Schemas.NativeSession) throws -> Credentials { try nativeCredentials(value) }
 }
