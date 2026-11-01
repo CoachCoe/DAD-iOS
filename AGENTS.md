@@ -19,6 +19,12 @@ these; this file only adds what they do not say.
 - Work on `dev`; ship via `dev` → PR → `main`. Never push to `main` directly.
 - Run `git commit` and `git push` as two separate commands.
 
+## Code comments
+
+- Comments explain **why** (a constraint, a trade-off, a non-obvious behavior), not what the
+  code already says.
+- No commented-out code (git keeps history). A `TODO` names a tracked issue.
+
 ## Gotchas not written in the docs
 
 - **`App/DADApp.swift` is a large hand-structured file — inserts are brace-error-prone.**
