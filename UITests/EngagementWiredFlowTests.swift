@@ -22,7 +22,7 @@ import XCTest
         let app = launch()
         openEngagement(app)
         XCTAssertTrue(app.staticTexts["badge-summary"].waitForExistence(timeout: 10))
-        XCTAssertEqual(app.staticTexts["badge-summary"].label, "2 of 5 earned")
+        XCTAssertEqual(app.staticTexts["badge-summary"].label, "3 of 6 earned")
         XCTAssertTrue(app.staticTexts["badge-invite-access"].exists, "an earned Founding Donor badge opens invite-only events")
 
         let founding = app.otherElements["badge-F"]
@@ -30,6 +30,9 @@ import XCTest
         XCTAssertTrue(founding.label.contains("earned"), founding.label)
         XCTAssertEqual(app.staticTexts["badge-perk-F"].label, "Perk: Invite-only founding events")
 
+        let city = app.otherElements["badge-CITY50"]
+        XCTAssertTrue(city.exists)
+        XCTAssertTrue(city.label.contains("Top 50 in Chicago"), "an earned city badge shows its display title: \(city.label)")
         let milestone = app.otherElements["badge-1K"]
         XCTAssertTrue(milestone.exists)
         XCTAssertTrue(milestone.label.contains("locked"), "locked is stated in text: \(milestone.label)")

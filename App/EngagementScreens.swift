@@ -106,7 +106,7 @@ struct EngagementHome: View {
                         Image(systemName: badge.earned ? "checkmark.seal.fill" : "lock.fill")
                             .foregroundStyle(badge.earned ? Color.dad("brand-ink") : .secondary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(badge.title).fontWeight(badge.earned ? .semibold : .regular)
+                            Text(badge.shownTitle).fontWeight(badge.earned ? .semibold : .regular)
                             Text(badge.earned ? earnedLine(badge) : badge.rule).font(.caption).foregroundStyle(.secondary)
                             if badge.hasPerk {
                                 Text("Perk: \(badge.perk)").font(.caption).foregroundStyle(.secondary)

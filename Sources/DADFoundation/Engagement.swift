@@ -18,16 +18,26 @@ public struct Badge: Sendable, Equatable, Hashable, Identifiable {
     public let perk: String
     public let earned: Bool
     public let earnedAt: Date?
+    /// Server-composed title for an earned badge (e.g. "Top 50 in Chicago"); empty when the server gave none.
+    public let displayTitle: String
 
     public var id: String { code }
 
-    public init(code: String, title: String, rule: String, perk: String, earned: Bool, earnedAt: Date? = nil) {
+    /// What the grid shows: the display title once earned (falling back to `title` when blank), else `title`.
+    public var shownTitle: String {
+        guard earned else { return title }
+        let trimmed = displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? title : displayTitle
+    }
+
+    public init(code: String, title: String, rule: String, perk: String, earned: Bool, earnedAt: Date? = nil, displayTitle: String = "") {
         self.code = code
         self.title = title
         self.rule = rule
         self.perk = perk
         self.earned = earned
         self.earnedAt = earnedAt
+        self.displayTitle = displayTitle
     }
 
     public var hasPerk: Bool { !perk.isEmpty }
@@ -46,7 +56,7 @@ public struct Badge: Sendable, Equatable, Hashable, Identifiable {
 
     /// A text-only statement of state, so the grid conveys earned/locked without colour.
     public var accessibilityLabel: String {
-        earned ? "\(title), earned" : "\(title), locked. \(rule)"
+        earned ? "\(shownTitle), earned" : "\(title), locked. \(rule)"
     }
 
     /// The state statement plus the perk, for the grid row that reads as one element.

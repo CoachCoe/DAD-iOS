@@ -317,14 +317,14 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
 
     // MARK: engagement
 
-    private static let badges = #"{"badges":[{"code":"F","title":"Founding Donor","rule":"Start a monthly gift before January 2027, or join the website waitlist","perk":"FOUNDING_EVENTS","earned":true,"earned_at":"2026-09-02T10:00:00Z","artwork":"f"},{"code":"7","title":"One Week","rule":"Reach a 7-day streak","perk":"","earned":true,"earned_at":"2026-10-14T10:00:00Z","artwork":"7"},{"code":"30","title":"One Month","rule":"Reach a 30-day streak","perk":"","earned":false,"earned_at":null,"artwork":"30"},{"code":"1K","title":"1,000 Days","rule":"Reach a 1,000-day streak","perk":"MILESTONE_EVENTS","earned":false,"earned_at":null,"artwork":"1k"},{"code":"TC","title":"Team Captain","rule":"Twenty people you invited complete a gift","perk":"TEAM_CAPTAIN","earned":false,"earned_at":null,"artwork":"tc"}]}"#
+    private static let badges = #"{"badges":[{"code":"F","title":"Founding Donor","rule":"Start a monthly gift before January 2027, or join the website waitlist","perk":"FOUNDING_EVENTS","earned":true,"earned_at":"2026-09-02T10:00:00Z","artwork":"f","city":null,"display_title":"Founding Donor"},{"code":"7","title":"One Week","rule":"Reach a 7-day streak","perk":"","earned":true,"earned_at":"2026-10-14T10:00:00Z","artwork":"7","city":null,"display_title":"One Week"},{"code":"30","title":"One Month","rule":"Reach a 30-day streak","perk":"","earned":false,"earned_at":null,"artwork":"30","city":null,"display_title":"One Month"},{"code":"1K","title":"1,000 Days","rule":"Reach a 1,000-day streak","perk":"MILESTONE_EVENTS","earned":false,"earned_at":null,"artwork":"1k","city":null,"display_title":"1,000 Days"},{"code":"TC","title":"Team Captain","rule":"Twenty people you invited complete a gift","perk":"TEAM_CAPTAIN","earned":false,"earned_at":null,"artwork":"tc","city":null,"display_title":"Team Captain"},{"code":"CITY50","title":"Top 50 City","rule":"Rank in the top 50 donors in your city","perk":"","earned":true,"earned_at":"2026-10-20T10:00:00Z","artwork":"c50","city":"Chicago","display_title":"Top 50 in Chicago"}]}"#
     private static let network = #"{"active_count":3,"annualized_minor":474500,"next_milestone":{"label":"Team Captain","target":20,"remaining":17},"invitees":[{"name":"Sam L","active":true},{"name":"Jo P","active":false}],"anonymous_active":1}"#
     private static let conversions = #"{"conversions":[{"converted_at":"2026-10-20T10:00:00Z","kind":"LINK"},{"converted_at":"2026-10-02T10:00:00Z","kind":"IRL"}],"more":false}"#
     private static let spend = #"{"initiative_id":"11111111-1111-4111-8111-111111111111","total_minor":125000,"categories":[{"category":"Food","amount_minor":90000},{"category":"Delivery","amount_minor":35000}]}"#
 
     private func sharingJSON() -> String {
-        guard let name = lock.withLock({ publicName }) else { return #"{"public_name":null,"link":null,"irl_link":null}"# }
-        return #"{"public_name":"\#(name)","link":"https://stub.invalid/r/ALEX42","irl_link":"https://stub.invalid/r/ALEX42?via=irl"}"#
+        guard let name = lock.withLock({ publicName }) else { return #"{"public_name":null,"link":null,"irl_link":null,"referral_code":null}"# }
+        return #"{"public_name":"\#(name)","link":"https://stub.invalid/r/ALEX42","irl_link":"https://stub.invalid/r/ALEX42?via=irl","referral_code":"ALEX42"}"#
     }
 
     /// The dashboard with the donor's current rankings choice applied: opted out hides the rank, as the server does.
