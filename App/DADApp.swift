@@ -276,11 +276,11 @@ private final class AccountModel {
         if let now = gate.receive(target, signedIn: signedIn) { destination = now }
     }
     /// A sign-in link pasted from the "check your email" screen (the email may have been opened on
-    /// another device or in a browser). Only a plain claim link is accepted; it goes through the
+    /// another device or in a browser). A claim link, including its supported return path, goes through the
     /// same single-use proof exchange as a tapped link. Returns false when the text is not one.
     func openPastedLink(_ text: String) -> Bool {
         guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let intent = router?.route(url), case .claim(_, let next) = intent, next == nil else { return false }
+              let intent = router?.route(url), case .claim = intent else { return false }
         notice = nil
         return receive(url, role: nil) == nil
     }
@@ -298,19 +298,20 @@ private final class AccountModel {
             case .partner: return nil
             case .donor: return url
             }
-        case .account(.profile):
+        case .account(let target):
+            if role == .partner { return url }
             let signedIn: Bool
             if case .ready = state { signedIn = true } else { signedIn = false }
-            if let now = gate.receive(.profile, signedIn: signedIn) { destination = now }
+            if let now = gate.receive(target, signedIn: signedIn) { destination = now }
             Task { await load() }
             return nil
         case .claim(let token, let next):
-            // Preserve the website's proof exchange for destinations this preview does not implement.
-            if next != nil { return url }
+            if role == .partner { return url }
             guard let session, !preview else { return url }
             let digest = SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
             guard activeProof == nil, completedProof != digest else { return nil }
             activeProof = digest
+            if let next { _ = gate.receive(next, signedIn: false) }
             generation += 1
             state = .loading
             Task {

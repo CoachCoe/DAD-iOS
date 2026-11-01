@@ -70,8 +70,8 @@ admins edit the organization profile, workforce size and logo, invite and remove
 code and export or re-download PDF reports. Analytics and push are described below. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
-website in Safari, without sending bearer credentials. Claim links with a web-only next
-destination stay on the web before their one-use proof is consumed.
+website in Safari, without sending bearer credentials. Claim links with supported dashboard or payment-method return destinations are
+claimed in-app and open the requested native screen.
 
 ### Switching on Apple, Google and passkeys
 

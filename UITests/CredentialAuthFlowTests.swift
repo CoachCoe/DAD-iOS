@@ -54,7 +54,7 @@ import XCTest
         let paste = app.textFields["Paste your sign-in link"]
         paste.tap()
         paste.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "https://example.com/not-ours".count))
-        paste.typeText(stubClaimLink)
+        paste.typeText(stubClaimLink + "&next=/account/dashboard")
         app.buttons["signup-continue"].tap()
 
         XCTAssertTrue(app.buttons["open-settings"].waitForExistence(timeout: 15), "claiming the link must land in the donor shell")
