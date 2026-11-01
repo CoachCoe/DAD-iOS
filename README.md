@@ -29,7 +29,7 @@ AppIntents metadata-extraction diagnostic is not suppressed; this app defines no
 
 ## Shared contract and native boundaries
 
-`foundation.lock.json` pins mobile foundation 2.5.0 and its manifest digest. The vendored
+`foundation.lock.json` pins mobile foundation 2.9.0 and its manifest digest. The vendored
 release is verified before generation. `prepare-client.mjs` copies the Swift generator input, null-only Codable adapter, tokens,
 and link policy into ignored generator inputs. Apple's pinned Swift generator produces
 types and a client during the build, scoped to profile, claim, refresh, and logout.
@@ -60,8 +60,12 @@ and passkeys (see below). Also wired (P2, donor home reads): the dashboard (`das
 30-day bar and next milestone, rank line, total given, network, referral totals; `preparing` and the
 null/unknown figures are shown as such, never as zero), today's initiative (`todayInitiative`, 404 = nothing
 in rotation), paged gift history (`gifts`, 50 a page, capped at 500 rows in memory) with a per-gift record
-(`receipt`) and the calendar-year total (`annualSummary`). Engagement is wired too (see Engagement). Still on
-in-memory previews and not wired: the partner portal, push registration and analytics upload. Partner sign-in is not wired yet. Native entry hooks
+(`receipt`) and the calendar-year total (`annualSummary`). Engagement is wired too (see Engagement). The
+partner portal is wired: an approved partner user signs in with an emailed link (`partnerRequestSignIn`, then
+`partnerAcceptInvite` from the tapped or pasted `/partner/accept` link), and the 12-hour partner session is kept
+in its own Keychain item. The portal reads the overview, initiatives, spend, our-people rollup and teams;
+admins edit the organization profile, workforce size and logo, invite and remove users, share the company
+code and export or re-download PDF reports. Still not wired: push registration and analytics upload. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with a web-only next

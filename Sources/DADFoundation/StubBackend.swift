@@ -19,7 +19,9 @@ import OpenAPIRuntime
 /// `deletionBlocked` (409) or while a monthly gift is still set to renew (`GiftScenario`), after which the
 /// account is gone (profile -> 401). The giving reads/commands (recurring, amount, cancel, payment method)
 /// follow a stateful gift: the hosted Stripe pages are stubbed by the UI (`completeHandoff` plays the
-/// "payment finished" webhook), so the REAL `WireGiving` conformer runs end to end.
+/// "payment finished" webhook), so the REAL `WireGiving` conformer runs end to end. Partner sign-in links are
+/// accepted for tokens starting `stubpartner` (anything else is the server's 422 "invalid or expired"); the
+/// portal is an ADMIN at Acme with two users, one unverified figure, an earlier export and no logo.
 public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Credentials?
@@ -66,6 +68,9 @@ public enum StubBackend {
         public let engagement: any EngagementService
         public let management: any AccountManagementService
         public let wallet: any WalletPassService
+        public let partnerAuth: WirePartnerAuth
+        public let partner: WirePartner
+        public let partnerSession: PartnerSession
         /// Plays the Stripe webhook after the stubbed hosted page "finishes" (a gift starts, a card is applied).
         public let completeHandoff: @Sendable (HostedHandoff.Purpose) -> Void
     }
@@ -73,12 +78,14 @@ public enum StubBackend {
     /// `signedIn` starts with a stored session (as after a relaunch), skipping the phone sign-in dance.
     public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, gift: GiftScenario = .none,
                             events: EventsScenario = .standard, engagement: EngagementScenario = .standard, signedIn: Bool = false,
-                            onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
+                            partnerSignedIn: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
         let transport = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift, events: events,
                                       engagement: engagement)
         let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore(signedIn ? Credentials(
             access: "stub-access-0", refresh: "stub-refresh-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx", expiresAt: Date().addingTimeInterval(900)) : nil))
         let product = ProductClient(origin: origin, transport: transport, session: session)
+        let partnerSession = try PartnerSession(store: InMemoryCredentialStore(partnerSignedIn ? Credentials(
+            access: "stub-partner-0", refresh: "", expiresAt: Date().addingTimeInterval(PartnerSession.lifetime)) : nil))
         return Services(
             session: session,
             signIn: WireAuth(origin: origin, transport: transport),
@@ -91,6 +98,9 @@ public enum StubBackend {
             engagement: WireEngagement(product: product),
             management: WireAccountManagement(product: product),
             wallet: WireWalletPass(product: product),
+            partnerAuth: WirePartnerAuth(origin: origin, transport: transport, session: partnerSession),
+            partner: WirePartner(origin: origin, transport: transport, session: partnerSession),
+            partnerSession: partnerSession,
             completeHandoff: { transport.completeHandoff($0) })
     }
 }
@@ -113,6 +123,14 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private var deleted = false
     private var version = 3
     private var storedPassword = "correct horse battery"
+    private var partnerOrg = "Acme Corp"
+    private var partnerAbout = "Doing good together."
+    private var partnerWorkforce = 240
+    private var partnerLogo: Data?
+    private var partnerUsers = [#"{"id":"u1","email":"ada@acme.com","name":"Ada Admin","role":"ADMIN"}"#,
+                                #"{"id":"u2","email":"val@acme.com","name":"Val Viewer","role":"VIEWER"}"#]
+    // r1 is listed as downloadable but has aged out on the server: downloading it is the 404 path.
+    private var partnerExports = [#"{"id":"r1","committed_minor":4000000,"deployed_minor":2000000,"people_reached":9000,"exported_by":"Ada Admin","created_at":"2026-09-01T10:00:00Z","downloadable":true,"people_reached_verified":true}"#]
     private var prefs: [String: Bool] = [
         "referral_emails": true, "marketing_emails": false, "push_referral_converted": true, "push_streak_at_risk": true,
         "push_streak_milestone": true, "push_streak_lapsed": true, "push_badge_earned": true, "push_event_nearby": false,
@@ -369,6 +387,84 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         }
     }
 
+    private func partner(_ request: HTTPRequest, _ payload: String,
+                         _ reply: (HTTPResponse.Status, String) -> (HTTPResponse, HTTPBody?)) -> (HTTPResponse, HTTPBody?)? {
+        guard let path = request.path, path.hasPrefix("/donor/partner/") else { return nil }
+        let fields = Self.object(payload)
+        switch (request.method, path) {
+        case (.post, "/donor/partner/sign-in"):
+            let email = fields["email"] as? String ?? ""
+            return email.contains("@") ? reply(.accepted, #"{"message":"stub"}"#) : reply(.unprocessableContent, "{}")
+        case (.post, "/donor/partner/accept-invite"):
+            let token = fields["invite"] as? String ?? ""
+            return token.hasPrefix("stubpartner") ? reply(.ok, #"{"session":"stub-partner-1"}"#) : reply(.unprocessableContent, "{}")
+        default: break
+        }
+        guard request.headerFields[.authorization]?.hasPrefix("Bearer stub-partner-") == true else { return reply(.unauthorized, "{}") }
+        let pdf = { (HTTPResponse(status: .ok, headerFields: [.contentType: "application/pdf"]), HTTPBody("%PDF-1.4 stub")) }
+        switch (request.method, path) {
+        case (.get, "/donor/partner/overview"):
+            let (organization, description, workforce, hasLogo) = lock.withLock { (partnerOrg, partnerAbout, partnerWorkforce, partnerLogo != nil) }
+            return reply(.ok, #"{"user_id":"u1","organization":\#(Self.quoted(organization)),"description":\#(Self.quoted(description)),"role":"ADMIN","company_code":"ACME","committed_minor":5000000,"deployed_minor":3000000,"deployed_percent":60,"people_reached":12400,"employees_enrolled":86,"workforce_size":\#(workforce),"enrolled_percent":35,"updated_at":"2026-10-28T10:00:00Z","has_logo":\#(hasLogo),"committed_verified":true,"deployed_verified":false,"people_reached_verified":true}"#)
+        case (.get, "/donor/partner/initiatives"):
+            return reply(.ok, #"{"initiatives":[{"id":"i1","title":"Clean Water West","summary":"Wells across 6 counties.","status":"ACTIVE","region":"West","county_count":6,"committed_minor":2000000,"deployed_minor":1200000,"metrics":[{"label":"People reached","value":8400,"unit":"PEOPLE","verified_on":"2026-10-20"}],"spend":[{"category":"Water","amount_minor":1200000}],"updated_at":"2026-10-28T10:00:00Z"}]}"#)
+        case (.get, "/donor/partner/spend"):
+            return reply(.ok, #"{"categories":[{"category":"Water","amount_minor":1800000},{"category":"Housing","amount_minor":1200000}]}"#)
+        case (.get, "/donor/partner/our-people"):
+            let workforce = lock.withLock { partnerWorkforce }
+            return reply(.ok, #"{"enrolled":86,"workforce_size":\#(workforce),"given_minor":940000,"matched_minor":470000,"avg_streak_days":42,"volunteer_minutes":6300,"teams":2,"suppressed":false}"#)
+        case (.get, "/donor/partner/teams"):
+            return reply(.ok, #"{"teams":[{"team_id":"t1","name":"Engineering","active_givers":31,"annualized_minor":1200000,"avg_streak_days":40,"volunteer_minutes":1200},{"team_id":"t2","name":"Sales","active_givers":12,"annualized_minor":600000,"avg_streak_days":18,"volunteer_minutes":300}]}"#)
+        case (.get, "/donor/partner/users"):
+            return reply(.ok, #"{"users":[\#(lock.withLock { partnerUsers }.joined(separator: ","))]}"#)
+        case (.post, "/donor/partner/users"):
+            guard let email = fields["email"] as? String, email.contains("@"), let name = fields["name"] as? String, !name.isEmpty,
+                  let role = fields["role"] as? String else { return reply(.unprocessableContent, "{}") }
+            if email.hasPrefix("taken") { return reply(.conflict, "{}") }
+            lock.withLock { partnerUsers.append(#"{"id":"u\#(partnerUsers.count + 1)","email":\#(Self.quoted(email)),"name":\#(Self.quoted(name)),"role":"\#(role)"}"#) }
+            return reply(.ok, #"{"invited":true}"#)
+        case (.post, _) where path.hasPrefix("/donor/partner/users/") && path.hasSuffix("/remove"):
+            let id = path.dropFirst("/donor/partner/users/".count).dropLast("/remove".count)
+            lock.withLock { partnerUsers.removeAll { $0.contains(#""id":"\#(id)""#) } }
+            return reply(.ok, #"{"removed":true}"#)
+        case (.post, "/donor/partner/profile"):
+            guard let organization = fields["organization"] as? String, (1...200).contains(organization.count),
+                  let description = fields["description"] as? String else { return reply(.unprocessableContent, "{}") }
+            lock.withLock { partnerOrg = organization; partnerAbout = description }
+            return reply(.ok, #"{"saved":true}"#)
+        case (.post, "/donor/partner/workforce"):
+            guard let size = fields["workforce_size"] as? Int else { return reply(.unprocessableContent, "{}") }
+            lock.withLock { partnerWorkforce = size }
+            return reply(.ok, #"{"saved":true}"#)
+        case (.get, "/donor/partner/logo"):
+            guard let logo = lock.withLock({ partnerLogo }) else { return reply(.notFound, "{}") }
+            return (HTTPResponse(status: .ok, headerFields: [.contentType: "image/png"]), HTTPBody(logo))
+        case (.post, "/donor/partner/logo"):
+            let dataURL = fields["data_url"] as? String ?? ""
+            let logo = dataURL.isEmpty ? nil : Data(base64Encoded: String(dataURL.drop { $0 != "," }.dropFirst()))
+            if !dataURL.isEmpty && logo == nil { return reply(.unprocessableContent, "{}") }
+            lock.withLock { partnerLogo = logo }
+            return reply(.ok, #"{"saved":true}"#)
+        case (.get, "/donor/partner/exports"):
+            return reply(.ok, #"{"exports":[\#(lock.withLock { partnerExports }.joined(separator: ","))]}"#)
+        case (.get, "/donor/partner/report.pdf"):
+            lock.withLock {
+                partnerExports.insert(#"{"id":"r\#(partnerExports.count + 1)","committed_minor":5000000,"deployed_minor":3000000,"people_reached":12400,"exported_by":"Ada Admin","created_at":"2026-11-01T10:00:00Z","downloadable":true,"people_reached_verified":true}"#, at: 0)
+            }
+            return pdf()
+        case (.get, _) where path.hasPrefix("/donor/partner/reports/"):
+            return path.contains("/r1/") ? (HTTPResponse(status: .notFound, headerFields: [.contentType: "application/json"]), HTTPBody(#"{"detail":"stub"}"#)) : pdf()
+        case (.post, "/donor/partner/sign-out"): return reply(.ok, #"{"signed_out":true}"#)
+        case (.post, "/donor/partner/push-device"), (.post, "/donor/partner/push-device/unregister"):
+            return reply(.ok, #"{"registered":false,"platform":null,"environment":null}"#)
+        default: return reply(.notFound, "{}")
+        }
+    }
+
+    private static func quoted(_ text: String) -> String {
+        String(decoding: (try? JSONEncoder().encode(text)) ?? Data(#""""#.utf8), as: UTF8.self)
+    }
+
     private func management(_ request: HTTPRequest, _ payload: String, authorized: Bool,
                             _ reply: (HTTPResponse.Status, String) -> (HTTPResponse, HTTPBody?)) -> (HTTPResponse, HTTPBody?)? {
         guard let path = request.path, request.method == .post || request.method == .get else { return nil }
@@ -531,6 +627,7 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         if let response = events(request, payload, authorized: authorized, reply) { return response }
         if let response = engagement(request, payload, authorized: authorized, reply) { return response }
         if let response = management(request, payload, authorized: authorized && !isDeleted, reply) { return response }
+        if let response = partner(request, payload, reply) { return response }
         switch (request.method, request.path ?? "") {
         case (.post, "/donor/phone/sign-in/options"): return reply(.ok, #"{"sent":true}"#)
         case (.post, "/donor/phone/sign-in"):

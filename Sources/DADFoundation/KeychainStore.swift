@@ -3,10 +3,15 @@ import Security
 
 public struct KeychainStore: CredentialStore {
     private let service: String
-    public init(service: String) { self.service = service }
+    private let account: String
+    /// `account` names the item, so the donor and partner sessions are stored apart.
+    public init(service: String, account: String = "donor-session") {
+        self.service = service
+        self.account = account
+    }
     private var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-         kSecAttrAccount as String: "donor-session", kSecAttrSynchronizable as String: false]
+         kSecAttrAccount as String: account, kSecAttrSynchronizable as String: false]
     }
     public func load() throws -> Credentials? {
         var q = query

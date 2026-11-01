@@ -11,12 +11,15 @@ public enum LinkIntent: Sendable, Equatable, CustomStringConvertible, CustomDebu
     case account(AccountDestination)
     case claim(token: String, next: AccountDestination?)
     case emailChange(token: String)
+    /// An emailed partner sign-in link (`/partner/accept#token=`).
+    case partnerSignIn(token: String)
     case web(URL)
     public var description: String {
         switch self {
         case .account(let destination): "Account(\(destination.rawValue))"
         case .claim: "Claim([redacted])"
         case .emailChange: "EmailChange([redacted])"
+        case .partnerSignIn: "PartnerSignIn([redacted])"
         case .web: "WebLink([redacted])"
         }
     }
@@ -26,6 +29,7 @@ public enum LinkIntent: Sendable, Equatable, CustomStringConvertible, CustomDebu
 private struct LinkPolicy: Decodable, Sendable {
     let accountPaths: [String]
     let proofPaths: [String]
+    let partnerProofPaths: [String]
     let claimReturnPaths: [String]
     let notificationPaths: [String]
 }
@@ -55,16 +59,14 @@ public struct LinkRouter: Sendable {
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               !parts.percentEncodedPath.lowercased().contains("%2f"),
               !parts.percentEncodedPath.lowercased().contains("%5c") else { return nil }
+        if policy.partnerProofPaths.contains(url.path) {
+            guard url.query == nil, let token = Self.singleToken(parts.fragment, allowNext: false) else { return nil }
+            return .partnerSignIn(token: token)
+        }
         if policy.proofPaths.contains(url.path) {
-            guard url.query == nil, let fragment = parts.fragment,
-                  let values = URLComponents(string: "?" + fragment)?.queryItems,
-                  values.filter({ $0.name == "token" }).count == 1,
-                  let token = values.first(where: { $0.name == "token" })?.value,
-                  (32...128).contains(token.count), token.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil,
-                  values.allSatisfy({ $0.name == "token" || (url.path == "/account/claim" && $0.name == "next") }),
-                  values.filter({ $0.name == "next" }).count <= 1 else { return nil }
+            guard url.query == nil, let token = Self.singleToken(parts.fragment, allowNext: url.path == "/account/claim") else { return nil }
             if url.path == "/account/email-change" { return .emailChange(token: token) }
-            let next = values.first(where: { $0.name == "next" })?.value
+            let next = parts.fragment.flatMap { URLComponents(string: "?" + $0)?.queryItems }?.first(where: { $0.name == "next" })?.value
             if let next, !policy.claimReturnPaths.contains(next) { return nil }
             return .claim(token: token, next: next.flatMap(AccountDestination.init(rawValue:)))
         }
@@ -72,6 +74,17 @@ public struct LinkRouter: Sendable {
            let destination = AccountDestination(rawValue: url.path) { return .account(destination) }
         return .web(url)
     }
+    /// The fragment's one well-formed `token` (and, on a claim link, at most one `next`), or nil.
+    private static func singleToken(_ fragment: String?, allowNext: Bool) -> String? {
+        guard let fragment, let values = URLComponents(string: "?" + fragment)?.queryItems,
+              values.filter({ $0.name == "token" }).count == 1,
+              let token = values.first(where: { $0.name == "token" })?.value,
+              (32...128).contains(token.count), token.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil,
+              values.allSatisfy({ $0.name == "token" || (allowNext && $0.name == "next") }),
+              values.filter({ $0.name == "next" }).count <= 1 else { return nil }
+        return token
+    }
+
     public func notification(path: String) -> AccountDestination? {
         guard policy.notificationPaths.contains(path) else { return nil }
         return AccountDestination(rawValue: path)

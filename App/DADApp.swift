@@ -71,6 +71,14 @@ private final class AccountModel {
     private(set) var engagementService: (any EngagementService)?
     /// The referral code as an Apple Wallet pass; nil in previews.
     private(set) var walletService: (any WalletPassService)?
+    /// The partner portal under its own 12-hour session; nil when this build cannot reach DAD.
+    private(set) var partnerService: (any PartnerService)?
+    private(set) var partnerSignIn: (any PartnerSignInService)?
+    private var partnerSession: PartnerSession?
+    /// The public site, for links the app hands out (the partner's company sign-up link).
+    private(set) var publicOrigin: URL?
+    /// A tapped partner sign-in link waiting for the partner sign-in screen to accept it.
+    var pendingPartnerToken: String?
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
@@ -88,6 +96,7 @@ private final class AccountModel {
     /// recovery states) is the right place to wait. A session with nothing stored goes straight to sign-in.
     var hasRestorableSession: Bool { session?.restoredCredentials == true }
     func makeSettings() -> (any AccountSettingsService)? { settingsService }
+    func hasPartnerSession() async -> Bool { await partnerSession?.isSignedIn ?? false }
     /// Runs sign-in verification INSIDE the session so it owns the await and the epoch guard.
     func establish() -> PhoneSignInModel.Establish {
         guard let session else { return { _ in throw AccountError.invalidConfiguration } }
@@ -105,8 +114,15 @@ private final class AccountModel {
         #else
         let stubRouter: LinkRouter? = nil
         #endif
-        router = stubRouter ?? (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String)
-            .flatMap(URL.init(string:)).flatMap { try? LinkRouter(publicOrigin: $0) }
+        let configuredPublicOrigin = (Bundle.main.object(forInfoDictionaryKey: "DADPublicOrigin") as? String).flatMap(URL.init(string:))
+        router = stubRouter ?? configuredPublicOrigin.flatMap { try? LinkRouter(publicOrigin: $0) }
+        publicOrigin = stubRouter == nil ? configuredPublicOrigin : StubBackend.origin
+        #if DEBUG
+        if preview {
+            partnerSignIn = PreviewPartnerSignIn()
+            partnerService = PreviewPartner(role: launchFlag("--preview-partner-viewer") ? .viewer : .admin)
+        }
+        #endif
         #if DEBUG
         if launchFlag("--stub-backend") {
             // The REAL conformers (WireAuth, WireAPI, WireAccountSettings, AccountSession) run on a
@@ -124,6 +140,7 @@ private final class AccountModel {
                 let services = try StubBackend.make(deletionBlocked: launchFlag("--stub-delete-blocked"), scenario: scenario, gift: gift,
                                                     events: eventScenario, engagement: engagementScenario,
                                                     signedIn: launchFlag("--stub-signed-in"),
+                                                    partnerSignedIn: launchFlag("--stub-partner-signed-in"),
                                                     onLocalWipe: { DefaultsAttributionStore().clear() })
                 session = services.session
                 kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, link: services.credentialAuth,
@@ -136,6 +153,9 @@ private final class AccountModel {
                 eventsService = services.events
                 engagementService = services.engagement
                 walletService = services.wallet
+                partnerService = services.partner
+                partnerSignIn = services.partnerAuth
+                partnerSession = services.partnerSession
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 state = .loading
             } catch { session = nil; state = .unavailable }
@@ -192,6 +212,10 @@ private final class AccountModel {
                 eventsService = try WireEvents(origin: origin, session: built)
                 engagementService = try WireEngagement(origin: origin, session: built)
                 walletService = try WireWalletPass(origin: origin, session: built)
+                let partner = try PartnerSession(store: KeychainStore(service: service, account: "partner-session"))
+                partnerSignIn = try WirePartnerAuth(origin: origin, session: partner)
+                partnerService = try WirePartner(origin: origin, session: partner)
+                partnerSession = partner
                 session = built
             }
         } catch {
@@ -220,12 +244,22 @@ private final class AccountModel {
         guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
               let intent = router?.route(url), case .claim(_, let next) = intent, next == nil else { return false }
         notice = nil
-        return receive(url) == nil
+        return receive(url, role: nil) == nil
     }
 
-    func receive(_ url: URL) -> URL? {
+    /// Routes a tapped link for the signed-in `role` (nil before sign-in); returns a URL for the web
+    /// fallback when the app does not handle it here.
+    func receive(_ url: URL, role: AppRole?) -> URL? {
         guard let intent = router?.route(url) else { return nil }
         switch intent {
+        case .partnerSignIn(let token):
+            // A partner already in the portal stays put; a donor's app cannot also be a partner's, so the
+            // website takes the link.
+            switch role {
+            case nil: pendingPartnerToken = token; return nil
+            case .partner: return nil
+            case .donor: return url
+            }
         case .account(.profile):
             let signedIn: Bool
             if case .ready = state { signedIn = true } else { signedIn = false }
@@ -315,17 +349,6 @@ private struct DonorLanding: View {
             if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, engagement: engagement, wallet: wallet,
                                                                            onSignedOut: onSignedOut) }
             if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
-        }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-    }
-}
-
-/// Minimal partner stack placeholder — fleshed out in the partner phase. Present now so
-/// the role-aware root compiles and routes both journeys.
-private struct PartnerLanding: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Partner portal").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Your organization’s giving home.").font(.title3)
         }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
     }
 }
@@ -504,16 +527,18 @@ private actor PreviewEvents: EventsService {
 #endif
 
 #if DEBUG
-/// In-memory partner service for the preview/UITest. A `--preview-partner-pending` launch shows
-/// the pending gate; `--preview-partner-viewer` loads as a VIEWER (read-only); otherwise an ADMIN
-/// portal with one verified and one unverified figure, an unsuppressed workforce, and two users.
-private actor PreviewPartner: PartnerService {
-    private let pending: Bool
+/// In-memory partner service for the preview/UITest. `--preview-partner-viewer` loads as a VIEWER (read-only);
+/// `--preview-partner` is an ADMIN portal with one verified and one unverified figure, an unsuppressed
+/// workforce, and two users.
+actor PreviewPartner: PartnerService {
     private let role: PartnerRole
     private var userList: [PartnerUser]
+    private var organization = "Acme Corp"
+    private var about = "Doing good together."
+    private var workforce = 240
+    private var savedLogo: Data?
 
-    init(pending: Bool = false, role: PartnerRole = .admin) {
-        self.pending = pending
+    init(role: PartnerRole = .admin) {
         self.role = role
         userList = [
             PartnerUser(id: "u1", email: "ada@acme.com", name: "Ada Admin", role: .admin),
@@ -522,16 +547,15 @@ private actor PreviewPartner: PartnerService {
     }
 
     func overview() async throws -> PartnerOverview {
-        if pending { throw PartnerPendingApproval() }
-        return PartnerOverview(
-            organization: "Acme Corp", description: "Doing good together.",
+        PartnerOverview(
+            organization: organization, description: about,
             userID: role == .admin ? "u1" : "u2", role: role, companyCode: "ACME",
             committed: VerifiedMoney(amountMinor: 5_000_000, verified: true),
             deployed: VerifiedMoney(amountMinor: 3_000_000, verified: false), // unverified -> hidden (§7.3)
             deployedPercent: 60,
             peopleReached: VerifiedCount(value: 12_400, verified: true),
-            employeesEnrolled: 86, workforceSize: 240, enrolledPercent: 35,
-            updatedAt: Date(timeIntervalSince1970: 1_793_000_000), hasLogo: false)
+            employeesEnrolled: 86, workforceSize: workforce, enrolledPercent: 35,
+            updatedAt: Date(timeIntervalSince1970: 1_793_000_000), hasLogo: savedLogo != nil)
     }
 
     func initiatives() async throws -> [PartnerInitiative] {
@@ -547,150 +571,39 @@ private actor PreviewPartner: PartnerService {
     }
 
     func people() async throws -> PartnerPeople {
-        PartnerPeople(enrolled: 86, workforceSize: 240, givenMinor: 940_000, matchedMinor: 470_000,
+        PartnerPeople(enrolled: 86, workforceSize: workforce, givenMinor: 940_000, matchedMinor: 470_000,
                       avgStreakDays: 42, volunteerMinutes: 6_300, teams: 7, suppressed: false)
     }
 
+    func teams() async throws -> [TeamStanding] {
+        [TeamStanding(id: "t1", name: "Engineering", activeGivers: 31, annualizedMinor: 1_200_000, avgStreakDays: 40, volunteerMinutes: 1_200)]
+    }
     func users() async throws -> [PartnerUser] { userList }
-    func inviteUser(email: String, role: PartnerRole) async throws {
-        userList.append(PartnerUser(id: "u\(userList.count + 1)", email: email, name: email, role: role))
+    func inviteUser(email: String, name: String, role: PartnerRole) async throws {
+        userList.append(PartnerUser(id: "u\(userList.count + 1)", email: email, name: name, role: role))
     }
     func removeUser(id: String) async throws { userList.removeAll { $0.id == id } }
+    func saveProfile(organization: String, description: String) async throws {
+        self.organization = organization
+        about = description
+    }
+    func saveWorkforce(size: Int) async throws { workforce = size }
+    func logo() async throws -> Data? { savedLogo }
+    func saveLogo(png: Data?) async throws { savedLogo = png }
+    func exports() async throws -> [PartnerExport] { [] }
+    func report() async throws -> Data { Data("%PDF-1.4 preview".utf8) }
+    func retainedReport(id: String) async throws -> Data { throw AccountError.notFound }
+    func signOut() async throws {}
     func registerPushDevice(token: String) async throws {}
     func unregisterPushDevice() async throws {}
 }
+
+/// Accepts any partner link, so the preview's partner sign-in journey runs with no backend.
+actor PreviewPartnerSignIn: PartnerSignInService {
+    func requestSignInLink(email: String) async throws {}
+    func accept(token: String) async throws {}
+}
 #endif
-
-/// Partner portal (PRD P-*, EM-*, §7). The pending-approval gate shows nothing else (P-2); the
-/// loaded portal renders verified-or-hidden Overview tiles (§7.3), spend totals, the Our People
-/// rollup with <5 suppression (EM-3), and user management gated to admins (§7.2) — all inline.
-private struct PartnerPortal: View {
-    @State var model: PartnerModel
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Partner portal").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            switch model.phase {
-            case .loading:
-                ProgressView().accessibilityIdentifier("partner-loading")
-            case .pending:
-                // P-2: pending approval shows nothing else.
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Awaiting approval").font(.title3.bold())
-                    Text("Your organization’s account is pending review. We’ll email you when it’s approved.")
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("partner-pending")
-            case .failed(let message):
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(message).accessibilityIdentifier("partner-error")
-                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
-                }
-            case .ready:
-                if let overview = model.overview { PartnerContent(model: model, overview: overview) }
-            }
-        }
-        .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("partner-portal")
-        .task { await model.load() }
-    }
-}
-
-private struct PartnerContent: View {
-    let model: PartnerModel
-    let overview: PartnerOverview
-    @State private var inviteEmail = ""
-    var body: some View {
-        // Overview tiles — a figure renders ONLY when verified (§7.3); unverified is omitted.
-        VStack(alignment: .leading, spacing: 4) {
-            Text(overview.organization).font(.title2.bold())
-            if let line = overview.verifiedLine() {
-                Text(line).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-verified-line")
-            }
-            if let committed = overview.committed.label {
-                Text("Committed: \(committed)").accessibilityIdentifier("partner-committed")
-            }
-            // deployed is unverified in the preview -> intentionally absent (never estimated)
-            if let reached = overview.peopleReached.label {
-                Text("People reached: \(reached)").accessibilityIdentifier("partner-reached")
-            }
-            if let enrolled = overview.enrolledLabel {
-                Text("Enrolled: \(enrolled)").accessibilityIdentifier("partner-enrolled")
-            }
-        }
-
-        if model.sectionsUnavailable {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Some details couldn’t be loaded right now.").font(.footnote).foregroundStyle(.secondary)
-                Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
-            }.accessibilityElement(children: .contain).accessibilityIdentifier("partner-partial")
-        }
-
-        // Our People rollup — figures or the suppression notice (EM-3).
-        if let people = model.people {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Our people").font(.title3.bold()).accessibilityAddTraits(.isHeader)
-                if let notice = people.suppressionNotice {
-                    Text(notice).accessibilityIdentifier("partner-suppressed")
-                } else if let given = people.givenLabel {
-                    Text("Given: \(given)").accessibilityIdentifier("partner-given")
-                }
-            }
-        }
-
-        // Users — admin can invite/remove inline; a viewer sees the list read-only (§7.2).
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Team").font(.title3.bold()).accessibilityAddTraits(.isHeader)
-            ForEach(model.users) { user in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("\(user.name) · \(user.role.rawValue)")
-                        if model.canRemove(user) {
-                            Spacer()
-                            Button("Remove") { model.requestRemoval(id: user.id) }
-                                .buttonStyle(DADButtonStyle(.secondary, fillsWidth: false))
-                                .accessibilityLabel("Remove \(user.name)")
-                                .accessibilityIdentifier("partner-remove-\(user.id)")
-                        }
-                    }
-                    if model.pendingRemoval?.id == user.id {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Remove \(user.name) from your team?").font(.footnote)
-                            HStack {
-                                Button("Cancel") { model.cancelRemoval() }
-                                    .buttonStyle(DADButtonStyle(.secondary, fillsWidth: false))
-                                    .accessibilityIdentifier("partner-remove-cancel")
-                                Button("Confirm remove") { Task { await model.confirmRemoval() } }
-                                    .buttonStyle(DADButtonStyle(.primary, fillsWidth: false))
-                                    .accessibilityIdentifier("partner-remove-confirm")
-                            }
-                        }
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("partner-remove-prompt")
-                    }
-                }
-            }
-            if model.role.canManageUsers {
-                TextField("Colleague’s email", text: $inviteEmail)
-                    .textFieldStyle(.roundedBorder).keyboardType(.emailAddress)
-                    .textContentType(.emailAddress).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .accessibilityIdentifier("partner-invite-email")
-                Button("Invite user") {
-                    let email = inviteEmail
-                    Task {
-                        await model.inviteUser(email: email, role: .viewer)
-                        if model.actionError == nil { inviteEmail = "" }
-                    }
-                }
-                .buttonStyle(DADButtonStyle(.primary))
-                .disabled(!PartnerModel.isPlausibleEmail(inviteEmail))
-                .accessibilityIdentifier("partner-invite")
-            } else {
-                Text("Read-only access").font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-readonly")
-            }
-            if let error = model.actionError {
-                Text(error).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("partner-action-error")
-            }
-        }
-    }
-}
 
 #if DEBUG
 /// In-memory settings service for the preview/UITest.
@@ -1189,21 +1102,6 @@ private struct SignInKit {
     #endif
 }
 
-/// Partner sign-in is an emailed-link flow (`partnerRequestSignIn`) that lands with the partner
-/// wiring phase; until then say so rather than offering a donor phone sign-in under a partner label.
-private struct PartnerSignInNotice: View {
-    let onBack: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Partner sign-in").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Partner sign-in isn’t available in the app yet. Use the DAD website to sign in as a partner.")
-            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityIdentifier("partner-sign-in-notice")
-    }
-}
-
 /// The unauthenticated stack: role select → sign-in methods → the chosen method's flow. Verification
 /// runs through `establish` so the session (not this view) owns the network await and its epoch guard.
 private struct UnauthenticatedStack: View {
@@ -1211,12 +1109,20 @@ private struct UnauthenticatedStack: View {
     let establish: PhoneSignInModel.Establish
     let notice: String?
     let onPasteLink: (String) -> Bool
+    var partnerSignIn: (any PartnerSignInService)?
+    var partnerToken: String?
+    var onPartnerTokenConsumed: () -> Void = {}
+    var onPartnerSignedIn: () -> Void = {}
     let onSignedIn: () -> Void
     @State private var step: Step = .roleSelect
     @State private var external: ExternalRun?
     private enum Step: Equatable { case roleSelect, methods, phone, emailLink, password, signup, external, partner }
 
     var body: some View {
+        content.onChange(of: partnerToken, initial: true) { _, token in if token != nil { step = .partner } }
+    }
+
+    @ViewBuilder private var content: some View {
         switch step {
         case .roleSelect:
             RoleSelect(notice: notice) { role in step = role == .donor ? .methods : .partner }
@@ -1236,7 +1142,10 @@ private struct UnauthenticatedStack: View {
                 ExternalSignInView(run: external, onBack: { step = .methods; self.external = nil }, onSignedIn: onSignedIn)
             }
         case .partner:
-            PartnerSignInNotice { step = .roleSelect }
+            if let partnerSignIn {
+                PartnerSignInFlow(model: PartnerSignInModel(service: partnerSignIn), incomingToken: partnerToken,
+                                  onTokenConsumed: onPartnerTokenConsumed, onBack: { step = .roleSelect }, onSignedIn: onPartnerSignedIn)
+            }
         }
     }
 
@@ -1317,19 +1226,11 @@ struct DADApp: App {
     }
 
     @ViewBuilder private var partnerRoot: some View {
-        #if DEBUG
-        if launchFlag("--preview-partner-pending") {
-            PartnerPortal(model: PartnerModel(service: PreviewPartner(pending: true)))
-        } else if launchFlag("--preview-partner-viewer") {
-            PartnerPortal(model: PartnerModel(service: PreviewPartner(role: .viewer)))
-        } else if launchFlag("--preview-partner") {
-            PartnerPortal(model: PartnerModel(service: PreviewPartner()))
-        } else {
-            PartnerLanding()
+        if let service = model.partnerService {
+            PartnerPortal(model: PartnerModel(service: service), publicOrigin: model.publicOrigin) {
+                router.signedOut()
+            }
         }
-        #else
-        PartnerLanding()
-        #endif
     }
 
     private var showsDonorShell: Bool {
@@ -1362,7 +1263,10 @@ struct DADApp: App {
                         partnerRoot
                     case .unauthenticated:
                         UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
-                                             onPasteLink: { model.openPastedLink($0) }) {
+                                             onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
+                                             partnerToken: model.pendingPartnerToken,
+                                             onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
+                                             onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) }) {
                             // The session already holds the established credentials; read the profile
                             // through it, then enter the donor shell (which owns load/recovery states).
                             Task {
@@ -1386,7 +1290,7 @@ struct DADApp: App {
                     router.signedIn(as: .donor)
                     return
                 }
-                if ["--preview-partner", "--preview-partner-viewer", "--preview-partner-pending"].contains(where: launchFlag) {
+                if ["--preview-partner", "--preview-partner-viewer"].contains(where: launchFlag) {
                     router.signedIn(as: .partner)
                     return
                 }
@@ -1396,7 +1300,10 @@ struct DADApp: App {
                 // account sub-state (loading / ready / unavailable / signed-out) and its own
                 // recovery, so stay on it. Only a genuinely session-less app goes to role-select.
                 // A session with nothing stored (or one the server revoked) is signed out: go to sign-in.
-                if model.state == .signedOut || !model.hasSession { router.restoredSignedOut() } else { router.signedIn(as: .donor) }
+                // Without a donor session, a partner session still within its 12 hours reopens the portal.
+                if model.state == .signedOut || !model.hasSession {
+                    if await model.hasPartnerSession() { router.signedIn(as: .partner) } else { router.restoredSignedOut() }
+                } else { router.signedIn(as: .donor) }
             }
             .onChange(of: model.state) { _, state in
                 switch state {
@@ -1414,9 +1321,9 @@ struct DADApp: App {
                                   onSignedOut: { showSettings = false; Task { await model.load() } })
                 }
             }
-            .onOpenURL { if let url = model.receive($0) { web = WebDestination(url: url) } }
+            .onOpenURL { if let url = model.receive($0, role: router.currentRole) { web = WebDestination(url: url) } }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) {
-                if let url = $0.webpageURL, let fallback = model.receive(url) { web = WebDestination(url: fallback) }
+                if let url = $0.webpageURL, let fallback = model.receive(url, role: router.currentRole) { web = WebDestination(url: fallback) }
             }
             .sheet(item: $web) { WebFallback(url: $0.url) }
         }

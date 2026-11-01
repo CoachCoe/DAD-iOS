@@ -129,6 +129,10 @@ final class FoundationTests: XCTestCase {
         for value in ["https://evil.test/account/dashboard", "http://public.test/account/profile", "https://user@public.test/account/profile", "https://public.test/account%2fclaim#token=\(token)", "https://public.test/account/claim#token=\(token)&next=https://evil.test", "https://public.test/account/claim#token=\(token)&token=\(token)"] {
             XCTAssertNil(router.route(URL(string: value)!), value)
         }
+        XCTAssertEqual(router.route(URL(string: "https://public.test/partner/accept#token=\(token)")!), .partnerSignIn(token: token))
+        for value in ["https://public.test/partner/accept#token=\(token)&next=/account/dashboard", "https://public.test/partner/accept?x=1#token=\(token)", "https://public.test/partner/accept#token=short"] {
+            XCTAssertNil(router.route(URL(string: value)!), value)
+        }
         XCTAssertEqual(router.notification(path: "/account/payment-method"), .paymentMethod)
         XCTAssertEqual(router.notification(path: "/account/gifts"), .gifts)
         XCTAssertNil(router.notification(path: "https://public.test/account/dashboard"))
