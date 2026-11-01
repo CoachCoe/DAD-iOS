@@ -13,6 +13,10 @@ public enum LinkIntent: Sendable, Equatable, CustomStringConvertible, CustomDebu
     case emailChange(token: String)
     /// An emailed partner sign-in link (`/partner/accept#token=`).
     case partnerSignIn(token: String)
+    /// A donor's invite link (`/r/{code}`, `?via=irl` when shared in person).
+    case referral(code: String, inPerson: Bool)
+    /// An employer's company-code link (`/c/{code}`).
+    case company(code: String)
     case web(URL)
     public var description: String {
         switch self {
@@ -20,6 +24,8 @@ public enum LinkIntent: Sendable, Equatable, CustomStringConvertible, CustomDebu
         case .claim: "Claim([redacted])"
         case .emailChange: "EmailChange([redacted])"
         case .partnerSignIn: "PartnerSignIn([redacted])"
+        case .referral(let code, let inPerson): "Referral(\(code), inPerson: \(inPerson))"
+        case .company(let code): "Company(\(code))"
         case .web: "WebLink([redacted])"
         }
     }
@@ -32,6 +38,8 @@ private struct LinkPolicy: Decodable, Sendable {
     let partnerProofPaths: [String]
     let claimReturnPaths: [String]
     let notificationPaths: [String]
+    let referralPrefix: String
+    let companyPrefix: String
 }
 
 extension URL {
@@ -72,7 +80,21 @@ public struct LinkRouter: Sendable {
         }
         if policy.accountPaths.contains(url.path), url.query == nil, url.fragment == nil,
            let destination = AccountDestination(rawValue: url.path) { return .account(destination) }
+        if url.fragment == nil, let code = Self.code(url.path, after: policy.referralPrefix) {
+            switch url.query {
+            case nil: return .referral(code: code, inPerson: false)
+            case "via=irl": return .referral(code: code, inPerson: true)
+            default: return .web(url)
+            }
+        }
+        if url.query == nil, url.fragment == nil, let code = Self.code(url.path, after: policy.companyPrefix) { return .company(code: code) }
         return .web(url)
+    }
+    /// The one path segment after `prefix`, if it has the shape every referral and company code has.
+    private static func code(_ path: String, after prefix: String) -> String? {
+        guard path.hasPrefix(prefix) else { return nil }
+        let code = String(path.dropFirst(prefix.count))
+        return code.wholeMatch(of: /[A-Za-z0-9_-]{1,64}/) == nil ? nil : code
     }
     /// The fragment's one well-formed `token` (and, on a claim link, at most one `next`), or nil.
     private static func singleToken(_ fragment: String?, allowNext: Bool) -> String? {

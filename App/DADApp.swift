@@ -90,6 +90,10 @@ private final class AccountModel {
     /// A user-facing line for the unauthenticated screen: a failed sign-in link or a build that has
     /// no API origin configured (never silently synthetic data).
     var notice: String?
+    /// "<name> invited you", after an invite link was opened before sign-in.
+    var invitation: String?
+    /// Referral and company-code link visits, kept and spent as the website's cookies are; nil in the preview.
+    private var linkAttribution: LinkAttribution?
     private var completedProof: String?
     private var activeProof: String?
     private var gate = NavigationGate()
@@ -150,7 +154,7 @@ private final class AccountModel {
                                                     events: eventScenario, engagement: engagementScenario,
                                                     signedIn: launchFlag("--stub-signed-in"),
                                                     partnerSignedIn: launchFlag("--stub-partner-signed-in"),
-                                                    onLocalWipe: { DefaultsAttributionStore().clear() })
+                                                    onLocalWipe: { Self.wipeAttribution(linkTokens: StubBackend.linkTokensKey) })
                 session = services.session
                 kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, link: services.credentialAuth,
                                 password: services.credentialAuth,
@@ -169,6 +173,9 @@ private final class AccountModel {
                 donorPush = services.push
                 installAnalytics(AnalyticsController(consent: MemoryAnalyticsConsent(choice: launchFlag("--stub-analytics-unset") ? nil : false),
                                                      sink: services.analyticsSink))
+                // Each stub launch starts as a fresh install: no link visit kept from an earlier run.
+                DefaultsLinkTokenStore(key: StubBackend.linkTokensKey).clear()
+                installLinkAttribution(services.linkAttribution, store: DefaultsLinkTokenStore(key: StubBackend.linkTokensKey))
                 state = .loading
             } catch { session = nil; state = .unavailable }
             return
@@ -206,7 +213,7 @@ private final class AccountModel {
                 let built = try AccountSession(api: WireAPI(origin: origin), store: KeychainStore(service: service))
                 let auth = try WireAuth(origin: origin, deviceName: UIDevice.current.name)
                 let credentialAuth = try WireCredentialAuth(origin: origin, deviceName: UIDevice.current.name)
-                let settings = try WireAccountSettings(origin: origin, session: built, onLocalWipe: { DefaultsAttributionStore().clear() })
+                let settings = try WireAccountSettings(origin: origin, session: built, onLocalWipe: { Self.wipeAttribution() })
                 // Apple, Google and passkeys stay off until the owner supplies their build settings.
                 let capabilities = SignInCapabilities(config: SignInConfig(
                     appleFlag: Bundle.main.object(forInfoDictionaryKey: "DADAppleSignInEnabled") as? String,
@@ -220,7 +227,8 @@ private final class AccountModel {
                 passwordSettings = try WirePasswordSettings(origin: origin, session: built)
                 management = try WireAccountManagement(origin: origin, session: built)
                 dashboardService = try WireDashboard(origin: origin, session: built)
-                givingKit = GivingKit(service: try WireGiving(origin: origin, session: built))
+                givingKit = GivingKit(service: try WireGiving(origin: origin, session: built,
+                                                              referral: { DefaultsLinkTokenStore().load().referral }))
                 eventsService = try WireEvents(origin: origin, session: built)
                 engagementService = try WireEngagement(origin: origin, session: built)
                 walletService = try WireWalletPass(origin: origin, session: built)
@@ -230,8 +238,10 @@ private final class AccountModel {
                 partnerSession = partner
                 donorPush = try WireDonorPush(origin: origin, session: built)
                 let analyticsSink = try WireAnalytics(origin: origin, access: { try? await built.accessToken() })
+                let links = try WireLinkAttribution(origin: origin, session: built)
                 session = built
                 installAnalytics(AnalyticsController(consent: DefaultsAnalyticsConsent(), sink: analyticsSink))
+                installLinkAttribution(links, store: DefaultsLinkTokenStore())
             }
         } catch {
             session = nil
@@ -243,6 +253,15 @@ private final class AccountModel {
         analytics = controller
         AnalyticsObservation.shared.install { controller.emit($0) }
     }
+    private func installLinkAttribution(_ service: any LinkAttributionService, store: any LinkTokenStore) {
+        let analytics = analytics
+        linkAttribution = LinkAttribution(service: service, store: store) { analytics?.emit(.attributionCaptured, properties: ["source": $0]) }
+    }
+    /// Account deletion forgets where this install came from, link tokens included.
+    private nonisolated static func wipeAttribution(linkTokens key: String = "org.dad.link-tokens") {
+        DefaultsAttributionStore().clear()
+        DefaultsLinkTokenStore(key: key).clear()
+    }
     func load() async {
         guard let session else { state = .unavailable; return }
         generation += 1
@@ -252,7 +271,9 @@ private final class AccountModel {
             let profile = try await session.profile()
             if current == generation {
                 state = .ready(profile)
+                invitation = nil
                 if let pending = gate.signedIn() { destination = pending }
+                if let linkAttribution { Task { await linkAttribution.bindCompany() } }
             }
         }
         catch is CancellationError { return }
@@ -304,6 +325,20 @@ private final class AccountModel {
             if case .ready = state { signedIn = true } else { signedIn = false }
             if let now = gate.receive(target, signedIn: signedIn) { destination = now }
             Task { await load() }
+            return nil
+        case .referral(let code, let inPerson):
+            guard let linkAttribution else { return url }
+            Task {
+                let name = await linkAttribution.captureReferral(code: code, inPerson: inPerson)
+                if let name, !isReady { invitation = "\(name) invited you to give with DAD." }
+            }
+            return nil
+        case .company(let code):
+            guard let linkAttribution else { return url }
+            Task {
+                await linkAttribution.captureCompany(code: code)
+                if isReady { await linkAttribution.bindCompany() }
+            }
             return nil
         case .claim(let token, let next):
             if role == .partner { return url }
@@ -398,6 +433,7 @@ private struct DonorLanding: View {
 /// signed-in, so this path is exercised only when there is no session.
 private struct RoleSelect: View {
     let notice: String?
+    var invitation: String?
     let onSelect: (AppRole) -> Void
     @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
     var body: some View {
@@ -407,6 +443,7 @@ private struct RoleSelect: View {
             if let notice {
                 Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("auth-notice")
             }
+            if let invitation { Text(invitation).font(.body).accessibilityIdentifier("auth-invitation") }
             VStack(spacing: 12) {
                 Button("I’m a donor") { analytics?.emit(.roleSelected); onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
                 Button("I’m a partner") { analytics?.emit(.roleSelected); onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
@@ -414,7 +451,7 @@ private struct RoleSelect: View {
             if let analytics, analytics.choice == nil { AnalyticsChoice(analytics: analytics) }
         }
         .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityIdentifier("role-select")
+        .accessibilityElement(children: .contain).accessibilityIdentifier("role-select")
     }
 }
 
@@ -1200,6 +1237,7 @@ private struct UnauthenticatedStack: View {
     let kit: SignInKit
     let establish: PhoneSignInModel.Establish
     let notice: String?
+    var invitation: String?
     let onPasteLink: (String) -> Bool
     var partnerSignIn: (any PartnerSignInService)?
     var partnerToken: String?
@@ -1218,7 +1256,7 @@ private struct UnauthenticatedStack: View {
     @ViewBuilder private var content: some View {
         switch step {
         case .roleSelect:
-            RoleSelect(notice: notice) { role in step = role == .donor ? .methods : .partner }
+            RoleSelect(notice: notice, invitation: invitation) { role in step = role == .donor ? .methods : .partner }
         case .methods:
             SignInMethods(capabilities: kit.capabilities, onSelect: select, onCreateAccount: { step = .signup })
         case .phone:
@@ -1407,6 +1445,7 @@ struct DADApp: App {
                         partnerRoot
                     case .unauthenticated:
                         UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
+                                             invitation: model.invitation,
                                              onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
                                              partnerToken: model.pendingPartnerToken,
                                              onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
@@ -1452,6 +1491,11 @@ struct DADApp: App {
                 if model.state == .signedOut || !model.hasSession {
                     if await model.hasPartnerSession() { router.signedIn(as: .partner) } else { router.restoredSignedOut() }
                 } else { router.signedIn(as: .donor) }
+                #if DEBUG
+                if launchFlag("--stub-open-invite"), let url = URL(string: "https://stub.invalid/r/ALEX42") {
+                    _ = model.receive(url, role: router.currentRole)
+                }
+                #endif
             }
             .task(id: push.tap) {
                 guard let tap = push.tap else { return }

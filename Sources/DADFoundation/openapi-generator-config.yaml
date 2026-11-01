@@ -41,6 +41,10 @@ filter:
     - deleteAccount
     - registerPushDevice
     - unregisterPushDevice
+    # --- Link attribution (2.10): referral and company-code capture, bound after sign-in ---
+    - captureReferral
+    - captureCompany
+    - bindCompanyTouch
     # --- Donor giving core (Phase C) ---
     - dashboard
     - gifts

@@ -30,7 +30,7 @@ AppIntents metadata-extraction diagnostic is not suppressed; this app defines no
 
 ## Shared contract and native boundaries
 
-`foundation.lock.json` pins mobile foundation 2.9.0 and its manifest digest. The vendored
+`foundation.lock.json` pins mobile foundation 2.10.0 and its manifest digest. The vendored
 release is verified before generation. `prepare-client.mjs` copies the Swift generator input, null-only Codable adapter, tokens,
 and link policy into ignored generator inputs. Apple's pinned Swift generator produces
 types and a client during the build, scoped to profile, claim, refresh, and logout.
@@ -48,7 +48,9 @@ its result cannot restore local credentials. Offline remote logout can fail afte
 cleanup; errors propagate rather than claiming a confirmed remote revocation.
 
 Set Xcode build settings `DAD_API_ORIGIN` and `DAD_PUBLIC_ORIGIN` to the direct HTTPS API
-origin and public website origin for a real environment. No production hostname or secret
+origin and public website origin for a real environment, and `DAD_ASSOCIATED_DOMAIN` to the public origin's host
+(also the passkey relying party): `App/DAD.entitlements` declares it as the `applinks:` and `webcredentials:` associated
+domain, which DAD-Main's `/.well-known/apple-app-site-association` answers for. No production hostname or secret
 is compiled by default. A Release build with no API origin shows an unavailable state and sign-in fails
 with a clear message; it never serves synthetic data. Wired against the API: donor phone + SMS sign-in
 (`beginPhoneSignIn`/`finishPhoneSignIn`, existing accounts only), claim-link sign-in, profile read,
@@ -82,9 +84,9 @@ invented or committed; supply, per method:
 - **Sign in with Apple:** a signing team, the "Sign in with Apple" capability
   (`com.apple.developer.applesignin` entitlement) on the app ID, then build setting
   `DAD_APPLE_SIGNIN_ENABLED=YES`. DAD-Main must also have Apple configured (`oidcSignIn` is 503 otherwise).
-- **Passkeys:** the Associated Domains entitlement `webcredentials:<domain>`, an
-  `apple-app-site-association` file for that domain listing the final bundle ID, and build setting
-  `DAD_PASSKEY_RP_ID=<domain>` (bare hostname, the relying-party ID DAD-Main uses).
+- **Passkeys:** the Associated Domains capability on the app ID with `DAD_ASSOCIATED_DOMAIN=<domain>` (the
+  entitlement's `webcredentials:` entry), an `apple-app-site-association` file for that domain listing the final
+  bundle ID, and build setting `DAD_PASSKEY_RP_ID=<domain>` (bare hostname, the relying-party ID DAD-Main uses).
 - **Google:** build setting `DAD_GOOGLE_CLIENT_ID=<id>.apps.googleusercontent.com` **and** a Google id_token
   provider. The official SDK is a new dependency, so none is linked; Google stays off (a client ID alone
   does not enable it) until that decision is made and the provider replaces `UnavailableIDTokenProvider`.
@@ -92,8 +94,9 @@ invented or committed; supply, per method:
 Passkey list/delete are wired and tested in `WirePasswordSettings`; their Settings UI and passkey
 registration (`beginDonorPasskeyRegister`/`finishDonorPasskeyRegister`) follow with the entitlement.
 
-System universal links/passkeys require a final bundle ID, signing team, Associated
-Domains (`applinks:` and `webcredentials:`), and matching DAD-Main association files.
+System universal links/passkeys require a final bundle ID, signing team, the Associated
+Domains capability (the app declares `applinks:` and `webcredentials:` for `DAD_ASSOCIATED_DOMAIN` in
+`App/DAD.entitlements`), and DAD-Main's association file naming the app (`DONOR_IOS_APP_ID`).
 The app ships under `org.dad.foundation` (Release) and `org.dad.foundation.debug` (Debug); see
 "Bundle identifier" below. Neither is registered with a signing team or Associated Domains yet.
 Notification permission is asked only from Settings ("Turn on notifications"), never at launch. The camera is
@@ -284,5 +287,11 @@ app with the Push Notifications capability (`aps-environment` entitlement) under
 needs its APNs key; until then the permission can be granted but no token is registered. `--stub-push-tap-gifts`
 replays a tap in UI tests.
 
-**Referral attribution** is captured by the website (`/r/<code>`, `/c/<code>`). The mobile contract's signup has no
-attribution field, so the app keeps its capture seam (`AttributionCapture`) unused until DAD-Main adds one.
+**Referral and company-code links (contract 2.10).** An invite (`/r/<code>`, `?via=irl` in person) or company
+(`/c/<code>`) link that opens the app is recorded with DAD-Main (`captureReferral` / `captureCompany`), and the visitor
+token it returns is kept where the website keeps its cookie (`LinkAttribution`, `UserDefaults`; the latest link wins,
+and a visit that keeps nothing discards it). The referral token goes with the first monthly gift
+(`startRecurringCheckout`'s `referral_token`, part of the command's idempotency fingerprint), so the referrer is credited
+as on the web; the company token is bound once the donor is signed in (`bindCompanyTouch`). Before sign-in an invite
+names the referrer on the start screen. Account deletion forgets both. `--stub-open-invite` replays an invite link in
+UI tests.

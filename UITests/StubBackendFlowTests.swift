@@ -64,4 +64,13 @@ import XCTest
         app.launch()
         XCTAssertTrue(app.buttons["gift-row-0"].waitForExistence(timeout: 20), "the gifts notification opens gift history")
     }
+
+    func testAnInviteLinkNamesTheReferrerBeforeSignIn() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend", "--stub-open-invite"]
+        app.launch()
+        let invitation = app.staticTexts["auth-invitation"]
+        XCTAssertTrue(invitation.waitForExistence(timeout: 20), "the opened invite link is captured natively")
+        XCTAssertEqual(invitation.label, "Alex R invited you to give with DAD.")
+    }
 }

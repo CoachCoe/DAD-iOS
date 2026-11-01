@@ -136,7 +136,14 @@ final class FoundationTests: XCTestCase {
         XCTAssertEqual(router.notification(path: "/account/payment-method"), .paymentMethod)
         XCTAssertEqual(router.notification(path: "/account/gifts"), .gifts)
         XCTAssertNil(router.notification(path: "https://public.test/account/dashboard"))
-        XCTAssertEqual(router.route(URL(string: "https://public.test/r/friend?via=irl")!), .web(URL(string: "https://public.test/r/friend?via=irl")!))
+        XCTAssertEqual(router.route(URL(string: "https://public.test/r/friend?via=irl")!), .referral(code: "friend", inPerson: true))
+        XCTAssertEqual(router.route(URL(string: "https://public.test/r/friend_2-x")!), .referral(code: "friend_2-x", inPerson: false))
+        XCTAssertEqual(router.route(URL(string: "https://public.test/c/ACME-1")!), .company(code: "ACME-1"))
+        for value in ["https://public.test/r/friend?via=web", "https://public.test/r/a/b", "https://public.test/r/", "https://public.test/r/friend#x",
+                      "https://public.test/c/acme?via=irl", "https://public.test/c/a.b", "https://public.test/r/" + String(repeating: "a", count: 65)] {
+            XCTAssertEqual(router.route(URL(string: value)!), .web(URL(string: value)!), value)
+        }
+        XCTAssertNil(router.route(URL(string: "https://evil.test/r/friend")!))
         var gate = NavigationGate()
         XCTAssertNil(gate.receive(.dashboard, signedIn: false))
         XCTAssertEqual(gate.signedIn(), .dashboard)

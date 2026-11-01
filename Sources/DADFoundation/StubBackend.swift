@@ -21,7 +21,9 @@ import OpenAPIRuntime
 /// follow a stateful gift: the hosted Stripe pages are stubbed by the UI (`completeHandoff` plays the
 /// "payment finished" webhook), so the REAL `WireGiving` conformer runs end to end. Partner sign-in links are
 /// accepted for tokens starting `stubpartner` (anything else is the server's 422 "invalid or expired"); the
-/// portal is an ADMIN at Acme with two users, one unverified figure, an earlier export and no logo.
+/// portal is an ADMIN at Acme with two users, one unverified figure, an earlier export and no logo. Link
+/// capture answers like the server: referral code `ALEX42` is Alex R's, company code `ACME42` is Acme's, and
+/// any other code keeps the token sent, if any; the checkout records the referral token it was given.
 public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Credentials?
@@ -33,6 +35,8 @@ public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable
 
 public enum StubBackend {
     public static let origin = URL(string: "https://stub.invalid")!
+    /// Where a stub-backed launch keeps its link tokens, apart from a real install's.
+    public static let linkTokensKey = "org.dad.link-tokens.stub"
 
     /// What the scripted donor-home reads answer. `populated`: a ready dashboard, an initiative and 120
     /// gifts. `empty`: dashboard still preparing, no initiative in rotation, no gifts. `failFirst`: the
@@ -72,6 +76,9 @@ public enum StubBackend {
         public let partner: WirePartner
         public let partnerSession: PartnerSession
         public let push: any DonorPushService
+        public let linkAttribution: any LinkAttributionService
+        /// The referral token the last `startRecurringCheckout` carried, for UITests' expectations.
+        public let checkoutReferral: @Sendable () -> String?
         /// The ingest sink, on the bare transport so the upload itself is never observed.
         public let analyticsSink: any AnalyticsSink
         /// Plays the Stripe webhook after the stubbed hosted page "finishes" (a gift starts, a card is applied).
@@ -97,7 +104,7 @@ public enum StubBackend {
             credentialAuth: WireCredentialAuth(origin: origin, transport: transport),
             passwords: WirePasswordSettings(product: product),
             dashboard: WireDashboard(product: product),
-            giving: WireGiving(product: product),
+            giving: WireGiving(product: product, referral: { DefaultsLinkTokenStore(key: StubBackend.linkTokensKey).load().referral }),
             events: WireEvents(product: product),
             engagement: WireEngagement(product: product),
             management: WireAccountManagement(product: product),
@@ -106,6 +113,8 @@ public enum StubBackend {
             partner: WirePartner(origin: origin, transport: transport, session: partnerSession),
             partnerSession: partnerSession,
             push: WireDonorPush(product: product),
+            linkAttribution: WireLinkAttribution(product: product),
+            checkoutReferral: { stub.checkoutReferral },
             analyticsSink: WireAnalytics(origin: origin, transport: stub, access: { nil }),
             completeHandoff: { stub.completeHandoff($0) })
     }
@@ -150,6 +159,10 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private var giftEnding = false
     /// The amount the last `startRecurringCheckout` was created for: what the "paid" webhook activates.
     private var checkoutAmount: Int?
+    private var referralSent: String?
+    var checkoutReferral: String? { lock.withLock { referralSent } }
+    private static let referralToken = "stub-referral-token-0000000000000000000000"
+    private static let companyToken = "stub-company-token-00000000000000000000000"
     private var payment = Payment.none
     private var recurringFailureServed = false
     private let failFirstRecurring: Bool
@@ -224,7 +237,8 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             guard validKey() else { return reply(.unprocessableContent, "{}") }
             guard let amount = fields["amount_minor"] as? Int, amount >= 3000, amount <= 90000, amount % 3000 == 0 else { return reply(.unprocessableContent, "{}") }
             guard lock.withLock({ giftAmount }) == nil else { return reply(.conflict, "{}") }
-            lock.withLock { checkoutAmount = amount }
+            let referral = fields["referral_token"] as? String
+            lock.withLock { checkoutAmount = amount; referralSent = referral }
             return reply(.created, #"{"url":"https://stub.invalid/pay/checkout","session_id":"cs_stub_1","expires_at":"2026-11-01T12:00:00Z"}"#)
         case (.post, "/donor/me/recurring/amount"):
             guard validKey() else { return reply(.unprocessableContent, "{}") }
@@ -637,6 +651,20 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         switch (request.method, request.path ?? "") {
         case (.post, "/analytics/events"):
             return reply(.ok, #"{"accepted":\#(payload.components(separatedBy: #""name""#).count - 1)}"#)
+        case (.post, let path) where path.hasPrefix("/donor/referrals/") || path.hasPrefix("/donor/company/"):
+            let referral = path.hasPrefix("/donor/referrals/")
+            let code = String(path.split(separator: "/").last ?? "")
+            let kept = Self.object(payload)["token"] as? String
+            let token = code == (referral ? "ALEX42" : "ACME42") ? (referral ? Self.referralToken : Self.companyToken) : kept
+            let tokenJSON = token.map { "\"\($0)\"" } ?? "null"
+            return referral
+                ? reply(.ok, #"{"captured":\#(token != nil),"public_name":\#(token == nil ? "null" : "\"Alex R\""),"token":\#(tokenJSON)}"#)
+                : reply(.ok, #"{"captured":\#(token != nil),"token":\#(tokenJSON)}"#)
+        case (.post, "/donor/me/company-touch"):
+            guard authorized, !isDeleted else { return reply(.unauthorized) }
+            let bound = Self.object(payload)["token"] as? String == Self.companyToken
+            if bound { lock.withLock { employer = employer ?? "Acme" } }
+            return reply(.ok, #"{"bound":\#(bound)}"#)
         case (.post, "/donor/me/push-device"):
             return authorized ? reply(.ok, #"{"registered":true,"platform":"IOS","environment":"SANDBOX"}"#) : reply(.unauthorized)
         case (.post, "/donor/phone/sign-in/options"): return reply(.ok, #"{"sent":true}"#)
