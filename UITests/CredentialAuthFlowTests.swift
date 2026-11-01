@@ -52,9 +52,13 @@ import XCTest
         XCTAssertFalse(app.buttons["open-settings"].exists)
 
         let paste = app.textFields["Paste your sign-in link"]
-        paste.tap()
+        // A center tap places the caret inside the short invalid URL; tap its trailing whitespace instead.
+        paste.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         paste.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "https://example.com/not-ours".count))
-        paste.typeText(stubClaimLink + "&next=/account/dashboard")
+        XCTAssertEqual(paste.value as? String, "Paste your sign-in link")
+        let signupLink = stubClaimLink + "&next=/account/dashboard"
+        paste.typeText(signupLink)
+        XCTAssertEqual(paste.value as? String, signupLink)
         app.buttons["signup-continue"].tap()
 
         XCTAssertTrue(app.buttons["open-settings"].waitForExistence(timeout: 15), "claiming the link must land in the donor shell")
