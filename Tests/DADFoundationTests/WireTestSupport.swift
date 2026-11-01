@@ -25,6 +25,7 @@ final class ScriptedTransport: ClientTransport, @unchecked Sendable {
         // A successful `.ics` read and a Wallet pass are the non-JSON bodies the product API serves.
         let type = reply.status.code >= 300 ? "application/json"
             : request.path?.hasSuffix("/calendar.ics") == true ? "text/calendar"
+            : request.path?.hasSuffix("/report.pdf") == true ? "application/pdf"
             : request.path == "/donor/me/wallet/apple" ? "application/vnd.apple.pkpass" : "application/json"
         return (HTTPResponse(status: reply.status, headerFields: [.contentType: type]), HTTPBody(json))
     }

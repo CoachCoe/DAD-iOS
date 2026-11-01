@@ -12,6 +12,7 @@ public actor PartnerSession {
     private let store: any CredentialStore
     private let now: @Sendable () -> Date
     private var stored: Credentials?
+    private var epoch = 0
 
     public init(store: any CredentialStore, now: @escaping @Sendable () -> Date = Date.init) throws {
         self.store = store; self.now = now
@@ -24,6 +25,7 @@ public actor PartnerSession {
         let credentials = Credentials(access: token, refresh: "", expiresAt: now().addingTimeInterval(Self.lifetime))
         try store.save(credentials)
         stored = credentials
+        epoch += 1
     }
 
     /// The bearer, or `.signedOut` once it has expired (which also forgets it).
@@ -33,7 +35,37 @@ public actor PartnerSession {
         return stored.access
     }
 
+    func establish(_ produce: @Sendable () async throws -> String) async throws {
+        let before = epoch
+        let bearer = try await produce()
+        guard before == epoch else { throw AccountError.signedOut }
+        try Task.checkCancellation()
+        try install(token: bearer)
+    }
+
+    func authorized<T: Sendable>(_ call: @Sendable (String) async throws -> T) async throws -> T {
+        try Task.checkCancellation()
+        let bearer = try token()
+        let before = epoch
+        do {
+            let result = try await call(bearer)
+            guard before == epoch else { throw AccountError.signedOut }
+            try Task.checkCancellation()
+            return result
+        } catch AccountError.signedOut {
+            if before == epoch { try clear() }
+            throw AccountError.signedOut
+        }
+    }
+
+    func end() throws -> String? {
+        let bearer = try? token()
+        try clear()
+        return bearer
+    }
+
     func clear() throws {
+        epoch += 1
         stored = nil
         try store.clear()
     }
@@ -68,14 +100,16 @@ public struct WirePartnerAuth: Sendable {
 
     /// Exchanges the link for a session and keeps it. A used or expired link is `.invalidInput`.
     public func accept(token: String) async throws {
-        switch try await client.partnerAcceptInvite(.init(body: .json(.init(invite: token)))) {
-        case .ok(let response):
-            guard let bearer = try response.body.json.session, !bearer.isEmpty else { throw AccountError.invalidResponse }
-            try await session.install(token: bearer)
-        case .unprocessableContent: throw AccountError.invalidInput
-        case .forbidden: throw AccountError.forbidden
-        case .tooManyRequests: throw AccountError.rateLimited
-        default: throw AccountError.unavailable
+        try await session.establish {
+            switch try await client.partnerAcceptInvite(.init(body: .json(.init(invite: token)))) {
+            case .ok(let response):
+                guard let bearer = try response.body.json.session, !bearer.isEmpty else { throw AccountError.invalidResponse }
+                return bearer
+            case .unprocessableContent: throw AccountError.invalidInput
+            case .forbidden: throw AccountError.forbidden
+            case .tooManyRequests: throw AccountError.rateLimited
+            default: throw AccountError.unavailable
+            }
         }
     }
 }
@@ -96,14 +130,11 @@ public struct WirePartner: PartnerService {
         self.origin = origin; self.transport = transport; self.session = session
     }
 
-    private func perform<T: Sendable>(_ operation: @Sendable (Client) async throws -> T) async throws -> T {
-        let bearer = try await session.token()
-        let client = Client(serverURL: origin, configuration: .init(dateTranscoder: LenientDateTranscoder()),
-                            transport: transport, middlewares: [NativeHeaders(access: { bearer })])
-        do { return try await operation(client) }
-        catch AccountError.signedOut {
-            try? await session.clear()
-            throw AccountError.signedOut
+    private func perform<T: Sendable>(maxBodyBytes: Int = 1_048_576, _ operation: @Sendable (Client) async throws -> T) async throws -> T {
+        try await session.authorized { bearer in
+            let client = Client(serverURL: origin, configuration: .init(dateTranscoder: LenientDateTranscoder()),
+                                transport: transport, middlewares: [NativeHeaders(access: { bearer }, maxBodyBytes: maxBodyBytes)])
+            return try await operation(client)
         }
     }
 
@@ -298,7 +329,7 @@ public struct WirePartner: PartnerService {
     }
 
     public func report() async throws -> Data {
-        try await perform { client in
+        try await perform(maxBodyBytes: 16 * 1_048_576) { client in
             switch try await client.partnerReport(.init()) {
             case .ok(let response): return Data(try await ArraySlice<UInt8>(collecting: response.body.pdf, upTo: 16 * 1_048_576))
             case .unauthorized: throw AccountError.signedOut
@@ -310,7 +341,7 @@ public struct WirePartner: PartnerService {
     }
 
     public func retainedReport(id: String) async throws -> Data {
-        try await perform { client in
+        try await perform(maxBodyBytes: 16 * 1_048_576) { client in
             switch try await client.partnerRetainedReport(.init(path: .init(report_id: id))) {
             case .ok(let response): return Data(try await ArraySlice<UInt8>(collecting: response.body.pdf, upTo: 16 * 1_048_576))
             case .unauthorized: throw AccountError.signedOut
@@ -326,8 +357,7 @@ public struct WirePartner: PartnerService {
     /// The local session is forgotten first, so the partner is signed out on this device even when the
     /// server cannot be reached; the server session then simply expires.
     public func signOut() async throws {
-        guard let bearer = try? await session.token() else { try await session.clear(); return }
-        try await session.clear()
+        guard let bearer = try await session.end() else { return }
         let client = Client(serverURL: origin, transport: transport, middlewares: [NativeHeaders(access: { bearer })])
         _ = try? await client.partnerSignOut(.init(body: .json(.init())))
     }

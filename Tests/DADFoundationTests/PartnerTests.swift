@@ -596,3 +596,74 @@ final class StubPartnerTests: XCTestCase {
         XCTAssertFalse(signedIn)
     }
 }
+
+@MainActor
+final class PartnerSessionRaceTests: XCTestCase {
+    func testOldPartnerRequestsCannotReturnDataOrClearANewSession() async throws {
+        for rejected in [false, true] {
+            let store = MemoryStore(nil)
+            let session = try PartnerSession(store: store)
+            try await session.install(token: "old")
+            let gate = Gate()
+            let request = Task { try await session.authorized { _ in
+                await gate.pass()
+                if rejected { throw AccountError.signedOut }
+                return "old private data"
+            } }
+            await gate.waitUntilEntered()
+            try await session.install(token: "new")
+            await gate.release()
+            do { _ = try await request.value; XCTFail("stale request returned private data") }
+            catch { XCTAssertEqual(error as? AccountError, .signedOut) }
+            let current = try await session.token()
+            XCTAssertEqual(current, "new")
+        }
+    }
+
+    func testPartnerSignInCannotRestoreASignedOutSession() async throws {
+        let store = MemoryStore(nil)
+        let session = try PartnerSession(store: store)
+        let gate = Gate()
+        let request = Task { try await session.establish { await gate.pass(); return "late" } }
+        await gate.waitUntilEntered()
+        try await session.clear()
+        await gate.release()
+        do { try await request.value; XCTFail("late sign-in restored the session") }
+        catch { XCTAssertEqual(error as? AccountError, .signedOut) }
+        XCTAssertNil(try store.load())
+    }
+
+    func testCancelledPartnerSignInInstallsNothing() async throws {
+        let store = MemoryStore(nil)
+        let session = try PartnerSession(store: store)
+        let gate = Gate()
+        let request = Task { try await session.establish { await gate.pass(); return "late" } }
+        await gate.waitUntilEntered()
+        request.cancel()
+        await gate.release()
+        do { try await request.value; XCTFail("cancelled sign-in installed credentials") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertNil(try store.load())
+    }
+}
+
+final class PartnerMetricRangeTests: XCTestCase {
+    func testCountsRetainTheFullInt64Range() {
+        XCTAssertEqual(PartnerMetric(label: "People", value: Int64.max, unit: .people).valueLabel, "9,223,372,036,854,775,807")
+        XCTAssertEqual(PartnerMetric(label: "People", value: 12400, unit: .people).valueLabel, "12,400")
+    }
+}
+
+final class PartnerReportSizeTests: XCTestCase {
+    func testReportsCanExceedTheOrdinaryJSONBodyLimit() async throws {
+        let pdf = "%PDF-1.4\n" + String(repeating: "x", count: 2 * 1_048_576)
+        let transport = ScriptedTransport { _, _ in (.ok, pdf) }
+        let session = try PartnerSession(store: MemoryStore(nil))
+        try await session.install(token: "PB")
+        let service = WirePartner(origin: testOrigin, transport: transport, session: session)
+        let report = try await service.report()
+        let retained = try await service.retainedReport(id: "report")
+        XCTAssertEqual(report, Data(pdf.utf8))
+        XCTAssertEqual(retained, report)
+    }
+}

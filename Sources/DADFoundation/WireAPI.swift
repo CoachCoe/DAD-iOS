@@ -46,6 +46,10 @@ extension HTTPField.Name {
 /// body bounded to 1 MiB.
 struct NativeHeaders: ClientMiddleware {
     let access: @Sendable () async throws -> String?
+    let maxBodyBytes: Int
+    init(access: @escaping @Sendable () async throws -> String?, maxBodyBytes: Int = 1_048_576) {
+        self.access = access; self.maxBodyBytes = maxBodyBytes
+    }
     func intercept(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String,
                    next: @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)) async throws -> (HTTPResponse, HTTPBody?) {
         var request = request
@@ -56,7 +60,7 @@ struct NativeHeaders: ClientMiddleware {
         request.headerFields[.authorization] = try await access().map { "Bearer \($0)" }
         let (response, responseBody) = try await next(request, body, baseURL)
         guard let responseBody else { return (response, nil) }
-        let bytes = try await ArraySlice<UInt8>(collecting: responseBody, upTo: 1_048_576)
+        let bytes = try await ArraySlice<UInt8>(collecting: responseBody, upTo: maxBodyBytes)
         return (response, HTTPBody(bytes))
     }
 }

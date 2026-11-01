@@ -1,8 +1,9 @@
 # DAD iOS
 
-SwiftUI donor-app foundation backed by DAD-Main's Go API. The native implementation
-was selected on 18 October 2026, superseding the earlier cross-platform plan. The final
-feature subset and navigation still require the mobile PRD.
+SwiftUI donor and partner app backed by DAD-Main's Go API. Separate native apps
+were selected on 18 October 2026, superseding the earlier cross-platform plan.
+The shared R1 product contract governs functionality; provider and device acceptance
+boundaries are listed below.
 
 ## Build and test
 
@@ -159,8 +160,7 @@ Real `WireEvents` over the generated client, behind `EventsService`: the list (`
 - **Idempotency.** The contract defines no `Idempotency-Key` for these commands, so none is sent.
 - **Booking rules.** Cancel is offered until the event starts (E-9); a started event offers no new
   reservation; `early_booking` lets a Team Captain reserve before it opens to everyone (B-3); capacity 0
-  is "open to everyone". Times show the zone abbreviation and the donor's locale; the contract has no
-  event time zone yet, so the device zone is used.
+  is "open to everyone". Times use the event's `time_zone`, with the zone abbreviation and the donor's locale.
 - **Check-in.** Only a held seat, only between the event's start and end (the contract's window, not an
   assumed early grace). Outside it the panel says when it opens or that it closed. A typed code always
   works; "Scan QR code" opens the camera scanner (AVFoundation, QR only). The camera is requested at that

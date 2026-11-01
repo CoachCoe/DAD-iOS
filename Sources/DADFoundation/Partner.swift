@@ -204,7 +204,7 @@ public struct PartnerMetric: Sendable, Equatable {
     public var valueLabel: String {
         switch unit {
         case .usdCents: return formatUSDMinor(Int(value))
-        default: return formatUSDMinor(Int(value * 100)).replacingOccurrences(of: "$", with: "")
+        default: return value.formatted(.number.locale(Locale(identifier: "en_US")))
         }
     }
 }
