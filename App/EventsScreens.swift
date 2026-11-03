@@ -23,7 +23,6 @@ struct ShareSheet: UIViewControllerRepresentable {
 struct EventsScreen: View {
     @State var model: EventsModel
     let service: any EventsService
-    var onClose: (() -> Void)?
     var onSignedOut: () -> Void = {}
     @State private var selected: String? = {
         #if DEBUG
@@ -38,9 +37,6 @@ struct EventsScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if let onClose {
-                    Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("events-close")
-                }
                 Text("Events").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 content
             }

@@ -25,7 +25,6 @@ struct EngagementHome: View {
     @State var model: EngagementModel
     /// Adds the referral code to Apple Wallet; nil where Wallet is not wired (previews).
     @State var wallet: WalletPassModel? = nil
-    var onClose: (() -> Void)?
     var onSignedOut: () -> Void = {}
     @State private var showQR = false
     @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
@@ -35,7 +34,6 @@ struct EngagementHome: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if let onClose { Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("engagement-close") }
                 Text("Your impact").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 switch model.phase {
                 case .loading:
@@ -321,21 +319,27 @@ private struct InviteQRSheet: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
-            Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).frame(maxWidth: .infinity, alignment: .trailing).accessibilityIdentifier("qr-close")
-            Text("Show this code").font(.title.bold()).accessibilityAddTraits(.isHeader)
-            if let image = Self.qr(url.absoluteString) {
-                Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
-                    .frame(maxWidth: 320).padding(16).background(Color.white, in: RoundedRectangle(cornerRadius: 12))
-                    .accessibilityLabel("QR code for your invite link").accessibilityIdentifier("qr-code")
-            } else {
-                Text("The code couldn’t be drawn. Share your link instead.").accessibilityIdentifier("qr-failed")
+        NavigationStack {
+            VStack(spacing: 20) {
+                Text("Show this code").font(.title.bold()).accessibilityAddTraits(.isHeader)
+                if let image = Self.qr(url.absoluteString) {
+                    Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
+                        .frame(maxWidth: 320).padding(16).background(Color.white, in: RoundedRectangle(cornerRadius: 12))
+                        .accessibilityLabel("QR code for your invite link").accessibilityIdentifier("qr-code")
+                } else {
+                    Text("The code couldn’t be drawn. Share your link instead.").accessibilityIdentifier("qr-failed")
+                }
+                Text("A friend scans it with their phone camera to open your invite.").font(.footnote).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
             }
-            Text("A friend scans it with their phone camera to open your invite.").font(.footnote).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Spacer()
+            .padding(28).modifier(EngagementBackground()).accessibilityElement(children: .contain).accessibilityIdentifier("qr-sheet")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", action: onClose).accessibilityIdentifier("qr-close")
+                }
+            }
         }
-        .padding(28).modifier(EngagementBackground()).accessibilityElement(children: .contain).accessibilityIdentifier("qr-sheet")
     }
 
     private static func qr(_ text: String) -> UIImage? {
@@ -352,13 +356,11 @@ private struct InviteQRSheet: View {
 struct InitiativeSpendScreen: View {
     @State var model: InitiativeSpendModel
     let title: String
-    let onClose: () -> Void
     var onSignedOut: () -> Void = {}
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("spend-close")
                 Text("Where the money went").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 Text(title).font(.headline)
                 switch model.phase {

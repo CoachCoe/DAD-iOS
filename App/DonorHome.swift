@@ -22,35 +22,17 @@ struct DonorHomeView: View {
     private let events: (any EventsService)?
     private let engagement: (any EngagementService)?
     private let wallet: (any WalletPassService)?
-    @State private var showEngagement: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.arguments.contains("--stub-open-engagement")   // screenshot/UITest aid, DEBUG only
-        #else
-        false
-        #endif
-    }()
-    @State private var spendTarget: SpendTarget?
-    @State private var showEvents: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.arguments.contains("--stub-open-events")   // screenshot/UITest aid, DEBUG only
-        #else
-        false
-        #endif
-    }()
-    @State private var showHistory = false
-    @State private var showGift: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.arguments.contains("--stub-open-gift")   // screenshot/UITest aid, DEBUG only
-        #else
-        false
-        #endif
-    }()
+    /// The donor's public name for the "Welcome, …" greeting the home has shown since the landing shell.
+    private let greeting: String?
+    private let preview: Bool
     @State private var giftModel: GivingModel?
-    /// A screen a tapped notification asked for; opened here and then cleared.
+    /// A screen a tapped notification asked for. Routing now lives in the shell (tab + push); the
+    /// binding stays so Home can be constructed with the same signature.
     @Binding private var destination: AccountDestination?
 
     init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil,
          engagement: (any EngagementService)? = nil, wallet: (any WalletPassService)? = nil,
+         greeting: String? = nil, preview: Bool = false,
          destination: Binding<AccountDestination?> = .constant(nil), onSignedOut: @escaping () -> Void) {
         _destination = destination
         self.service = service
@@ -58,121 +40,69 @@ struct DonorHomeView: View {
         self.events = events
         self.engagement = engagement
         self.wallet = wallet
+        self.greeting = greeting
+        self.preview = preview
         self.onSignedOut = onSignedOut
         _model = State(initialValue: DashboardModel(service: service))
         _giftModel = State(initialValue: giving?.makeModel())
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if let notice = model.refreshNotice {
-                Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("dashboard-notice")
-            }
-            switch model.phase {
-            case .loading:
-                ProgressView("Loading your dashboard…").accessibilityIdentifier("dashboard-loading")
-            case .failed(let message):
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(message).accessibilityIdentifier("dashboard-error")
-                    Button("Try again") { Task { await model.load() } }
-                        .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("dashboard-retry")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let greeting { Text("Welcome, \(greeting)").font(.title2.bold()) }
+                if let notice = model.refreshNotice {
+                    Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("dashboard-notice")
                 }
-            case .ready(.preparing):
-                DADCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Getting your dashboard ready").font(.headline)
-                        Text("Your numbers appear here once your first gift has been counted.").font(.footnote)
-                        Button("Refresh") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
+                switch model.phase {
+                case .loading:
+                    ProgressView("Loading your dashboard…").accessibilityIdentifier("dashboard-loading")
+                case .failed(let message):
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(message).accessibilityIdentifier("dashboard-error")
+                        Button("Try again") { Task { await model.load() } }
+                            .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("dashboard-retry")
                     }
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("dashboard-preparing")
-            case .ready(.ready(let dashboard)):
-                DashboardCards(dashboard: dashboard)
+                case .ready(.preparing):
+                    DADCard {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Getting your dashboard ready").font(.headline)
+                            Text("Your numbers appear here once your first gift has been counted.").font(.footnote)
+                            Button("Refresh") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
+                        }
+                    }.accessibilityElement(children: .contain).accessibilityIdentifier("dashboard-preparing")
+                case .ready(.ready(let dashboard)):
+                    DashboardCards(dashboard: dashboard)
+                }
+                // A-3: "Where the money went" is a push, not a sheet. The link carries the initiative's id.
+                InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } },
+                               spendRoute: engagement == nil ? nil : { id, title in SpendRoute(id: id, title: title) })
+                if let giftModel { GiftSummaryCard(model: giftModel) }
+                // Gift history is a push from Home; the Giving tab reaches it too (shell deep-link).
+                NavigationLink(value: GiftRoute.history) { Text("Gift history") }
+                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-history")
             }
-            InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } },
-                           onSpend: engagement == nil ? nil : { id, title in spendTarget = SpendTarget(id: id, title: title) })
-            if let giftModel { GiftSummaryCard(model: giftModel, onManage: { showGift = true }) }
-            if engagement != nil {
-                DADCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Badges, rankings & network").font(.headline).accessibilityAddTraits(.isHeader)
-                        Text("Your badges, standing, referral network and invite link.").font(.footnote)
-                        Button("See your impact") { showEngagement = true }
-                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-engagement")
-                    }
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("engagement-card")
-            }
-            if events != nil {
-                DADCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Events").font(.headline).accessibilityAddTraits(.isHeader)
-                        Text("Volunteer, meet other donors and check in.").font(.footnote)
-                        Button("Browse events") { showEvents = true }
-                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-events")
-                    }
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("events-card")
-            }
-            Button("Gift history") { showHistory = true }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-history")
+            .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+            .accessibilityElement(children: .contain).accessibilityIdentifier("donor-home")
         }
-        .accessibilityElement(children: .contain).accessibilityIdentifier("donor-home")
+        .modifier(HistoryBackground())
         .task { await model.load() }
         .task { await giftModel?.load() }
-        .task(id: destination) {
-            switch destination {
-            case .gifts: showHistory = true
-            case .paymentMethod: showGift = giftModel != nil
-            default: return
-            }
-            destination = nil
-        }
         .refreshable { await model.load(); await giftModel?.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
-        .sheet(isPresented: $showGift) {
-            if let giftModel, let giving {
-                GiftSheet(model: giftModel, stubComplete: giving.stubComplete, onClose: { showGift = false },
-                          onSignedOut: { showGift = false; onSignedOut() })
-            }
-        }
-        .sheet(isPresented: $showEngagement) {
-            if let engagement {
-                EngagementHome(model: EngagementModel(service: engagement), wallet: wallet.map { WalletPassModel(service: $0) },
-                               onClose: { showEngagement = false },
-                               onSignedOut: { showEngagement = false; onSignedOut() })
-            }
-        }
-        .sheet(item: $spendTarget) { target in
-            if let engagement {
-                InitiativeSpendScreen(model: InitiativeSpendModel(service: engagement, initiativeID: target.id), title: target.title,
-                                      onClose: { spendTarget = nil }, onSignedOut: { spendTarget = nil; onSignedOut() })
-            }
-        }
-        .sheet(isPresented: $showEvents) {
-            if let events {
-                EventsScreen(model: EventsModel(service: events), service: events, onClose: { showEvents = false },
-                             onSignedOut: { showEvents = false; onSignedOut() })
-            }
-        }
-        .sheet(isPresented: $showHistory) {
-            GiftHistoryScreen(service: service, onClose: { showHistory = false }, onSignedOut: { showHistory = false; onSignedOut() })
-        }
     }
 }
 
-private struct SpendTarget: Identifiable { let id: String; let title: String }
-
-/// The donor's monthly gift at a glance (G-7..G-9); "Manage gift" opens the full gift screen. It reads
-/// the same `GivingModel` as that screen, so a cancel or change shows here the moment it succeeds.
+/// The donor's monthly gift at a glance (G-7..G-9). It reads the same `GivingModel` as the Giving tab's
+/// gift screen, so a cancel or change shows here the moment it succeeds.
 private struct GiftSummaryCard: View {
     let model: GivingModel
-    let onManage: () -> Void
 
     var body: some View {
         DADCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Your monthly gift").font(.headline).accessibilityAddTraits(.isHeader)
                 Text(summary).font(.footnote).accessibilityIdentifier("gift-summary")
-                Button("Manage gift", action: onManage)
-                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-gift")
             }
         }.accessibilityElement(children: .contain).accessibilityIdentifier("gift-summary-card")
     }
@@ -273,8 +203,8 @@ private struct DashboardCards: View {
 private struct InitiativeCard: View {
     let phase: DashboardModel.InitiativePhase
     let onRetry: () -> Void
-    /// A-3: opens the initiative's spend by category; nil when the engagement service is not wired.
-    var onSpend: ((String, String) -> Void)?
+    /// A-3: builds the push route for the initiative's spend by category; nil when engagement is not wired.
+    var spendRoute: ((String, String) -> SpendRoute)?
 
     var body: some View {
         DADCard {
@@ -303,9 +233,11 @@ private struct InitiativeCard: View {
                     }
                     Text(TodayInitiative.attributionNote).font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("initiative-note")
-                    if let onSpend {
-                        Button("See every dollar this initiative has spent") { onSpend(initiative.id, initiative.title) }
-                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-spend")
+                    if let spendRoute {
+                        NavigationLink(value: spendRoute(initiative.id, initiative.title)) {
+                            Text("See every dollar this initiative has spent")
+                        }
+                        .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-spend")
                     }
                 }
             }
@@ -316,12 +248,10 @@ private struct InitiativeCard: View {
 /// Gift history (paged) with an inline gift record per row and the calendar-year total on top.
 struct GiftHistoryScreen: View {
     @State private var model: GiftHistoryModel
-    let onClose: () -> Void
     let onSignedOut: () -> Void
     @Environment(\.colorScheme) private var scheme
 
-    init(service: any DashboardService, onClose: @escaping () -> Void, onSignedOut: @escaping () -> Void) {
-        self.onClose = onClose
+    init(service: any DashboardService, onSignedOut: @escaping () -> Void) {
         self.onSignedOut = onSignedOut
         _model = State(initialValue: GiftHistoryModel(service: service))
     }
@@ -329,7 +259,6 @@ struct GiftHistoryScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("history-close")
                 Text("Gift history").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 if let summary = model.summary {
                     DADCard {

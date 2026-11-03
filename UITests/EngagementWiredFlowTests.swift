@@ -13,8 +13,10 @@ import XCTest
     }
 
     private func openEngagement(_ app: XCUIApplication) {
-        XCTAssertTrue(app.buttons["open-engagement"].waitForExistence(timeout: 20))
-        app.buttons["open-engagement"].tap()
+        // Phase B: engagement is the Circle tab, not a card/sheet on Home.
+        let circle = app.tabBars.buttons["Circle"]
+        XCTAssertTrue(circle.waitForExistence(timeout: 20))
+        circle.tap()
         XCTAssertTrue(app.otherElements["engagement-home"].waitForExistence(timeout: 10))
     }
 
@@ -158,7 +160,8 @@ import XCTest
         XCTAssertTrue(app.staticTexts["spend-row-0"].label.contains("Food"), app.staticTexts["spend-row-0"].label)
         XCTAssertTrue(app.staticTexts["spend-row-0"].label.contains("$900"), app.staticTexts["spend-row-0"].label)
         XCTAssertTrue(app.staticTexts["spend-row-1"].label.contains("Delivery"))
-        app.buttons["spend-close"].tap()
+        // Phase B: spend is a push from Home; return with the navigation back button.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.staticTexts["initiative-title"].waitForExistence(timeout: 5))
     }
 }

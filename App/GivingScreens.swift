@@ -301,13 +301,16 @@ struct GiftSheet: View {
     let onClose: () -> Void
     let onSignedOut: () -> Void
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
-                    .buttonStyle(DADButtonStyle(.tertiary))
-                    .accessibilityIdentifier("gift-close")
+        NavigationStack {
+            ScrollView {
                 GiftScreen(model: model, stubComplete: stubComplete, onSignedOut: onSignedOut)
             }
-        }.dadBackground()
+            .dadBackground()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", action: onClose).accessibilityIdentifier("gift-close")
+                }
+            }
+        }
     }
 }

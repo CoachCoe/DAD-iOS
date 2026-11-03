@@ -14,7 +14,7 @@ private func launchFlag(_ name: String) -> Bool {
     #endif
 }
 
-private func tokenColor(_ name: String) -> Color { Color.dad(name) }
+func tokenColor(_ name: String) -> Color { Color.dad(name) }
 
 struct AppBackground: ViewModifier {
     @Environment(\.colorScheme) private var scheme
@@ -50,7 +50,7 @@ private actor PreviewAPI: AccountAPI {
 #endif
 
 @MainActor @Observable
-private final class AccountModel {
+final class AccountModel {
     enum State: Equatable { case loading, ready(AccountProfile), unavailable, signedOut }
     var state = State.loading
     let session: AccountSession?
@@ -378,124 +378,6 @@ private struct WebFallback: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 }
 
-/// The signed-in donor landing. Carries the exact copy the app has shown since the
-/// preview shell, so the role-aware root is a structural change, not a visible one.
-private struct DonorLanding: View {
-    let state: AccountModel.State
-    let preview: Bool
-    let onRetry: () -> Void
-    var onSettings: (() -> Void)?
-    /// The real donor-home reads; nil in the synthetic preview, which keeps its placeholder line.
-    var dashboard: (any DashboardService)?
-    var giving: GivingKit?
-    var events: (any EventsService)?
-    var engagement: (any EngagementService)?
-    var wallet: (any WalletPassService)?
-    @Binding var destination: AccountDestination?
-    var onSignedOut: () -> Void = {}
-    var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
-            Group {
-                switch state {
-                case .loading:
-                    ProgressView("Loading your account…")
-                case .ready(let profile):
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Welcome, \(profile.publicName ?? "friend")").font(.title2.bold())
-                        if dashboard == nil { Text("Your account has a home here.") }
-                    }
-                case .unavailable:
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Your account is unavailable right now.").font(.headline)
-                        Text("Please try again in a moment.")
-                        Button("Try again", action: onRetry).buttonStyle(DADButtonStyle(.primary))
-                    }
-                case .signedOut:
-                    Text("You’re signed out. Use your DAD sign-in link to continue.")
-                }
-            }.accessibilityElement(children: .contain).accessibilityIdentifier("account-state")
-            // Settings hosts sign-out and the store-mandated in-app account deletion, so it is
-            // reachable whenever the donor is signed in, including while the profile read is retrying.
-            if let onSettings {
-                Button("Settings", action: onSettings)
-                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
-            }
-            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, engagement: engagement, wallet: wallet,
-                                                                           destination: $destination, onSignedOut: onSignedOut) }
-            if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
-        }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-    }
-}
-
-/// Unauthenticated splash — pick a journey before signing in. The preview store starts
-/// signed-in, so this path is exercised only when there is no session.
-private struct RoleSelect: View {
-    let notice: String?
-    var invitation: String?
-    let onSelect: (AppRole) -> Void
-    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
-    var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
-            if let notice {
-                Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("auth-notice")
-            }
-            if let invitation { Text(invitation).font(.body).accessibilityIdentifier("auth-invitation") }
-            VStack(spacing: 12) {
-                Button("I’m a donor") { analytics?.emit(.roleSelected); onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
-                Button("I’m a partner") { analytics?.emit(.roleSelected); onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
-            }
-            if let analytics, analytics.choice == nil { AnalyticsChoice(analytics: analytics) }
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("role-select")
-    }
-}
-
-/// Asks iOS for notification permission only when the donor chooses to, never at launch; once allowed the app
-/// registers for a device token (see `PushAppDelegate`).
-private struct NotificationPermissionRow: View {
-    @State private var status: UNAuthorizationStatus?
-    var body: some View {
-        Group {
-            switch status {
-            case .notDetermined:
-                Button("Turn on notifications") {
-                    Task {
-                        let granted = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
-                        if granted { UIApplication.shared.registerForRemoteNotifications() }
-                        status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
-                    }
-                }.buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("notifications-allow")
-            case .denied:
-                Text("Notifications are off for DAD in iOS Settings.").font(.footnote).accessibilityIdentifier("notifications-denied")
-            default:
-                EmptyView()
-            }
-        }
-        .task { status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus }
-    }
-}
-
-/// The first-launch analytics question, worded as on the website; the answer can be changed in Settings.
-private struct AnalyticsChoice: View {
-    let analytics: AnalyticsController
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Allow first-party usage analytics? DAD uses a temporary journey ID to measure signup, sharing and giving. "
-                 + "No names, email addresses or payment details are sent. Observations are kept for 13 months. "
-                 + "You can change this choice in Settings.").font(.footnote)
-            Button("Allow usage analytics") { analytics.choose(true) }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("analytics-allow")
-            Button("Decline usage analytics") { analytics.choose(false) }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("analytics-decline")
-        }.accessibilityElement(children: .contain).accessibilityIdentifier("analytics-choice")
-    }
-}
-
 #if DEBUG
 /// Preview sign-in transport — returns a handle and preview credentials so the auth journey
 /// runs in the simulator with no backend. The wire implementation replaces this once the
@@ -776,7 +658,7 @@ private struct PreviewSessionSettings: AccountSettingsService {
 /// Account & settings (PRD §6.11/§6.12): profile header, notification + privacy toggles, sign
 /// out, and the store-mandated delete-account flow with a typed-word confirm gate — all inline.
 /// Bound to `AccountSettingsModel`.
-private struct AccountSettingsScreen: View {
+struct AccountSettingsScreen: View {
     @State var model: AccountSettingsModel
     /// Set/change password; nil where there is no real account to change (previews).
     var passwords: (any PasswordSettingsService)?
@@ -1212,7 +1094,7 @@ private struct UnconfiguredSignIn: SignInService, SignupService, SignInLinkServi
 }
 
 /// Every sign-in transport the unauthenticated stack can use, plus which optional methods are on.
-private struct SignInKit {
+struct SignInKit {
     let phone: any SignInService
     let signup: any SignupService
     let link: any SignInLinkService
@@ -1303,28 +1185,6 @@ private struct UnauthenticatedStack: View {
     }
 }
 
-/// Settings presented from the donor shell: sign-out and deletion run against the real session, and
-/// leaving the signed-in state dismisses the sheet so the root can route to sign-in.
-private struct SettingsSheet: View {
-    let service: any AccountSettingsService
-    let passwords: (any PasswordSettingsService)?
-    var management: (any AccountManagementService)?
-    var giving: GivingKit?
-    let onClose: () -> Void
-    let onSignedOut: () -> Void
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
-                    .buttonStyle(DADButtonStyle(.tertiary))
-                    .accessibilityIdentifier("settings-close")
-                AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, management: management,
-                                      giving: giving, onSignedOut: onSignedOut)
-            }
-        }.modifier(AppBackground()).tint(tokenColor("brand-ink"))
-    }
-}
-
 /// UIKit's push callbacks, surfaced to SwiftUI: the device token once APNs issues one, and the latest tapped
 /// notification. Without the Push Notifications entitlement (it needs the signing team) APNs issues no token.
 @MainActor @Observable
@@ -1378,7 +1238,6 @@ struct DADApp: App {
     @State private var model = AccountModel()
     @State private var router = RoleRouter()
     @State private var web: WebDestination?
-    @State private var showSettings = false
 
     @ViewBuilder private var donorRoot: some View {
         #if DEBUG
@@ -1400,12 +1259,7 @@ struct DADApp: App {
     }
 
     private var donorLanding: some View {
-        DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
-                     onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
-                     dashboard: model.dashboardService, giving: model.givingKit, events: model.eventsService,
-                     engagement: model.engagementService, wallet: model.walletService,
-                     destination: Binding(get: { model.destination }, set: { model.destination = $0 }),
-                     onSignedOut: { Task { await model.load() } })
+        DonorShell(model: model, destination: Binding(get: { model.destination }, set: { model.destination = $0 }))
     }
 
     @ViewBuilder private var partnerRoot: some View {
@@ -1424,45 +1278,63 @@ struct DADApp: App {
         }
     }
 
+    /// Whether the signed-in donor shows the full-window `TabView` shell (not a DEBUG single-screen
+    /// preview, which keeps the scrolling root the standalone screens expect).
+    private var showsDonorTabs: Bool {
+        guard showsDonorShell else { return false }
+        #if DEBUG
+        return !["--preview-giving", "--preview-engagement", "--preview-events", "--preview-settings"].contains(where: launchFlag)
+        #else
+        return true
+        #endif
+    }
+
+    @ViewBuilder private var rootContent: some View {
+        if showsDonorShell {
+            // ONE branch for both "restoring with a stored session" and "signed in as donor":
+            // the restore -> signed-in transition must not change view identity, or the donor
+            // home is rebuilt a frame after it mounted, cancelling its in-flight dashboard
+            // read (result discarded) and starting a second one.
+            donorRoot
+        } else {
+            switch router.root {
+            case .authenticated(.donor):
+                donorRoot   // unreachable: handled by `showsDonorShell`
+            case .restoring:
+                // A session-less launch waits on a neutral progress view so it never flashes
+                // the signed-in screen (a restorable session is the donor shell above).
+                ProgressView().accessibilityIdentifier("restoring")
+            case .authenticated(.partner):
+                partnerRoot
+            case .unauthenticated:
+                UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
+                                     invitation: model.invitation,
+                                     onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
+                                     partnerToken: model.pendingPartnerToken,
+                                     onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
+                                     onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) },
+                                     publicOrigin: model.publicOrigin) {
+                    // The session already holds the established credentials; read the profile
+                    // through it, then enter the donor shell (which owns load/recovery states).
+                    Task {
+                        await model.load()
+                        router.selectRole(.donor)
+                        router.signedIn(as: .donor)
+                        _ = router.flushPendingDestination()
+                    }
+                }
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
-            ScrollView {
-                Group {
-                    if showsDonorShell {
-                        // ONE branch for both "restoring with a stored session" and "signed in as donor":
-                        // the restore -> signed-in transition must not change view identity, or the donor
-                        // home is rebuilt a frame after it mounted, cancelling its in-flight dashboard
-                        // read (result discarded) and starting a second one.
-                        donorRoot
-                    } else {
-                    switch router.root {
-                    case .authenticated(.donor):
-                        donorRoot   // unreachable: handled by `showsDonorShell`
-                    case .restoring:
-                        // A session-less launch waits on a neutral progress view so it never flashes
-                        // the signed-in screen (a restorable session is the donor shell above).
-                        ProgressView().accessibilityIdentifier("restoring")
-                    case .authenticated(.partner):
-                        partnerRoot
-                    case .unauthenticated:
-                        UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
-                                             invitation: model.invitation,
-                                             onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
-                                             partnerToken: model.pendingPartnerToken,
-                                             onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
-                                             onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) },
-                                             publicOrigin: model.publicOrigin) {
-                            // The session already holds the established credentials; read the profile
-                            // through it, then enter the donor shell (which owns load/recovery states).
-                            Task {
-                                await model.load()
-                                router.selectRole(.donor)
-                                router.signedIn(as: .donor)
-                                _ = router.flushPendingDestination()
-                            }
-                        }
-                    }
-                    }
+            Group {
+                if showsDonorTabs {
+                    // The TabView owns the full window; it must not sit inside a ScrollView.
+                    rootContent
+                } else {
+                    ScrollView { rootContent }
                 }
             }
             .modifier(AppBackground())
@@ -1504,25 +1376,13 @@ struct DADApp: App {
                 model.openNotification(tap)
             }
             .task(id: PushRegistrationKey(token: push.token, ready: model.isReady)) { await model.registerPush(push.token) }
-            .onChange(of: model.destination) { _, destination in
-                if destination == .profile, model.makeSettings() != nil { model.destination = nil; showSettings = true }
-                if destination == .dashboard { model.destination = nil }
-            }
             .onChange(of: model.state) { _, state in
                 switch state {
                 case .ready where router.currentRole == nil:
                     router.signedIn(as: .donor)   // a claim link signed the person in from the sign-in screen
                 case .signedOut where router.currentRole == .donor:
                     router.signedOut()            // sign-out, deletion, or a revoked session
-                    showSettings = false
                 default: break
-                }
-            }
-            .sheet(isPresented: $showSettings) {
-                if let service = model.makeSettings() {
-                    SettingsSheet(service: service, passwords: model.passwordSettings, management: model.management, giving: model.givingKit, onClose: { showSettings = false },
-                                  onSignedOut: { showSettings = false; Task { await model.load() } })
-                    .environment(model.analytics)
                 }
             }
             .onOpenURL { if let url = model.receive($0, role: router.currentRole) { web = WebDestination(url: url) } }

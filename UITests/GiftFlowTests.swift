@@ -13,9 +13,10 @@ import XCTest
     }
 
     private func openGift(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        let open = app.buttons["open-gift"]
-        XCTAssertTrue(open.waitForExistence(timeout: 20), "the donor home offers the gift card", file: file, line: line)
-        open.tap()
+        // Phase B: the gift screen is the Giving tab, not a sheet from the Home card.
+        let giving = app.tabBars.buttons["Giving"]
+        XCTAssertTrue(giving.waitForExistence(timeout: 20), "the donor shell offers the Giving tab", file: file, line: line)
+        giving.tap()
         XCTAssertTrue(app.otherElements["gift-screen"].waitForExistence(timeout: 10), file: file, line: line)
     }
 
@@ -38,7 +39,8 @@ import XCTest
         XCTAssertEqual(app.staticTexts["gift-monthly"].label, "$90/month")
         XCTAssertEqual(app.staticTexts["gift-notice"].label, "Your gift is set up.")
 
-        app.buttons["gift-close"].tap()
+        // Phase B: the Giving tab has no inline close; the Home card reflects the new gift.
+        app.tabBars.buttons["Home"].tap()
         XCTAssertTrue(app.staticTexts["gift-summary"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["gift-summary"].label.hasPrefix("$90/month · renews"), app.staticTexts["gift-summary"].label)
     }
@@ -80,7 +82,8 @@ import XCTest
         XCTAssertTrue(app.staticTexts["gift-ending"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["Cancel gift"].exists, "an ending gift offers no second cancel")
 
-        app.buttons["gift-close"].tap()
+        // Phase B: the Giving tab has no inline close; the Home card reflects the ending gift.
+        app.tabBars.buttons["Home"].tap()
         XCTAssertTrue(app.staticTexts["gift-summary"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["gift-summary"].label.contains("no further renewals"), app.staticTexts["gift-summary"].label)
     }

@@ -44,7 +44,8 @@ import XCTest
 
         app.buttons["gift-row-0"].tap()
         XCTAssertTrue(app.otherElements["receipt-detail"].waitForExistence(timeout: 10))
-        app.buttons["history-close"].tap()
+        // Phase B: history is a push from Home; return with the navigation back button.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.buttons["open-history"].waitForExistence(timeout: 5))
     }
 
