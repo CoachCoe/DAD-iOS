@@ -22,8 +22,10 @@ import XCTest
     }
 
     private func openEvents(_ app: XCUIApplication) {
-        XCTAssertTrue(app.buttons["open-events"].waitForExistence(timeout: 20))
-        app.buttons["open-events"].tap()
+        // Phase B: events is the Events tab, not a card/sheet on Home.
+        let events = app.tabBars.buttons["Events"]
+        XCTAssertTrue(events.waitForExistence(timeout: 20))
+        events.tap()
         XCTAssertTrue(app.otherElements["events-home"].waitForExistence(timeout: 10))
     }
 
