@@ -85,8 +85,14 @@ struct GiftScreen: View {
     @State var model: GivingModel
     var stubComplete: (@Sendable (HostedHandoff.Purpose) -> Void)?
     var onSignedOut: () -> Void = {}
+    /// "Invite someone" on the celebration screen switches to the Circle tab (set from the shell).
+    var onInvite: () -> Void = {}
     @State private var confirmingCancel = false
     @ScaledMetric(relativeTo: .largeTitle) private var amountSize: CGFloat = 44
+    /// Phase F: show the one-time celebration after a FIRST gift is set up. Tracks that this screen
+    /// started a gift (so a later amount-change never re-celebrates) and whether it's been shown.
+    @State private var startedGift = false
+    @State private var showCelebration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -110,7 +116,25 @@ struct GiftScreen: View {
                 HostedPageSheet(handoff: handoff, stubComplete: stubComplete, onFinish: { Task { await model.handoffFinished() } })
             }
         }
+        // Phase F: success haptic the moment a gift is set up or saved; warning when payment needs
+        // attention. Triggers are published model state, so no number is animated.
+        .sensoryFeedback(.success, trigger: model.recurring.subscriptionID)
+        .sensoryFeedback(.warning, trigger: paymentNeedsAttention)
+        // One-time celebration after a FIRST gift completes (not an amount change).
+        .onChange(of: model.recurring.subscriptionID) { previous, current in
+            if startedGift, previous == nil, current != nil { showCelebration = true }
+        }
+        .fullScreenCover(isPresented: $showCelebration) {
+            CelebrationView(monthly: "\(formatUSDMinor(model.selection.monthlyMinor))/month",
+                            daily: "$\(model.selection.dailyDollars) a day",
+                            founding: false,
+                            onInvite: { showCelebration = false; onInvite() },
+                            onDone: { showCelebration = false })
+        }
     }
+
+    /// True when the payment-method update is in a state the donor must act on (expired).
+    private var paymentNeedsAttention: Bool { model.payment?.kind == .expired }
 
     @ViewBuilder private var loadingOrFailed: some View {
         if case .failed(let message) = model.phase {
@@ -191,7 +215,7 @@ struct GiftScreen: View {
     private var startSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             amountCard
-            Button("Start · \(formatUSDMinor(model.selection.monthlyMinor))/month") { Task { await model.startGift() } }
+            Button("Start · \(formatUSDMinor(model.selection.monthlyMinor))/month") { startedGift = true; Task { await model.startGift() } }
                 .buttonStyle(DADButtonStyle(.primary)).disabled(model.isBusy).accessibilityIdentifier("start-gift")
         }
     }

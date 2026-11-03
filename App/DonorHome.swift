@@ -110,6 +110,14 @@ struct DonorHomeView: View {
         .task { await giftModel?.load() }
         .refreshable { await model.load(); await giftModel?.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
+        // Phase F: warning haptic when the streak is at risk (payment needs attention).
+        .sensoryFeedback(.warning, trigger: streakAtRisk)
+    }
+
+    /// Whether the dashboard's streak is currently at risk — drives the warning haptic.
+    private var streakAtRisk: Bool {
+        if case .ready(.ready(let dashboard)) = model.phase { return dashboard.streak?.atRisk == true }
+        return false
     }
 
     /// Small date line over a large "Hi, {name}" title; "Welcome back" when there is no name.
@@ -177,10 +185,22 @@ private struct DashboardCards: View {
     /// At-risk "Update payment" switches to the Giving tab.
     var onUpdatePayment: () -> Void = {}
     @ScaledMetric(relativeTo: .largeTitle) private var streakSize: CGFloat = 44
+    /// Phase F: the milestone last acknowledged on this device, so a newly crossed milestone shows the
+    /// inline card once (NOT a modal) and fires the success haptic only on first sight.
+    @AppStorage("dad.lastSeenMilestone") private var lastSeenMilestone = 0
+    @State private var milestoneDismissed = false
+
+    /// The milestone the streak has crossed but this device hasn't acknowledged yet, if any.
+    private var newMilestone: Int? {
+        guard let reached = dashboard.streak?.ladder?.lastMilestone, reached > 0, reached > lastSeenMilestone,
+              !milestoneDismissed else { return nil }
+        return reached
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let streak = dashboard.streak, streak.atRisk { atRiskBanner(streak) }
+            if let reached = newMilestone { milestoneCard(reached) }
             streak
             referralTiles
             impact
@@ -221,6 +241,32 @@ private struct DashboardCards: View {
         .foregroundStyle(Color.dad("ink"))
         .clipShape(RoundedRectangle(cornerRadius: .dadRadius("card"), style: .continuous))
         .accessibilityElement(children: .contain).accessibilityIdentifier("at-risk-banner")
+    }
+
+    /// Milestone-reached (streak crossed a milestone since last launch): a dismissible inline card with
+    /// a share action — NOT a modal. First sight also fires the success haptic.
+    @ViewBuilder private func milestoneCard(_ reached: Int) -> some View {
+        let message = "\(reached) days. That’s a month of aid, on the record."
+        DADCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top) {
+                    Label("Milestone reached", systemImage: "flag.checkered")
+                        .font(.footnote.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 0)
+                    Button {
+                        lastSeenMilestone = reached
+                        milestoneDismissed = true
+                    } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).accessibilityLabel("Dismiss")
+                }
+                Text(message).font(.headline)
+                ShareLink(item: message) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }.buttonStyle(DADButtonStyle(.secondary, fillsWidth: false))
+            }
+        }
+        .accessibilityElement(children: .contain).accessibilityIdentifier("milestone-card")
+        .sensoryFeedback(.success, trigger: reached)
     }
 
     /// Link | IRL referral counts, equal weight. Unknown stays unknown (nil → "—", never 0); a real 0

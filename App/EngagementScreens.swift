@@ -30,6 +30,8 @@ struct EngagementHome: View {
     @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
     @State private var copied = false
     @State private var nameDraft = ""
+    /// Phase F: toggled when an invite is shared/copied, driving the success haptic.
+    @State private var inviteShared = false
 
     var body: some View {
         ScrollView {
@@ -62,6 +64,7 @@ struct EngagementHome: View {
         .modifier(EngagementBackground())
         .task { await model.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
+        .sensoryFeedback(.success, trigger: inviteShared)
         .sheet(isPresented: $showQR) {
             if let url = model.snapshot?.referral?.irlURL() { InviteQRSheet(url: url, onClose: { showQR = false }) }
         }
@@ -211,10 +214,11 @@ struct EngagementHome: View {
                             ShareLink(item: link, message: Text(referral.shareMessage())) {
                                 Label("Share invite", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity)
                             }.buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("share-invite")
-                                .simultaneousGesture(TapGesture().onEnded { analytics?.emit(.inviteShared, properties: ["channel": "share_sheet"]) })
+                                .simultaneousGesture(TapGesture().onEnded { inviteShared.toggle(); analytics?.emit(.inviteShared, properties: ["channel": "share_sheet"]) })
                             Button(copied ? "Copied" : "Copy link") {
                                 UIPasteboard.general.string = link.absoluteString
                                 copied = true
+                                inviteShared.toggle()
                                 analytics?.emit(.inviteShared, properties: ["channel": "copy"])
                             }.buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("copy-invite")
                             Button("Show QR") { showQR = true; analytics?.emit(.irlCodeShown) }
