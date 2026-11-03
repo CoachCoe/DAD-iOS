@@ -133,6 +133,8 @@ private struct EventActions: View {
     let model: EventsModel
     let event: DonorEvent
     @Binding var confirmingCancel: String?
+    /// Phase G: Reserve is the single primary on the DETAIL screen; in a list row it's secondary.
+    var isDetail: Bool = false
 
     var body: some View {
         let now = Date()
@@ -140,7 +142,7 @@ private struct EventActions: View {
             switch event.availability(now: now) {
             case .reservable:
                 Button("Reserve") { Task { await model.reserve(eventID: event.id) } }
-                    .buttonStyle(DADButtonStyle(.primary)).disabled(model.isBusy(event.id)).accessibilityIdentifier("reserve-\(event.id)")
+                    .buttonStyle(DADButtonStyle(isDetail ? .primary : .secondary)).disabled(model.isBusy(event.id)).accessibilityIdentifier("reserve-\(event.id)")
             case .waitlistable:
                 Button("Join waitlist") { Task { await model.reserve(eventID: event.id) } }
                     .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isBusy(event.id)).accessibilityIdentifier("waitlist-\(event.id)")
@@ -212,7 +214,7 @@ private struct EventDetail: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     if !event.details.isEmpty { Text(event.details).accessibilityIdentifier("event-description") }
                     Text(event.spotsLabel).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("spots-\(event.id)")
-                    EventActions(model: model, event: event, confirmingCancel: $confirmingCancel)
+                    EventActions(model: model, event: event, confirmingCancel: $confirmingCancel, isDetail: true)
                 }
             }.accessibilityElement(children: .contain).accessibilityIdentifier("event-detail-\(event.id)")
             if event.status == .reserved || event.status == .waitlisted || event.status == .checkedIn {
