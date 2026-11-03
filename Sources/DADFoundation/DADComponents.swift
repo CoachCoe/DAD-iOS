@@ -70,7 +70,7 @@ public extension View {
 
 /// Primary call-to-action. 44pt minimum target, Dynamic Type, brand-on-wash with readable contrast.
 public struct DADButtonStyle: ButtonStyle {
-    public enum Kind { case primary, secondary }
+    public enum Kind { case primary, secondary, tertiary, destructive }
     private let kind: Kind
     private let fillsWidth: Bool
     @Environment(\.colorScheme) private var scheme
@@ -87,12 +87,21 @@ public struct DADButtonStyle: ButtonStyle {
         let foreground: Color
         switch kind {
         case .primary:
-            // `brand` (#ff4a22) under paper text is 3.19:1, below AA 4.5:1; `brand-ink` is 5.04:1.
-            background = .dad("brand-ink")
-            foreground = .dad("paper")
+            // Matches the web primary: `brand` (#ff4a22) fill under `ink` (#0e1e1e) label is
+            // 5.11:1, clearing AA 4.5:1. Not scheme-branched, so dark mode gets the same pairing.
+            background = .dad("brand")
+            foreground = .dad("ink")
         case .secondary:
             background = .dad(scheme == .dark ? "ink" : "card")
             foreground = .dad(scheme == .dark ? "paper" : "ink")
+        case .tertiary:
+            // Text-weight action: no pill fill, label reads against the page background.
+            background = .clear
+            foreground = .dad(scheme == .dark ? "paper" : "ink")
+        case .destructive:
+            // Text-weight like tertiary, but the `fail` token marks a destructive action.
+            background = .clear
+            foreground = .dad("fail")
         }
         return configuration.label
             .font(.body.weight(.semibold))
@@ -150,12 +159,12 @@ public struct DADStreakBar: View {
         HStack(spacing: 3) {
             ForEach(0..<total, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(index < filled ? Color.dad("brand") : Color.dad("line"))
+                    .fill(index < filled ? Color.dad("ok") : Color.dad("line"))
                     .frame(height: 10)
                     .overlay(
                         // Shape cue in addition to color for the filled segments.
                         index < filled
-                            ? RoundedRectangle(cornerRadius: 2).strokeBorder(Color.dad("brand-ink"), lineWidth: 0.5)
+                            ? RoundedRectangle(cornerRadius: 2).strokeBorder(Color.dad("ok-ink"), lineWidth: 0.5)
                             : nil
                     )
             }

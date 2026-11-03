@@ -28,6 +28,12 @@ final class DesignTokenTests: XCTestCase {
         let paper = DADTokens.color["paper"]!
         XCTAssertLessThan(ratio(paper, DADTokens.color["brand"]!), 4.5, "brand is the decorative colour, not a text background")
         XCTAssertGreaterThanOrEqual(ratio(paper, DADTokens.color["brand-ink"]!), 4.5)
+        XCTAssertGreaterThanOrEqual(ratio(DADTokens.color["ink"]!, DADTokens.color["brand"]!), 4.5, "ink on brand must clear AA")
+    }
+
+    func testStreakProgressTokensResolve() {
+        XCTAssertNotNil(Color.parseHex(DADTokens.color["ok"]!))
+        XCTAssertNotNil(Color.parseHex(DADTokens.color["ok-ink"]!))
     }
 
     func testShorthandHexExpands() {
