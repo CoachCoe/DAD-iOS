@@ -30,7 +30,7 @@ struct QRScanSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Button("Close", action: onClose).accessibilityIdentifier("scan-close")
+            Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("scan-close")
             Text("Scan check-in code").font(.title2.bold()).accessibilityAddTraits(.isHeader)
             switch state {
             case nil:

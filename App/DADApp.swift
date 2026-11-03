@@ -410,7 +410,7 @@ private struct DonorLanding: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Your account is unavailable right now.").font(.headline)
                         Text("Please try again in a moment.")
-                        Button("Try again", action: onRetry).buttonStyle(.borderedProminent)
+                        Button("Try again", action: onRetry).buttonStyle(DADButtonStyle(.primary))
                     }
                 case .signedOut:
                     Text("You’re signed out. Use your DAD sign-in link to continue.")
@@ -1316,6 +1316,7 @@ private struct SettingsSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
+                    .buttonStyle(DADButtonStyle(.tertiary))
                     .accessibilityIdentifier("settings-close")
                 AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, management: management,
                                       giving: giving, onSignedOut: onSignedOut)

@@ -329,7 +329,7 @@ struct GiftHistoryScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Button("Close", action: onClose).accessibilityIdentifier("history-close")
+                Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("history-close")
                 Text("Gift history").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 if let summary = model.summary {
                     DADCard {

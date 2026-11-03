@@ -181,3 +181,76 @@ public struct DADStreakBar: View {
         .accessibilityValue("\(filled) of \(total) days")
     }
 }
+
+/// The two ways a recurring gift is framed — a monthly total and its per-day equivalent —
+/// shown with EQUAL visual weight so neither reads as the "real" number, joined by a
+/// middle-dot. One accessibility label speaks the whole phrase.
+public struct DADGiftFraming: View {
+    private let monthly: String
+    private let daily: String
+    public init(monthly: String, daily: String) {
+        self.monthly = monthly
+        self.daily = daily
+    }
+    public var body: some View {
+        HStack(spacing: .dadSpace("2")) {
+            Text(monthly)
+            Text("·")
+            Text(daily)
+        }
+        .font(.body.weight(.semibold))
+        .foregroundStyle(Color.dad("ink"))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(monthly) · \(daily)")
+    }
+}
+
+/// A single labelled statistic. Renders the unknown placeholder "—" (never 0) when the
+/// server value is absent, matching the app's unknown-not-zero rule. Foreground is paired
+/// with a card background so it reads in light and dark.
+public struct DADStatTile: View {
+    @Environment(\.colorScheme) private var scheme
+    private let title: String
+    private let value: String?
+    private let caption: String?
+    public init(title: String, value: String?, caption: String?) {
+        self.title = title
+        self.value = value
+        self.caption = caption
+    }
+    public var body: some View {
+        VStack(alignment: .leading, spacing: .dadSpace("2")) {
+            Text(title).font(.caption).textCase(.uppercase)
+            // Unknown-not-zero: a missing server value is an em dash, never a numeric 0.
+            Text(value ?? "—").font(.title3.weight(.bold))
+            if let caption { Text(caption).font(.caption).foregroundStyle(.secondary) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.dadSpace("4"))
+        .background(Color.dad(scheme == .dark ? "ink" : "card"))
+        .foregroundStyle(Color.dad(scheme == .dark ? "paper" : "ink"))
+        .clipShape(RoundedRectangle(cornerRadius: .dadRadius("card"), style: .continuous))
+    }
+}
+
+/// A short guidance line with an optional trailing action, for empty or near-empty states.
+/// The action is a tertiary button so it reads as text-weight, not a competing call-to-action.
+public struct DADEmptyHint: View {
+    private let text: String
+    private let action: (label: String, perform: () -> Void)?
+    public init(text: String, action: (label: String, perform: () -> Void)? = nil) {
+        self.text = text
+        self.action = action
+    }
+    public var body: some View {
+        HStack(spacing: .dadSpace("3")) {
+            Text(text).font(.body).foregroundStyle(.secondary)
+            if let action {
+                Spacer(minLength: 0)
+                Button(action.label, action: action.perform)
+                    .buttonStyle(DADButtonStyle(.tertiary))
+            }
+        }
+        .frame(minHeight: 44)
+    }
+}
