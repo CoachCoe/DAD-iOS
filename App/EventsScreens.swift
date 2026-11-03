@@ -39,7 +39,7 @@ struct EventsScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if let onClose {
-                    Button("Close", action: onClose).accessibilityIdentifier("events-close")
+                    Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("events-close")
                 }
                 Text("Events").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 content
@@ -201,7 +201,7 @@ private struct EventDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Button("Back to events", action: onBack).accessibilityIdentifier("events-back")
+            Button("Back to events", action: onBack).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("events-back")
             DADCard {
                 VStack(alignment: .leading, spacing: 8) {
                     EventHeader(event: event)

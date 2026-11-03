@@ -217,9 +217,11 @@ struct GiftScreen: View {
                     Text("\(model.selection.monthlyLabel) · charged monthly").foregroundStyle(.secondary)
                     HStack(spacing: 16) {
                         Button { model.decrement() } label: { Image(systemName: "minus.circle.fill").font(.title) }
+                            .buttonStyle(.plain)
                             .accessibilityLabel("Decrease gift")
                             .disabled(model.selection.dailyDollars <= GiftAmount.minDailyDollars || model.isBusy)
                         Button { model.increment() } label: { Image(systemName: "plus.circle.fill").font(.title) }
+                            .buttonStyle(.plain)
                             .accessibilityLabel("Increase gift")
                             .disabled(model.selection.dailyDollars >= GiftAmount.maxDailyDollars || model.isBusy)
                     }
@@ -302,6 +304,7 @@ struct GiftSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
+                    .buttonStyle(DADButtonStyle(.tertiary))
                     .accessibilityIdentifier("gift-close")
                 GiftScreen(model: model, stubComplete: stubComplete, onSignedOut: onSignedOut)
             }

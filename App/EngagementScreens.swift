@@ -35,7 +35,7 @@ struct EngagementHome: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if let onClose { Button("Close", action: onClose).accessibilityIdentifier("engagement-close") }
+                if let onClose { Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("engagement-close") }
                 Text("Your impact").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 switch model.phase {
                 case .loading:
@@ -288,7 +288,7 @@ private struct WalletPassButton: View {
                     .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isPreparing).accessibilityIdentifier("wallet-add")
             } else if model.checkFailed {
                 Text("Wallet availability couldn’t be checked. Your on-screen code still works.").font(.footnote).foregroundStyle(.secondary)
-                Button("Check Wallet availability again") { Task { await model.check() } }.accessibilityIdentifier("wallet-recheck")
+                Button("Check Wallet availability again") { Task { await model.check() } }.buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("wallet-recheck")
             }
             if let error = model.error {
                 Text(error).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("wallet-error")
@@ -322,7 +322,7 @@ private struct InviteQRSheet: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Button("Close", action: onClose).frame(maxWidth: .infinity, alignment: .trailing).accessibilityIdentifier("qr-close")
+            Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).frame(maxWidth: .infinity, alignment: .trailing).accessibilityIdentifier("qr-close")
             Text("Show this code").font(.title.bold()).accessibilityAddTraits(.isHeader)
             if let image = Self.qr(url.absoluteString) {
                 Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
@@ -358,7 +358,7 @@ struct InitiativeSpendScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Button("Close", action: onClose).accessibilityIdentifier("spend-close")
+                Button("Close", action: onClose).buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("spend-close")
                 Text("Where the money went").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 Text(title).font(.headline)
                 switch model.phase {
