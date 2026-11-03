@@ -20,6 +20,9 @@ struct DonorShell: View {
     @State private var selectedTab: DonorTab
     @State private var givingPath: [GiftRoute] = []
     @State private var showSettings = false
+    /// The analytics question is asked once, after first sign-in (Phase D moved it off Welcome). Shown
+    /// the first time the signed-in shell appears while the choice is still unset.
+    @State private var showAnalyticsChoice = false
 
     init(model: AccountModel, destination: Binding<AccountDestination?>) {
         self.model = model
@@ -91,6 +94,16 @@ struct DonorShell: View {
                 .environment(model.analytics)
             }
         }
+        .task {
+            // Ask the analytics question once, right after first sign-in (Phase D). The controller
+            // persists the answer, so a later launch with a stored choice never re-presents it.
+            if let analytics = model.analytics, analytics.choice == nil { showAnalyticsChoice = true }
+        }
+        .sheet(isPresented: $showAnalyticsChoice) {
+            if let analytics = model.analytics {
+                AnalyticsChoiceSheet(analytics: analytics) { showAnalyticsChoice = false }
+            }
+        }
     }
 
     /// `AccountDestination` isn't `Hashable`, so key the router task off the raw value.
@@ -123,7 +136,9 @@ struct DonorShell: View {
         if case .ready(let profile) = model.state, let dashboard = model.dashboardService {
             DonorHomeView(service: dashboard, giving: model.givingKit, events: model.eventsService,
                           engagement: model.engagementService, wallet: model.walletService,
-                          greeting: profile.publicName ?? "friend", preview: model.preview,
+                          greeting: profile.publicName, preview: model.preview,
+                          onSwitchToGiving: { selectedTab = .giving },
+                          onInvite: { selectedTab = .circle },
                           destination: $destination, onSignedOut: onSignedOut)
         } else {
             accountState
@@ -151,7 +166,9 @@ struct DonorShell: View {
     @ViewBuilder private var givingContent: some View {
         if let giving = model.givingKit {
             ScrollView {
-                GiftScreen(model: giving.makeModel(), stubComplete: giving.stubComplete, onSignedOut: onSignedOut)
+                GiftScreen(model: giving.makeModel(), stubComplete: giving.stubComplete,
+                           onSignedOut: onSignedOut, onInvite: { selectedTab = .circle },
+                           foundingProvider: model.dashboardService)
             }
             .modifier(AppBackground())
         } else {
@@ -181,7 +198,7 @@ struct DonorShell: View {
                 ProgressView("Loading your account…")
             case .ready(let profile):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Welcome, \(profile.publicName ?? "friend")").font(.title2.bold())
+                    Text(profile.publicName.map { "Hi, \($0)" } ?? "Welcome back").font(.title2.bold())
                     Text("Your account has a home here.")
                 }
             case .unavailable:

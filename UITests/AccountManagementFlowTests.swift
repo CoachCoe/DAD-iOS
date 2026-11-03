@@ -72,7 +72,7 @@ import XCTest
         XCTAssertTrue(app.staticTexts["You’re not signed in anywhere else."].waitForExistence(timeout: 10))
         XCTAssertFalse(other.exists)
         app.buttons["sessions-sign-out-everywhere"].tap()
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 15)
+        XCTAssertTrue(app.buttons["Give $1 a day"].waitForExistence(timeout: 15)
                       || app.otherElements["sign-in-methods"].waitForExistence(timeout: 5),
                       "ending every session must leave the donor shell")
         XCTAssertFalse(app.buttons["open-settings"].exists)
