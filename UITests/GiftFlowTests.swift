@@ -27,6 +27,9 @@ import XCTest
         openGift(app)
         XCTAssertTrue(app.staticTexts["gift-none"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$1/day")
+        // Phase E: the ± stepper lives under "Other"; the presets are $1/$3/$5.
+        app.buttons["amount-other"].tap()
+        XCTAssertTrue(app.buttons["Increase gift"].waitForExistence(timeout: 5))
         app.buttons["Increase gift"].tap()
         app.buttons["Increase gift"].tap()
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$3/day")
@@ -64,6 +67,9 @@ import XCTest
         XCTAssertEqual(app.staticTexts["gift-monthly"].label, "$150/month")
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$5/day")
 
+        // Phase E: reveal the ± stepper via "Other" before stepping off the $5 preset.
+        app.buttons["amount-other"].tap()
+        XCTAssertTrue(app.buttons["Increase gift"].waitForExistence(timeout: 5))
         app.buttons["Increase gift"].tap()
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$6/day")
         app.buttons["save-gift"].tap()
