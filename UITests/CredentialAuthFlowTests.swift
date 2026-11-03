@@ -62,7 +62,7 @@ import XCTest
         app.buttons["signup-continue"].tap()
 
         XCTAssertTrue(app.buttons["open-settings"].waitForExistence(timeout: 15), "claiming the link must land in the donor shell")
-        XCTAssertTrue(app.staticTexts["Welcome, Alex"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Hi, Alex"].waitForExistence(timeout: 10))
     }
 
     func testEmailLinkSignInThenClaimingTheLinkLandsInDonorShell() {
@@ -83,7 +83,7 @@ import XCTest
         let app = launch()
         signInWithPassword(app, password: "correct horse battery")
         XCTAssertTrue(app.buttons["open-settings"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.staticTexts["Welcome, Alex"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Hi, Alex"].waitForExistence(timeout: 10))
     }
 
     func testWrongPasswordKeepsPersonSignedOutWithAnError() {

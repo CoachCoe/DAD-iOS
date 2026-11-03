@@ -15,7 +15,7 @@ import XCTest
 
     func testSignedInDashboardRendersStubbedServerData() {
         let app = launch()
-        XCTAssertTrue(app.staticTexts["Welcome, Alex"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Hi, Alex"].waitForExistence(timeout: 15))
         XCTAssertTrue(text(app, "streak-count").waitForExistence(timeout: 10))
         XCTAssertEqual(text(app, "streak-count").label, "18-day streak")
         XCTAssertEqual(text(app, "streak-next").label, "12 days to your 30-day milestone")

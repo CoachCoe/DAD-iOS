@@ -123,7 +123,9 @@ struct DonorShell: View {
         if case .ready(let profile) = model.state, let dashboard = model.dashboardService {
             DonorHomeView(service: dashboard, giving: model.givingKit, events: model.eventsService,
                           engagement: model.engagementService, wallet: model.walletService,
-                          greeting: profile.publicName ?? "friend", preview: model.preview,
+                          greeting: profile.publicName, preview: model.preview,
+                          onSwitchToGiving: { selectedTab = .giving },
+                          onInvite: { selectedTab = .circle },
                           destination: $destination, onSignedOut: onSignedOut)
         } else {
             accountState
@@ -181,7 +183,7 @@ struct DonorShell: View {
                 ProgressView("Loading your account…")
             case .ready(let profile):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Welcome, \(profile.publicName ?? "friend")").font(.title2.bold())
+                    Text(profile.publicName.map { "Hi, \($0)" } ?? "Welcome back").font(.title2.bold())
                     Text("Your account has a home here.")
                 }
             case .unavailable:
