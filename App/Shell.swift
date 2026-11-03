@@ -20,6 +20,9 @@ struct DonorShell: View {
     @State private var selectedTab: DonorTab
     @State private var givingPath: [GiftRoute] = []
     @State private var showSettings = false
+    /// The analytics question is asked once, after first sign-in (Phase D moved it off Welcome). Shown
+    /// the first time the signed-in shell appears while the choice is still unset.
+    @State private var showAnalyticsChoice = false
 
     init(model: AccountModel, destination: Binding<AccountDestination?>) {
         self.model = model
@@ -89,6 +92,16 @@ struct DonorShell: View {
                               giving: model.givingKit, onClose: { showSettings = false },
                               onSignedOut: { showSettings = false; Task { await model.load() } })
                 .environment(model.analytics)
+            }
+        }
+        .task {
+            // Ask the analytics question once, right after first sign-in (Phase D). The controller
+            // persists the answer, so a later launch with a stored choice never re-presents it.
+            if let analytics = model.analytics, analytics.choice == nil { showAnalyticsChoice = true }
+        }
+        .sheet(isPresented: $showAnalyticsChoice) {
+            if let analytics = model.analytics {
+                AnalyticsChoiceSheet(analytics: analytics) { showAnalyticsChoice = false }
             }
         }
     }

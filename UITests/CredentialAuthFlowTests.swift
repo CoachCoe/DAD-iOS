@@ -10,8 +10,9 @@ import XCTest
         let app = XCUIApplication()
         app.launchArguments = ["--stub-backend"]
         app.launch()
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 15))
-        app.buttons["I’m a donor"].tap()
+        // Phase D: Welcome's "I already give — sign in" reaches the sign-in methods.
+        XCTAssertTrue(app.buttons["I already give — sign in"].waitForExistence(timeout: 15))
+        app.buttons["I already give — sign in"].tap()
         return app
     }
 
@@ -25,6 +26,8 @@ import XCTest
     }
 
     private func signInWithPassword(_ app: XCUIApplication, password: String) {
+        // Phase D: password lives under the "More options" disclosure.
+        app.buttons["More options"].tap()
         app.buttons["Sign in with email & password"].tap()
         type("alex@example.org", into: app.textFields["Email"], in: app)
         type(password, into: app.secureTextFields["Password"], in: app)
@@ -120,15 +123,18 @@ import XCTest
         XCTAssertTrue(app.staticTexts["password-saved"].waitForExistence(timeout: 10))
     }
 
-    func testAppleGooglePasskeyAreDisabledWithAnExplanationWhenUnconfigured() {
+    func testAppleGooglePasskeyAreHiddenWithAnExplanationWhenUnconfigured() {
+        // Phase D: unavailable methods are no longer listed as disabled rows — they are hidden, with an
+        // honest note that the build can't offer them. Phone (primary) and email (secondary) stay.
         let app = launch()
-        XCTAssertTrue(app.buttons["Sign in with Apple"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Continue with phone"].waitForExistence(timeout: 10))
         for title in ["Sign in with Apple", "Sign in with Google", "Sign in with a passkey"] {
-            XCTAssertFalse(app.buttons[title].isEnabled, title)
+            XCTAssertFalse(app.buttons[title].exists, title)
         }
-        XCTAssertTrue(app.buttons["Sign in with your phone"].isEnabled)
-        XCTAssertTrue(app.buttons["Sign in with email & password"].isEnabled)
+        XCTAssertTrue(app.buttons["Continue with phone"].isEnabled)
         XCTAssertTrue(app.buttons["Email me a sign-in link"].isEnabled)
+        app.buttons["More options"].tap()
+        XCTAssertTrue(app.buttons["Sign in with email & password"].isEnabled)
         XCTAssertTrue(app.staticTexts["methods-unavailable-note"].exists, "the reason must be visible text, not only a hint")
     }
 }

@@ -148,7 +148,7 @@ import XCTest
         // With the gift no longer renewing, deleting goes through and the session ends.
         XCTAssertTrue(app.buttons["delete-confirm"].waitForExistence(timeout: 10))
         app.buttons["delete-confirm"].tap()
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 20), "deletion must end the session")
+        XCTAssertTrue(app.buttons["Give $1 a day"].waitForExistence(timeout: 20), "deletion must end the session")
     }
 
     func testDeleteWithNoGiftStillJustDeletes() {
@@ -161,6 +161,6 @@ import XCTest
         input.tap()
         input.typeText("DELETE")
         app.buttons["delete-confirm"].tap()
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["Give $1 a day"].waitForExistence(timeout: 20))
     }
 }

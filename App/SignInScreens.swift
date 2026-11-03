@@ -3,32 +3,6 @@ import UserNotifications
 import UIKit
 import DADFoundation
 
-/// Unauthenticated splash — pick a journey before signing in. The preview store starts
-/// signed-in, so this path is exercised only when there is no session.
-struct RoleSelect: View {
-    let notice: String?
-    var invitation: String?
-    let onSelect: (AppRole) -> Void
-    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
-    var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
-            if let notice {
-                Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("auth-notice")
-            }
-            if let invitation { Text(invitation).font(.body).accessibilityIdentifier("auth-invitation") }
-            VStack(spacing: 12) {
-                Button("I’m a donor") { analytics?.emit(.roleSelected); onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
-                Button("I’m a partner") { analytics?.emit(.roleSelected); onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
-            }
-            if let analytics, analytics.choice == nil { AnalyticsChoice(analytics: analytics) }
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("role-select")
-    }
-}
-
 /// Asks iOS for notification permission only when the donor chooses to, never at launch; once allowed the app
 /// registers for a device token (see `PushAppDelegate`).
 struct NotificationPermissionRow: View {
@@ -51,6 +25,20 @@ struct NotificationPermissionRow: View {
             }
         }
         .task { status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus }
+    }
+}
+
+/// Presents the analytics question as a small sheet once, right after first sign-in (Phase D moved it
+/// off the Welcome screen). Same two options/copy and the same identifiers; dismisses once answered.
+struct AnalyticsChoiceSheet: View {
+    @Bindable var analytics: AnalyticsController
+    let onDone: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            AnalyticsChoice(analytics: analytics)
+        }
+        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity, alignment: .topLeading)
+        .onChange(of: analytics.choice) { _, choice in if choice != nil { onDone() } }
     }
 }
 

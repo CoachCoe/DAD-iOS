@@ -5,9 +5,10 @@ import XCTest
 /// release code path is exercised in the simulator with no network.
 @MainActor final class StubBackendFlowTests: XCTestCase {
     private func signIn(_ app: XCUIApplication, code: String) {
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 15))
-        app.buttons["I’m a donor"].tap()
-        app.buttons["Sign in with your phone"].tap()
+        // Phase D: Welcome's donor sign-in path is "I already give — sign in"; phone is "Continue with phone".
+        XCTAssertTrue(app.buttons["I already give — sign in"].waitForExistence(timeout: 15))
+        app.buttons["I already give — sign in"].tap()
+        app.buttons["Continue with phone"].tap()
         let phone = app.textFields["Phone number"]
         XCTAssertTrue(phone.waitForExistence(timeout: 5))
         phone.tap()
@@ -36,7 +37,7 @@ import XCTest
         input.typeText("DELETE")
         app.buttons["delete-confirm"].tap()
 
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 15), "deletion must end the session")
+        XCTAssertTrue(app.buttons["Give $1 a day"].waitForExistence(timeout: 15), "deletion must end the session")
     }
 
     func testWrongCodeKeepsPersonSignedOut() {
@@ -49,13 +50,15 @@ import XCTest
     }
 
     func testTheAnalyticsQuestionIsAskedOnceAndRemembered() {
+        // Phase D moved the analytics question off Welcome to a sheet shown once after first sign-in.
         let app = XCUIApplication()
         app.launchArguments = ["--stub-backend", "--stub-analytics-unset"]
         app.launch()
-        XCTAssertTrue(app.buttons["analytics-allow"].waitForExistence(timeout: 15))
+        signIn(app, code: "123456")
+        XCTAssertTrue(app.buttons["analytics-allow"].waitForExistence(timeout: 20), "the question is asked after sign-in")
         app.buttons["analytics-allow"].tap()
         XCTAssertFalse(app.buttons["analytics-allow"].waitForExistence(timeout: 2), "an answered question is not asked again")
-        XCTAssertTrue(app.buttons["I’m a donor"].exists)
+        XCTAssertTrue(app.buttons["open-settings"].waitForExistence(timeout: 10), "the donor shell is reachable")
     }
 
     func testATappedNotificationOpensItsScreen() {

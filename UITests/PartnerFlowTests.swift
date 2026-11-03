@@ -78,8 +78,8 @@ import XCTest
         app.launchArguments = ["--stub-backend"]
         app.launch()
 
-        XCTAssertTrue(app.buttons["I’m a partner"].waitForExistence(timeout: 10))
-        app.buttons["I’m a partner"].tap()
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 10))
+        app.buttons["Partner organization? Sign in here"].tap()
         let email = app.textFields["partner-sign-in-email"]
         XCTAssertTrue(email.waitForExistence(timeout: 5))
         XCTAssertTrue(app.links["partner-apply"].exists || app.buttons["partner-apply"].exists, "a new partner is pointed to the application")
@@ -103,7 +103,7 @@ import XCTest
         let signOut = app.buttons["partner-sign-out"]
         for _ in 0..<6 where !signOut.isHittable { app.swipeUp() }
         signOut.tap()
-        XCTAssertTrue(app.buttons["I’m a partner"].waitForExistence(timeout: 5), "signing out returns to the start")
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 5), "signing out returns to the start")
     }
 
     func testRestoredPartnerManagesTheOrganization() {
