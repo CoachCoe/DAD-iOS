@@ -53,6 +53,13 @@ public extension CGFloat {
     static func dadRadius(_ name: String) -> CGFloat { CGFloat(DADTokens.radius[name] ?? 0) }
 }
 
+public extension Font {
+    /// Display face (SIL OFL Space Grotesk) for large titles, amounts and streak numbers; body stays SF.
+    static func dadDisplay(_ style: Font.TextStyle, size: CGFloat) -> Font {
+        .custom("SpaceGrotesk-Bold", size: size, relativeTo: style)
+    }
+}
+
 /// Theme-aware page background (paper in light, ink-deep in dark) paired with its text color.
 public struct DADBackground: ViewModifier {
     @Environment(\.colorScheme) private var scheme
