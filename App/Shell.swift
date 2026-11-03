@@ -167,7 +167,8 @@ struct DonorShell: View {
         if let giving = model.givingKit {
             ScrollView {
                 GiftScreen(model: giving.makeModel(), stubComplete: giving.stubComplete,
-                           onSignedOut: onSignedOut, onInvite: { selectedTab = .circle })
+                           onSignedOut: onSignedOut, onInvite: { selectedTab = .circle },
+                           foundingProvider: model.dashboardService)
             }
             .modifier(AppBackground())
         } else {

@@ -40,6 +40,7 @@ struct CelebrationView: View {
                         .padding(.horizontal, .dadSpace("3")).padding(.vertical, .dadSpace("1"))
                         .background(Color.dad("ok-ink"), in: Capsule())
                         .foregroundStyle(Color.dad("paper"))
+                        .accessibilityIdentifier("celebration-founding")
                 }
             }
             Spacer(minLength: 0)

@@ -87,12 +87,19 @@ struct GiftScreen: View {
     var onSignedOut: () -> Void = {}
     /// "Invite someone" on the celebration screen switches to the Circle tab (set from the shell).
     var onInvite: () -> Void = {}
+    /// The donor-home read seam, used only to learn whether this donor is a Founding Donor so the
+    /// celebration can show the capsule when applicable (the flag lives on the dashboard, not on the
+    /// giving service). nil in previews/when home reads aren't wired — the capsule then stays hidden.
+    var foundingProvider: (any DashboardService)? = nil
     @State private var confirmingCancel = false
     @ScaledMetric(relativeTo: .largeTitle) private var amountSize: CGFloat = 44
     /// Phase F: show the one-time celebration after a FIRST gift is set up. Tracks that this screen
     /// started a gift (so a later amount-change never re-celebrates) and whether it's been shown.
     @State private var startedGift = false
     @State private var showCelebration = false
+    /// Whether this donor is a Founding Donor, read once from the dashboard so the celebration can show
+    /// the Founding capsule. Defaults to false, so a missing/failed read simply omits the capsule.
+    @State private var founding = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -108,6 +115,12 @@ struct GiftScreen: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("gift-screen")
         .task { await model.load() }
+        // Read the Founding flag once from the dashboard so the first-gift celebration can show the
+        // capsule when applicable. A failure leaves `founding` false (capsule hidden), never blocks giving.
+        .task {
+            guard let foundingProvider else { return }
+            if case .ready(let dashboard) = try? await foundingProvider.dashboard() { founding = dashboard.foundingDonor }
+        }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
         .sheet(isPresented: Binding(get: { model.handoff != nil }, set: { shown in
             if !shown { Task { await model.handoffFinished() } }
@@ -127,7 +140,7 @@ struct GiftScreen: View {
         .fullScreenCover(isPresented: $showCelebration) {
             CelebrationView(monthly: "\(formatUSDMinor(model.selection.monthlyMinor))/month",
                             daily: "$\(model.selection.dailyDollars) a day",
-                            founding: false,
+                            founding: founding,
                             onInvite: { showCelebration = false; onInvite() },
                             onDone: { showCelebration = false })
         }

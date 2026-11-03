@@ -39,6 +39,9 @@ import XCTest
         app.buttons["stub-complete"].tap()
         // Phase F: a first gift shows the one-time celebration; dismiss it to reach the gift screen.
         XCTAssertTrue(app.otherElements["celebration-screen"].waitForExistence(timeout: 20), "a first gift celebrates")
+        // The stub donor is a Founding Donor, so the celebration shows the Founding capsule (threaded
+        // from the dashboard, not hardcoded off).
+        XCTAssertTrue(app.staticTexts["celebration-founding"].waitForExistence(timeout: 5), "a founding donor sees the Founding capsule on the celebration")
         app.buttons["celebration-done"].tap()
         XCTAssertTrue(app.staticTexts["gift-monthly"].waitForExistence(timeout: 20), "the gift appears once the server reflects it")
         // The stub backend activates the gift for the amount the checkout request carried.
