@@ -77,6 +77,8 @@ final class AccountModel {
     private(set) var partnerSignIn: (any PartnerSignInService)?
     /// The partner application's status, read with a stored receipt; nil in previews.
     private(set) var applicationStatus: (any ApplicationStatusService)?
+    /// Submits a partner application and keeps its receipt; nil in previews, which fall back to the website.
+    private(set) var applicationSubmit: (any PartnerApplicationService)?
     private var partnerSession: PartnerSession?
     /// The public site, for links the app hands out (the partner's company sign-up link).
     private(set) var publicOrigin: URL?
@@ -159,6 +161,9 @@ final class AccountModel {
                                                     partnerViewer: launchFlag("--stub-partner-viewer"),
                                                     application: ["pending": "PENDING", "approved": "APPROVED", "rejected": "REJECTED",
                                                                   "unknown": "UNDER_REVIEW"].first { launchFlag("--stub-application-\($0.key)") }?.value,
+                                                    applicationSubmit: launchFlag("--stub-apply-invalid") ? .invalid
+                                                        : launchFlag("--stub-apply-throttled") ? .throttled
+                                                        : launchFlag("--stub-apply-fails-first") ? .failsFirst : .accepts,
                                                     onLocalWipe: { Self.wipeAttribution(linkTokens: StubBackend.linkTokensKey) })
                 session = services.session
                 kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, link: services.credentialAuth,
@@ -174,6 +179,7 @@ final class AccountModel {
                 partnerService = services.partner
                 partnerSignIn = services.partnerAuth
                 applicationStatus = services.applicationStatus
+                applicationSubmit = services.applicationSubmit
                 partnerSession = services.partnerSession
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 donorPush = services.push
@@ -240,9 +246,10 @@ final class AccountModel {
                 walletService = try WireWalletPass(origin: origin, session: built)
                 let partner = try PartnerSession(store: KeychainStore(service: service, account: "partner-session"))
                 partnerSignIn = try WirePartnerAuth(origin: origin, session: partner)
-                // Nothing in the app creates a receipt yet (`applyWithReceipt` is browser-only in the contract), so
-                // this reads nothing until DAD-Main admits it to the mobile contract.
-                applicationStatus = try WireApplicationStatus(origin: origin, receipt: KeychainStore(service: service, account: "partner-application-receipt"))
+                // One Keychain item holds the application receipt: the submission writes it, the status read uses it.
+                let receipt = KeychainStore(service: service, account: "partner-application-receipt")
+                applicationStatus = try WireApplicationStatus(origin: origin, receipt: receipt)
+                applicationSubmit = try WirePartnerApplication(origin: origin, receipt: receipt)
                 partnerService = try WirePartner(origin: origin, session: partner)
                 partnerSession = partner
                 donorPush = try WireDonorPush(origin: origin, session: built)
@@ -790,7 +797,7 @@ struct DADApp: App {
                 UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
                                      invitation: model.invitation,
                                      onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
-                                     applicationStatus: model.applicationStatus,
+                                     applicationStatus: model.applicationStatus, applicationSubmit: model.applicationSubmit,
                                      partnerToken: model.pendingPartnerToken,
                                      onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
                                      onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) },

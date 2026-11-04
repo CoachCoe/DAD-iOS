@@ -400,6 +400,7 @@ public struct WirePartner: PartnerService {
             case .ok(let response): return Data(try await ArraySlice<UInt8>(collecting: response.body.pdf, upTo: 16 * 1_048_576))
             case .unauthorized: throw AccountError.signedOut
             case .forbidden: throw AccountError.forbidden
+            case .notFound: throw AccountError.notFound
             case .tooManyRequests: throw AccountError.rateLimited
             case .undocumented(let status, _): throw AccountError.forStatus(status)
             default: throw AccountError.unavailable

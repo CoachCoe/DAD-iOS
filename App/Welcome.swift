@@ -402,6 +402,7 @@ struct UnauthenticatedStack: View {
     let onPasteLink: (String) -> Bool
     var partnerSignIn: (any PartnerSignInService)?
     var applicationStatus: (any ApplicationStatusService)?
+    var applicationSubmit: (any PartnerApplicationService)?
     var partnerToken: String?
     var onPartnerTokenConsumed: () -> Void = {}
     var onPartnerSignedIn: () -> Void = {}
@@ -442,7 +443,7 @@ struct UnauthenticatedStack: View {
                 PartnerSignInFlow(model: PartnerSignInModel(service: partnerSignIn), incomingToken: partnerToken,
                                   onTokenConsumed: onPartnerTokenConsumed, onBack: { step = .roleSelect }, onSignedIn: onPartnerSignedIn,
                                   applyURL: publicOrigin?.appending(path: "apply"),
-                                  applicationStatus: applicationStatus)
+                                  applicationStatus: applicationStatus, applicationSubmit: applicationSubmit)
             }
         }
     }
