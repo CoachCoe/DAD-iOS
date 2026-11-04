@@ -48,6 +48,20 @@ if (eventEnums < 3) throw new Error("Event enums not found");
 const conversionKind = spec.components.schemas.Conversion?.properties?.kind;
 if (!conversionKind?.enum) throw new Error("Conversion.kind enum not found");
 delete conversionKind.enum;
+// Partner enums are open sets too: a role, an initiative status, a metric unit or an application status added
+// later must not fail the whole portal read. The role is the safety-relevant one (an unknown role is shown
+// as the least-privileged VIEWER by `PartnerRole(contract:)`). Fail loudly if the contract moves them.
+const partnerBody = (path) => spec.paths?.[path]?.get?.responses?.["200"]?.content?.["application/json"]?.schema;
+const openPartnerEnums = [
+  ["/donor/partner/overview role", partnerBody("/donor/partner/overview")?.properties?.role],
+  ["/donor/partner/initiatives status", partnerBody("/donor/partner/initiatives")?.properties?.initiatives?.items?.properties?.status],
+  ["/donor/partner/initiatives metric unit", partnerBody("/donor/partner/initiatives")?.properties?.initiatives?.items?.properties?.metrics?.items?.properties?.unit],
+  ["ApplicationStatus.status", spec.components.schemas.ApplicationStatus?.properties?.status],
+];
+for (const [name, property] of openPartnerEnums) {
+  if (!property?.enum) throw new Error(`${name} enum not found`);
+  delete property.enum;
+}
 await writeFile("Sources/DADFoundation/openapi.json", `${JSON.stringify(spec, null, 2)}\n`);
 const config = await readFile("Sources/DADFoundation/openapi-generator-config.yaml", "utf8");
 if (!config.includes("operations:")) throw new Error("Client scope must be explicit");
