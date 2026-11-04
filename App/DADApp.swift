@@ -75,6 +75,8 @@ final class AccountModel {
     /// The partner portal under its own 12-hour session; nil when this build cannot reach DAD.
     private(set) var partnerService: (any PartnerService)?
     private(set) var partnerSignIn: (any PartnerSignInService)?
+    /// The partner application's status, read with a stored receipt; nil in previews.
+    private(set) var applicationStatus: (any ApplicationStatusService)?
     private var partnerSession: PartnerSession?
     /// The public site, for links the app hands out (the partner's company sign-up link).
     private(set) var publicOrigin: URL?
@@ -154,6 +156,9 @@ final class AccountModel {
                                                     events: eventScenario, engagement: engagementScenario,
                                                     signedIn: launchFlag("--stub-signed-in"),
                                                     partnerSignedIn: launchFlag("--stub-partner-signed-in"),
+                                                    partnerViewer: launchFlag("--stub-partner-viewer"),
+                                                    application: ["pending": "PENDING", "approved": "APPROVED", "rejected": "REJECTED",
+                                                                  "unknown": "UNDER_REVIEW"].first { launchFlag("--stub-application-\($0.key)") }?.value,
                                                     onLocalWipe: { Self.wipeAttribution(linkTokens: StubBackend.linkTokensKey) })
                 session = services.session
                 kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, link: services.credentialAuth,
@@ -168,6 +173,7 @@ final class AccountModel {
                 walletService = services.wallet
                 partnerService = services.partner
                 partnerSignIn = services.partnerAuth
+                applicationStatus = services.applicationStatus
                 partnerSession = services.partnerSession
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 donorPush = services.push
@@ -234,6 +240,9 @@ final class AccountModel {
                 walletService = try WireWalletPass(origin: origin, session: built)
                 let partner = try PartnerSession(store: KeychainStore(service: service, account: "partner-session"))
                 partnerSignIn = try WirePartnerAuth(origin: origin, session: partner)
+                // Nothing in the app creates a receipt yet (`applyWithReceipt` is browser-only in the contract), so
+                // this reads nothing until DAD-Main admits it to the mobile contract.
+                applicationStatus = try WireApplicationStatus(origin: origin, receipt: KeychainStore(service: service, account: "partner-application-receipt"))
                 partnerService = try WirePartner(origin: origin, session: partner)
                 partnerSession = partner
                 donorPush = try WireDonorPush(origin: origin, session: built)
@@ -781,6 +790,7 @@ struct DADApp: App {
                 UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
                                      invitation: model.invitation,
                                      onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
+                                     applicationStatus: model.applicationStatus,
                                      partnerToken: model.pendingPartnerToken,
                                      onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
                                      onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) },

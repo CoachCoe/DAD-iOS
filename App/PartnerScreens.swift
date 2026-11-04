@@ -21,10 +21,16 @@ struct PartnerSignInFlow: View {
     let onSignedIn: () -> Void
     /// The website's partner application (`<public origin>/apply`); nil when no public origin is configured.
     var applyURL: URL?
+    /// Where this install's partner application stands, when it holds a receipt for one; nil hides the card.
+    var applicationStatus: (any ApplicationStatusService)?
     @State private var pasted = ""
     @State private var sentTo: String?
 
     var body: some View {
+        ScrollView { signInContent }
+    }
+
+    private var signInContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Partner sign-in").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
             switch model.phase {
@@ -37,6 +43,7 @@ struct PartnerSignInFlow: View {
             case .accepting, .signedIn:
                 ProgressView("Signing you in…").accessibilityIdentifier("partner-signing-in")
             default:
+                if let applicationStatus { ApplicationStatusCard(model: ApplicationStatusModel(service: applicationStatus)) }
                 Text("We’ll email you a link to sign in to your organization’s portal.")
                 TextField("Work email", text: $model.email)
                     .textFieldStyle(.roundedBorder).keyboardType(.emailAddress).textContentType(.emailAddress)
@@ -85,6 +92,36 @@ struct PartnerSignInFlow: View {
                 .accessibilityIdentifier("partner-paste-submit")
             Button("Use a different email") { model.edit() }.buttonStyle(DADButtonStyle(.secondary))
         }
+    }
+}
+
+/// The applicant's status, shown above partner sign-in only when the server recognizes this install's receipt.
+private struct ApplicationStatusCard: View {
+    @State var model: ApplicationStatusModel
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        // A container, not a bare Group: `.task` on the empty initial state would never run.
+        VStack(alignment: .leading, spacing: 0) {
+            switch model.phase {
+            case .loaded(let info):
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(info.title).font(.headline).accessibilityAddTraits(.isHeader)
+                    Text(info.message).accessibilityIdentifier("partner-application-message")
+                }
+                .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                .background(scheme == .dark ? Color.dad("ink") : Color.dad("line").opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityElement(children: .contain).accessibilityIdentifier("partner-application-status")
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(message).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-application-error")
+                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
+                }
+            case .loading, .none:
+                EmptyView()
+            }
+        }
+        .task { await model.load() }
     }
 }
 

@@ -69,7 +69,12 @@ partner portal is wired: an approved partner user signs in with an emailed link 
 application, `applyWithReceipt`, linked from partner sign-in as `<public origin>/apply`), and the 12-hour partner session is kept
 in its own Keychain item. The portal reads the overview, initiatives, spend, our-people rollup and teams;
 admins edit the organization profile, workforce size and logo, invite and remove users, share the company
-code and export or re-download PDF reports. Analytics and push are described below. Native entry hooks
+code and export or re-download PDF reports. Partner calls use the native bearer path (`X-DAD-Client: native`, `Authorization: Bearer`; DAD-Main's
+`partnerSession` accepts it on every partner route), and every status maps the same way: 401 ends the 12-hour session, 403 is a
+role refusal, 404, 409, 422 and 429 (including the ingress limiter's body-less 429) each have their own message. Role, initiative
+status, metric unit and application status are open strings, so a value added later cannot fail a portal read (an unknown role is a
+viewer). A partner's application status (`applicationStatus`, receipt as bearer) is built and tested, but the app has no receipt
+to read until DAD-Main admits `applyWithReceipt` (browser-only in the contract) to the mobile contract, so that card stays hidden. Analytics and push are described below. Native entry hooks
 handle cold/foreground URLs through the origin/path policy. Profile destinations can
 wait for sign-in. Email-change, referral, and other unimplemented destinations use the
 website in Safari, without sending bearer credentials. Claim links with supported dashboard or payment-method return destinations are
