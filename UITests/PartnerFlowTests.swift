@@ -263,6 +263,94 @@ import XCTest
         XCTAssertFalse(app.otherElements["partner-application-status"].exists)
     }
 
+    // MARK: - Contract 2.11: applying from the app
+
+    private func openApplication(_ extra: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend"] + extra
+        app.launch()
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 10))
+        app.buttons["Partner organization? Sign in here"].tap()
+        let apply = app.buttons["partner-apply-in-app"]
+        XCTAssertTrue(apply.waitForExistence(timeout: 5), "a new partner can apply in the app")
+        reveal(apply, in: app)
+        apply.tap()
+        XCTAssertTrue(app.otherElements["partner-application-form"].waitForExistence(timeout: 5))
+        return app
+    }
+
+    private func fillApplication(in app: XCUIApplication) {
+        for (id, text) in [("partner-app-organization", "Acme Corp"), ("partner-app-website", "acme.example"), ("partner-app-workforce", "240"),
+                           ("partner-app-contact", "Ada Admin"), ("partner-app-title", "Director"), ("partner-app-email", "ada@acme.example"),
+                           ("partner-app-phone", "5550100")] {
+            let field = app.textFields[id]
+            reveal(field, in: app)
+            field.tap()
+            field.typeText(text)
+        }
+    }
+
+    private func submitApplication(in app: XCUIApplication) {
+        let submit = app.buttons["partner-app-submit"]
+        if app.keyboards.count > 0 { app.otherElements["partner-application-form"].staticTexts.firstMatch.tap() }
+        reveal(submit, in: app)
+        XCTAssertTrue(submit.isEnabled, "a complete application can be sent")
+        submit.tap()
+    }
+
+    func testSubmittingAnApplicationShowsItPendingFromTheStoredReceipt() {
+        let app = openApplication()
+        XCTAssertFalse(app.buttons["partner-app-submit"].isEnabled, "an empty application cannot be sent")
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let message = app.staticTexts["partner-application-message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 10), "the status card reads the receipt the submission kept")
+        XCTAssertTrue(message.label.contains("Acme Corp"))
+        XCTAssertTrue(message.label.contains("being reviewed"))
+        XCTAssertFalse(app.otherElements["partner-application-form"].exists)
+        XCTAssertFalse(app.buttons["partner-apply-in-app"].exists, "an install with an application under review is not offered another")
+        XCTAssertTrue(app.textFields["partner-sign-in-email"].exists, "sign-in is still available")
+    }
+
+    func testARefusedApplicationIsExplainedAndTheFormStaysEditable() {
+        let app = openApplication(["--stub-apply-invalid"])
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let error = app.staticTexts["partner-app-error"]
+        for _ in 0..<6 where !error.exists { app.swipeDown() }
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
+        XCTAssertTrue(error.label.contains("Check each field"))
+        XCTAssertTrue(app.textFields["partner-app-organization"].isEnabled, "a refused application can be corrected")
+        XCTAssertFalse(app.staticTexts["partner-application-message"].exists, "no status card without an accepted application")
+    }
+
+    func testAThrottledApplicationNamesTheWait() {
+        let app = openApplication(["--stub-apply-throttled"])
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let error = app.staticTexts["partner-app-error"]
+        for _ in 0..<6 where !error.exists { app.swipeDown() }
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
+        XCTAssertTrue(error.label.contains("30 seconds"), "the ingress Retry-After is shown even without a JSON body")
+    }
+
+    func testAnUnconfirmedApplicationRetriesTheSameSubmission() {
+        let app = openApplication(["--stub-apply-fails-first"])
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let error = app.staticTexts["partner-app-error"]
+        for _ in 0..<6 where !error.exists { app.swipeDown() }
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
+        XCTAssertTrue(error.label.contains("couldn’t confirm"))
+        XCTAssertFalse(app.textFields["partner-app-organization"].isEnabled, "the sent form is locked so a retry repeats it")
+        let retry = app.buttons["partner-app-submit"]
+        reveal(retry, in: app)
+        XCTAssertEqual(retry.label, "Retry")
+        retry.tap()
+        XCTAssertTrue(app.staticTexts["partner-application-message"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["partner-application-message"].label.contains("being reviewed"))
+    }
+
     func testWiredSignOutReturnsToTheRoleSelect() {
         let app = launchSignedInPartner()
         XCTAssertTrue(app.buttons["Organization"].waitForExistence(timeout: 10))

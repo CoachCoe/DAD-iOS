@@ -59,9 +59,23 @@ struct NativeHeaders: ClientMiddleware {
         request.headerFields[.origin] = nil
         request.headerFields[.authorization] = try await access().map { "Bearer \($0)" }
         let (response, responseBody) = try await next(request, body, baseURL)
-        guard let responseBody else { return (response, nil) }
-        let bytes = try await ArraySlice<UInt8>(collecting: responseBody, upTo: maxBodyBytes)
-        return (response, HTTPBody(bytes))
+        var bytes: ArraySlice<UInt8>?
+        if let responseBody { bytes = try await ArraySlice<UInt8>(collecting: responseBody, upTo: maxBodyBytes) }
+        if response.status == .tooManyRequests, !Self.isJSONObject(response, bytes) {
+            // Since contract 2.11 the ingress 429 is documented with a Problem body, but an older edge or a CDN
+            // rule still sends it empty or as text. Give it the minimal Problem so it decodes as the documented
+            // throttle instead of failing the decode; `Retry-After` is passed through untouched.
+            var normalized = response
+            normalized.headerFields[.contentType] = "application/json"
+            return (normalized, HTTPBody(#"{"detail":"Too many requests"}"#))
+        }
+        return (response, bytes.map { HTTPBody($0) })
+    }
+
+    private static func isJSONObject(_ response: HTTPResponse, _ bytes: ArraySlice<UInt8>?) -> Bool {
+        guard let bytes, response.headerFields[.contentType]?.lowercased().contains("json") == true,
+              let object = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any] else { return false }
+        return object["detail"] is String
     }
 }
 

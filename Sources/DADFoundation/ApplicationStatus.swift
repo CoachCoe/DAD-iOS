@@ -6,9 +6,8 @@ import OpenAPIRuntime
 // before it has a portal. The server identifies the application by a private receipt the applicant generated
 // when applying; a native request presents that receipt as its bearer (`applicationStatus`).
 //
-// The receipt can only be created by `applyWithReceipt`, which the contract tags browser-only, so an app
-// install has no receipt of its own today and this screen stays hidden until DAD-Main admits that operation
-// to the mobile contract. The seam, the model and the screen are complete and tested against the contract.
+// Since contract 2.11 the app creates that receipt itself by submitting the application natively
+// (`ApplicationSubmit.swift`); this file reads the status back with it and forgets it once it is decided.
 
 /// Where an application stands. A status this build does not know is kept verbatim, never guessed.
 public enum ApplicationState: Sendable, Equatable {
@@ -57,6 +56,12 @@ public protocol ApplicationStatusService: Sendable {
     /// The status of the application this install holds a receipt for, or nil when it holds none (or the
     /// server no longer recognizes it, which also forgets it).
     func status() async throws -> ApplicationStatusInfo?
+    /// Forgets the receipt once the applicant has been shown a decision.
+    func discardReceipt() throws
+}
+
+extension ApplicationStatusService {
+    public func discardReceipt() throws {}
 }
 
 /// Reads `applicationStatus` with the stored receipt as the bearer. The receipt is the only thing kept, in its
@@ -77,6 +82,8 @@ public struct WireApplicationStatus: ApplicationStatusService {
 
     /// Whether a receipt is kept, so the UI can skip the section entirely when there is nothing to show.
     public var hasReceipt: Bool { ((try? receipt.load()) ?? nil) != nil }
+
+    public func discardReceipt() throws { try receipt.clear() }
 
     public func status() async throws -> ApplicationStatusInfo? {
         guard let kept = try receipt.load() else { return nil }
@@ -118,7 +125,11 @@ public final class ApplicationStatusModel {
     public func load() async {
         let prior = phase
         do {
-            if let info = try await service.status() { phase = .loaded(info) } else { phase = .none }
+            if let info = try await service.status() {
+                phase = .loaded(info)
+                // A decision is shown once; keeping the receipt would only keep the old card on the sign-in screen.
+                if info.state == .approved || info.state == .rejected { try? service.discardReceipt() }
+            } else { phase = .none }
         } catch where error.isCancellation {
             phase = prior
         } catch {
