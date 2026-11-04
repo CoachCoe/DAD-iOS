@@ -1,5 +1,9 @@
 name: Mobile foundation checks
-on: [push, pull_request]
+# Push runs only on the integration branches; a PR branch is checked once, by its pull_request run.
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
 permissions:
   contents: read
 jobs:
