@@ -13,9 +13,10 @@ import XCTest
     }
 
     private func openGift(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        let open = app.buttons["open-gift"]
-        XCTAssertTrue(open.waitForExistence(timeout: 20), "the donor home offers the gift card", file: file, line: line)
-        open.tap()
+        // Phase B: the gift screen is the Giving tab, not a sheet from the Home card.
+        let giving = app.tabBars.buttons["Giving"]
+        XCTAssertTrue(giving.waitForExistence(timeout: 20), "the donor shell offers the Giving tab", file: file, line: line)
+        giving.tap()
         XCTAssertTrue(app.otherElements["gift-screen"].waitForExistence(timeout: 10), file: file, line: line)
     }
 
@@ -26,6 +27,9 @@ import XCTest
         openGift(app)
         XCTAssertTrue(app.staticTexts["gift-none"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$1/day")
+        // Phase E: the ± stepper lives under "Other"; the presets are $1/$3/$5.
+        app.buttons["amount-other"].tap()
+        XCTAssertTrue(app.buttons["Increase gift"].waitForExistence(timeout: 5))
         app.buttons["Increase gift"].tap()
         app.buttons["Increase gift"].tap()
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$3/day")
@@ -33,12 +37,19 @@ import XCTest
 
         XCTAssertTrue(app.otherElements["hosted-page-stub"].waitForExistence(timeout: 10), "the hosted page opens")
         app.buttons["stub-complete"].tap()
+        // Phase F: a first gift shows the one-time celebration; dismiss it to reach the gift screen.
+        XCTAssertTrue(app.otherElements["celebration-screen"].waitForExistence(timeout: 20), "a first gift celebrates")
+        // The stub donor is a Founding Donor, so the celebration shows the Founding capsule (threaded
+        // from the dashboard, not hardcoded off).
+        XCTAssertTrue(app.staticTexts["celebration-founding"].waitForExistence(timeout: 5), "a founding donor sees the Founding capsule on the celebration")
+        app.buttons["celebration-done"].tap()
         XCTAssertTrue(app.staticTexts["gift-monthly"].waitForExistence(timeout: 20), "the gift appears once the server reflects it")
         // The stub backend activates the gift for the amount the checkout request carried.
         XCTAssertEqual(app.staticTexts["gift-monthly"].label, "$90/month")
         XCTAssertEqual(app.staticTexts["gift-notice"].label, "Your gift is set up.")
 
-        app.buttons["gift-close"].tap()
+        // Phase B: the Giving tab has no inline close; the Home card reflects the new gift.
+        app.tabBars.buttons["Home"].tap()
         XCTAssertTrue(app.staticTexts["gift-summary"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["gift-summary"].label.hasPrefix("$90/month · renews"), app.staticTexts["gift-summary"].label)
     }
@@ -62,6 +73,9 @@ import XCTest
         XCTAssertEqual(app.staticTexts["gift-monthly"].label, "$150/month")
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$5/day")
 
+        // Phase E: reveal the ± stepper via "Other" before stepping off the $5 preset.
+        app.buttons["amount-other"].tap()
+        XCTAssertTrue(app.buttons["Increase gift"].waitForExistence(timeout: 5))
         app.buttons["Increase gift"].tap()
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$6/day")
         app.buttons["save-gift"].tap()
@@ -80,7 +94,8 @@ import XCTest
         XCTAssertTrue(app.staticTexts["gift-ending"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["Cancel gift"].exists, "an ending gift offers no second cancel")
 
-        app.buttons["gift-close"].tap()
+        // Phase B: the Giving tab has no inline close; the Home card reflects the ending gift.
+        app.tabBars.buttons["Home"].tap()
         XCTAssertTrue(app.staticTexts["gift-summary"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["gift-summary"].label.contains("no further renewals"), app.staticTexts["gift-summary"].label)
     }
@@ -145,7 +160,7 @@ import XCTest
         // With the gift no longer renewing, deleting goes through and the session ends.
         XCTAssertTrue(app.buttons["delete-confirm"].waitForExistence(timeout: 10))
         app.buttons["delete-confirm"].tap()
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 20), "deletion must end the session")
+        XCTAssertTrue(app.buttons["Give $1 a day"].waitForExistence(timeout: 20), "deletion must end the session")
     }
 
     func testDeleteWithNoGiftStillJustDeletes() {
@@ -158,6 +173,6 @@ import XCTest
         input.tap()
         input.typeText("DELETE")
         app.buttons["delete-confirm"].tap()
-        XCTAssertTrue(app.buttons["I’m a donor"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["Give $1 a day"].waitForExistence(timeout: 20))
     }
 }

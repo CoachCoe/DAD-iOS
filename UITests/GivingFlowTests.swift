@@ -17,6 +17,9 @@ import XCTest
         XCTAssertTrue(daily.waitForExistence(timeout: 2))
         XCTAssertEqual(daily.label, "$1/day")
 
+        // Phase E: the ± stepper is revealed by the "Other" amount option.
+        app.buttons["amount-other"].tap()
+        XCTAssertTrue(app.buttons["Increase gift"].waitForExistence(timeout: 5))
         app.buttons["Increase gift"].tap()
         XCTAssertEqual(app.staticTexts["gift-daily"].label, "$2/day")
     }

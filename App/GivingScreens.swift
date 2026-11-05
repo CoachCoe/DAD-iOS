@@ -85,8 +85,21 @@ struct GiftScreen: View {
     @State var model: GivingModel
     var stubComplete: (@Sendable (HostedHandoff.Purpose) -> Void)?
     var onSignedOut: () -> Void = {}
+    /// "Invite someone" on the celebration screen switches to the Circle tab (set from the shell).
+    var onInvite: () -> Void = {}
+    /// The donor-home read seam, used only to learn whether this donor is a Founding Donor so the
+    /// celebration can show the capsule when applicable (the flag lives on the dashboard, not on the
+    /// giving service). nil in previews/when home reads aren't wired — the capsule then stays hidden.
+    var foundingProvider: (any DashboardService)? = nil
     @State private var confirmingCancel = false
     @ScaledMetric(relativeTo: .largeTitle) private var amountSize: CGFloat = 44
+    /// Phase F: show the one-time celebration after a FIRST gift is set up. Tracks that this screen
+    /// started a gift (so a later amount-change never re-celebrates) and whether it's been shown.
+    @State private var startedGift = false
+    @State private var showCelebration = false
+    /// Whether this donor is a Founding Donor, read once from the dashboard so the celebration can show
+    /// the Founding capsule. Defaults to false, so a missing/failed read simply omits the capsule.
+    @State private var founding = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -102,6 +115,12 @@ struct GiftScreen: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("gift-screen")
         .task { await model.load() }
+        // Read the Founding flag once from the dashboard so the first-gift celebration can show the
+        // capsule when applicable. A failure leaves `founding` false (capsule hidden), never blocks giving.
+        .task {
+            guard let foundingProvider else { return }
+            if case .ready(let dashboard) = try? await foundingProvider.dashboard() { founding = dashboard.foundingDonor }
+        }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
         .sheet(isPresented: Binding(get: { model.handoff != nil }, set: { shown in
             if !shown { Task { await model.handoffFinished() } }
@@ -110,7 +129,25 @@ struct GiftScreen: View {
                 HostedPageSheet(handoff: handoff, stubComplete: stubComplete, onFinish: { Task { await model.handoffFinished() } })
             }
         }
+        // Phase F: success haptic the moment a gift is set up or saved; warning when payment needs
+        // attention. Triggers are published model state, so no number is animated.
+        .sensoryFeedback(.success, trigger: model.recurring.subscriptionID)
+        .sensoryFeedback(.warning, trigger: paymentNeedsAttention)
+        // One-time celebration after a FIRST gift completes (not an amount change).
+        .onChange(of: model.recurring.subscriptionID) { previous, current in
+            if startedGift, previous == nil, current != nil { showCelebration = true }
+        }
+        .fullScreenCover(isPresented: $showCelebration) {
+            CelebrationView(monthly: "\(formatUSDMinor(model.selection.monthlyMinor))/month",
+                            daily: "$\(model.selection.dailyDollars) a day",
+                            founding: founding,
+                            onInvite: { showCelebration = false; onInvite() },
+                            onDone: { showCelebration = false })
+        }
     }
+
+    /// True when the payment-method update is in a state the donor must act on (expired).
+    private var paymentNeedsAttention: Bool { model.payment?.kind == .expired }
 
     @ViewBuilder private var loadingOrFailed: some View {
         if case .failed(let message) = model.phase {
@@ -126,7 +163,7 @@ struct GiftScreen: View {
 
     @ViewBuilder private var loaded: some View {
         status
-        if case .active = model.recurring { stepper }
+        if case .active = model.recurring { changeSection }
         if case .none = model.recurring { startSection }
         if model.recurring.subscriptionID != nil { paymentSection }
         feedback
@@ -191,56 +228,126 @@ struct GiftScreen: View {
     private var startSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             amountCard
-            DADStreakBar(filled: min(model.selection.dailyDollars, 30))
-            Button("Start a monthly gift") { Task { await model.startGift() } }
+            Button("Start · \(formatUSDMinor(model.selection.monthlyMinor))/month") { startedGift = true; Task { await model.startGift() } }
                 .buttonStyle(DADButtonStyle(.primary)).disabled(model.isBusy).accessibilityIdentifier("start-gift")
         }
     }
 
-    private var stepper: some View {
+    private var changeSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             amountCard
-            DADStreakBar(filled: min(model.selection.dailyDollars, 30))
-            Button("Save gift") { Task { await model.applySelection() } }
+            Button("Save · \(formatUSDMinor(model.selection.monthlyMinor))/month") { Task { await model.applySelection() } }
                 .buttonStyle(DADButtonStyle(.primary))
                 .disabled(model.isBusy)
                 .accessibilityIdentifier("save-gift")
         }
     }
 
+    /// The $1 / $3 / $5 / Other amount picker. The three presets are a radio row (the selected option
+    /// carries `.isSelected` for VoiceOver); "Other" reveals the existing ± stepper for any $1–$30/day.
+    /// Replaces the former ± stepper + misused DADStreakBar (the streak bar is Home-only now).
+    @State private var otherExpanded = false
+
     private var amountCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            DADCard {
-                VStack(alignment: .leading, spacing: 12) {
+        DADCard {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 8) {
+                    ForEach([1, 3, 5], id: \.self) { dollars in
+                        amountChip(dollars)
+                    }
+                    otherChip
+                }
+                if showsStepper { stepperControls }
+                // "You'll give" with equal-weight framing and the effective date. The daily readout
+                // carries the gift-daily id UITests assert ("$3/day"); shown as the amount headline.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("You’ll give").font(.footnote).foregroundStyle(.secondary)
                     Text(model.selection.dailyLabel).font(.system(size: amountSize, weight: .bold))
                         .accessibilityIdentifier("gift-daily")
-                    Text("\(model.selection.monthlyLabel) · charged monthly").foregroundStyle(.secondary)
-                    HStack(spacing: 16) {
-                        Button { model.decrement() } label: { Image(systemName: "minus.circle.fill").font(.title) }
-                            .accessibilityLabel("Decrease gift")
-                            .disabled(model.selection.dailyDollars <= GiftAmount.minDailyDollars || model.isBusy)
-                        Button { model.increment() } label: { Image(systemName: "plus.circle.fill").font(.title) }
-                            .accessibilityLabel("Increase gift")
-                            .disabled(model.selection.dailyDollars >= GiftAmount.maxDailyDollars || model.isBusy)
-                    }
+                    DADGiftFraming(monthly: "\(formatUSDMinor(model.selection.monthlyMinor))/month",
+                                   daily: "$\(model.selection.dailyDollars) a day")
+                    Text(effectiveLine).font(.footnote).foregroundStyle(.secondary)
                 }
             }
         }
     }
 
+    /// Whether the ± stepper is shown: when "Other" is chosen, or the current amount isn't a preset.
+    private var showsStepper: Bool { otherExpanded || ![1, 3, 5].contains(model.selection.dailyDollars) }
+
+    /// A preset radio chip. Selection is shown with a checkmark + bolder fill (not colour alone) and
+    /// the `.isSelected` VoiceOver trait; never `.primary`, so the Start/Save button stays the lone CTA.
+    private func amountChip(_ dollars: Int) -> some View {
+        let selected = !showsStepper && model.selection.dailyDollars == dollars
+        return Button { otherExpanded = false; model.setDaily(dollars) } label: {
+            Label("$\(dollars)", systemImage: selected ? "largecircle.fill.circle" : "circle")
+                .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(DADButtonStyle(selected ? .secondary : .tertiary, fillsWidth: false))
+        .disabled(model.isBusy)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("amount-\(dollars)")
+    }
+
+    private var otherChip: some View {
+        Button { otherExpanded = true } label: {
+            Label("Other", systemImage: showsStepper ? "largecircle.fill.circle" : "circle")
+                .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(DADButtonStyle(showsStepper ? .secondary : .tertiary, fillsWidth: false))
+        .disabled(model.isBusy)
+        .accessibilityAddTraits(showsStepper ? .isSelected : [])
+        .accessibilityIdentifier("amount-other")
+    }
+
+    private var stepperControls: some View {
+        HStack(spacing: 16) {
+            Button { model.decrement() } label: { Image(systemName: "minus.circle.fill").font(.title) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Decrease gift")
+                .disabled(model.selection.dailyDollars <= GiftAmount.minDailyDollars || model.isBusy)
+            Text(model.selection.dailyLabel).font(.title3.weight(.semibold)).monospacedDigit()
+            Button { model.increment() } label: { Image(systemName: "plus.circle.fill").font(.title) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Increase gift")
+                .disabled(model.selection.dailyDollars >= GiftAmount.maxDailyDollars || model.isBusy)
+        }
+    }
+
+    private var effectiveLine: String {
+        if let effective = model.offer?.effectiveAt {
+            return "Starts \(effective.formatted(date: .long, time: .omitted))."
+        }
+        return "Charged monthly."
+    }
+
     // MARK: payment method
 
     private var paymentSection: some View {
-        DADCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Payment method").font(.headline).accessibilityAddTraits(.isHeader)
-                Text(paymentLine).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("payment-status")
-                if case .active = model.recurring {
-                    Button("Update payment method") { Task { await model.updatePayment() } }
+        VStack(spacing: 12) {
+            DADCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Payment method").font(.headline).accessibilityAddTraits(.isHeader)
+                        Spacer(minLength: 0)
+                    }
+                    Text(paymentLine).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("payment-status")
+                    if case .active = model.recurring {
+                        Button {
+                            Task { await model.updatePayment() }
+                        } label: {
+                            HStack { Text("Update payment method"); Spacer(minLength: 0); Image(systemName: "chevron.right").font(.footnote) }
+                        }
                         .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isBusy).accessibilityIdentifier("update-payment")
+                    }
                 }
+            }.accessibilityElement(children: .contain).accessibilityIdentifier("payment-card")
+            // Gift history is a push on the Giving tab's NavigationStack (registered in Shell.swift).
+            NavigationLink(value: GiftRoute.history) {
+                HStack { Text("Gift history"); Spacer(minLength: 0); Image(systemName: "chevron.right").font(.footnote) }
             }
-        }.accessibilityElement(children: .contain).accessibilityIdentifier("payment-card")
+            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("giving-history")
+        }
     }
 
     private var paymentLine: String {
@@ -287,7 +394,7 @@ struct GiftScreen: View {
             .accessibilityIdentifier("cancel-confirm")
         } else {
             Button("Cancel gift") { confirmingCancel = true }
-                .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isBusy)
+                .buttonStyle(DADButtonStyle(.destructive)).disabled(model.isBusy)
         }
     }
 }
@@ -299,12 +406,16 @@ struct GiftSheet: View {
     let onClose: () -> Void
     let onSignedOut: () -> Void
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
-                    .accessibilityIdentifier("gift-close")
+        NavigationStack {
+            ScrollView {
                 GiftScreen(model: model, stubComplete: stubComplete, onSignedOut: onSignedOut)
             }
-        }.dadBackground()
+            .dadBackground()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", action: onClose).accessibilityIdentifier("gift-close")
+                }
+            }
+        }
     }
 }

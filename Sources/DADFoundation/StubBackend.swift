@@ -60,6 +60,11 @@ public enum StubBackend {
     /// `badgesDown`: the badges read is a 503 while everything else answers (the partial-section path).
     public enum EngagementScenario: Sendable { case standard, rankingToggleFails, noPublicName, badgesDown }
 
+    /// How the application submission answers. `accepts`: 200, and the receipt then reads as PENDING. `invalid`:
+    /// 422 every time. `throttled`: 429 with `Retry-After: 30` and no JSON body, like the ingress. `failsFirst`: the
+    /// first attempt is recorded but answers 503 (the unconfirmed case), the retry is accepted.
+    public enum ApplicationSubmitScenario: Sendable { case accepts, invalid, throttled, failsFirst }
+
     public struct Services: Sendable {
         public let session: AccountSession
         public let signIn: any SignInService
@@ -75,6 +80,10 @@ public enum StubBackend {
         public let partnerAuth: WirePartnerAuth
         public let partner: WirePartner
         public let partnerSession: PartnerSession
+        /// The pending-application read; holds a receipt only when the launch asked for an application scenario.
+        public let applicationStatus: WireApplicationStatus
+        /// Submits through the same receipt store the status read uses, as the app does.
+        public let applicationSubmit: WirePartnerApplication
         public let push: any DonorPushService
         public let linkAttribution: any LinkAttributionService
         /// The referral token the last `startRecurringCheckout` carried, for UITests' expectations.
@@ -88,9 +97,14 @@ public enum StubBackend {
     /// `signedIn` starts with a stored session (as after a relaunch), skipping the phone sign-in dance.
     public static func make(deletionBlocked: Bool = false, scenario: Scenario = .populated, gift: GiftScenario = .none,
                             events: EventsScenario = .standard, engagement: EngagementScenario = .standard, signedIn: Bool = false,
-                            partnerSignedIn: Bool = false, onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
+                            partnerSignedIn: Bool = false, partnerViewer: Bool = false, application: String? = nil,
+                            applicationSubmit: ApplicationSubmitScenario = .accepts,
+                            onLocalWipe: @escaping @Sendable () -> Void = {}) throws -> Services {
         let stub = StubTransport(deletionBlocked: deletionBlocked, scenario: scenario, gift: gift, events: events,
-                                 engagement: engagement)
+                                 engagement: engagement, partnerViewer: partnerViewer, application: application,
+                                 applicationSubmit: applicationSubmit)
+        let receiptStore = InMemoryCredentialStore(application == nil ? nil : Credentials(
+            access: "stub-receipt-" + String(repeating: "r", count: 31), refresh: "", expiresAt: Date().addingTimeInterval(30 * 86_400)))
         let transport = ObservingTransport(inner: stub, observation: .shared)
         let session = try AccountSession(api: WireAPI(origin: origin, transport: transport), store: InMemoryCredentialStore(signedIn ? Credentials(
             access: "stub-access-0", refresh: "stub-refresh-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx", expiresAt: Date().addingTimeInterval(900)) : nil))
@@ -112,6 +126,8 @@ public enum StubBackend {
             partnerAuth: WirePartnerAuth(origin: origin, transport: transport, session: partnerSession),
             partner: WirePartner(origin: origin, transport: transport, session: partnerSession),
             partnerSession: partnerSession,
+            applicationStatus: WireApplicationStatus(origin: origin, transport: transport, receipt: receiptStore),
+            applicationSubmit: WirePartnerApplication(origin: origin, transport: transport, receipt: receiptStore),
             push: WireDonorPush(product: product),
             linkAttribution: WireLinkAttribution(product: product),
             checkoutReferral: { stub.checkoutReferral },
@@ -138,6 +154,13 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private var deleted = false
     private var version = 3
     private var storedPassword = "correct horse battery"
+    private let partnerViewer: Bool
+    /// The application status the stub answers for a receipt (`PENDING`, `APPROVED`, `REJECTED` or any other string).
+    private let applicationStatus: String?
+    private let applicationSubmit: StubBackend.ApplicationSubmitScenario
+    /// Receipts the stub has accepted with an application, mapped to the organization they named.
+    private var submittedReceipts = [String: String]()
+    private var submitAttempts = 0
     private var partnerOrg = "Acme Corp"
     private var partnerAbout = "Doing good together."
     private var partnerWorkforce = 240
@@ -188,7 +211,9 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
     private var team: String?
 
     init(deletionBlocked: Bool, scenario: StubBackend.Scenario, gift: StubBackend.GiftScenario, events: StubBackend.EventsScenario,
-         engagement: StubBackend.EngagementScenario) {
+         engagement: StubBackend.EngagementScenario, partnerViewer: Bool, application: String?,
+         applicationSubmit: StubBackend.ApplicationSubmitScenario) {
+        self.partnerViewer = partnerViewer; applicationStatus = application; self.applicationSubmit = applicationSubmit
         self.deletionBlocked = deletionBlocked; self.scenario = scenario; eventsScenario = events
         engagementScenario = engagement
         publicName = engagement == .noPublicName ? nil : "Alex R"
@@ -418,14 +443,44 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
         case (.post, "/donor/partner/accept-invite"):
             let token = fields["invite"] as? String ?? ""
             return token.hasPrefix("stubpartner") ? reply(.ok, #"{"session":"stub-partner-1"}"#) : reply(.unprocessableContent, "{}")
+        case (.post, "/donor/partner/applications"):
+            guard request.headerFields[.authorization] == nil, request.headerFields[HTTPField.Name("Idempotency-Key")!] != nil,
+                  let receipt = fields["receipt"] as? String, receipt.count == 43,
+                  let organization = (fields["application"] as? [String: Any])?["organization"] as? String else { return reply(.unprocessableContent, "{}") }
+            let attempt = lock.withLock { submitAttempts += 1; return submitAttempts }
+            switch applicationSubmit {
+            case .invalid: return reply(.unprocessableContent, "{}")
+            case .throttled:
+                return (HTTPResponse(status: .tooManyRequests, headerFields: [.retryAfter: "30"]), nil)
+            case .failsFirst where attempt == 1:
+                lock.withLock { submittedReceipts[receipt] = organization }
+                return reply(.serviceUnavailable, "{}")
+            default:
+                lock.withLock { submittedReceipts[receipt] = organization }
+                return reply(.ok, #"{"received":true}"#)
+            }
+        case (.get, "/donor/partner/application-status"):
+            let bearer = request.headerFields[.authorization].map { String($0.dropFirst("Bearer ".count)) } ?? ""
+            if let organization = lock.withLock({ submittedReceipts[bearer] }) {
+                return reply(.ok, #"{"organization":\#(Self.quoted(organization)),"status":"PENDING"}"#)
+            }
+            // The receipt is the bearer; only the receipt the launch seeded is recognized.
+            guard request.headerFields[.authorization]?.hasPrefix("Bearer stub-receipt-") == true, let status = applicationStatus else {
+                return reply(.unauthorized, "{}")
+            }
+            return reply(.ok, #"{"organization":"Acme Corp","status":\#(Self.quoted(status))}"#)
         default: break
         }
         guard request.headerFields[.authorization]?.hasPrefix("Bearer stub-partner-") == true else { return reply(.unauthorized, "{}") }
         let pdf = { (HTTPResponse(status: .ok, headerFields: [.contentType: "application/pdf"]), HTTPBody("%PDF-1.4 stub")) }
+        // Like the server, a viewer's writes and the admin-only exports are 403, whatever the app's own gating does.
+        let adminOnly = request.method == .post && !path.hasSuffix("/sign-out") && !path.contains("/push-device")
+            || path == "/donor/partner/exports" || path.hasSuffix("report.pdf")
+        if partnerViewer && adminOnly { return reply(.forbidden, "{}") }
         switch (request.method, path) {
         case (.get, "/donor/partner/overview"):
             let (organization, description, workforce, hasLogo) = lock.withLock { (partnerOrg, partnerAbout, partnerWorkforce, partnerLogo != nil) }
-            return reply(.ok, #"{"user_id":"u1","organization":\#(Self.quoted(organization)),"description":\#(Self.quoted(description)),"role":"ADMIN","company_code":"ACME","committed_minor":5000000,"deployed_minor":3000000,"deployed_percent":60,"people_reached":12400,"employees_enrolled":86,"workforce_size":\#(workforce),"enrolled_percent":35,"updated_at":"2026-10-28T10:00:00Z","has_logo":\#(hasLogo),"committed_verified":true,"deployed_verified":false,"people_reached_verified":true}"#)
+            return reply(.ok, #"{"user_id":"\#(partnerViewer ? "u2" : "u1")","organization":\#(Self.quoted(organization)),"description":\#(Self.quoted(description)),"role":"\#(partnerViewer ? "VIEWER" : "ADMIN")","company_code":"ACME","committed_minor":5000000,"deployed_minor":3000000,"deployed_percent":60,"people_reached":12400,"employees_enrolled":86,"workforce_size":\#(workforce),"enrolled_percent":35,"updated_at":"2026-10-28T10:00:00Z","has_logo":\#(hasLogo),"committed_verified":true,"deployed_verified":false,"people_reached_verified":true}"#)
         case (.get, "/donor/partner/initiatives"):
             return reply(.ok, #"{"initiatives":[{"id":"i1","title":"Clean Water West","summary":"Wells across 6 counties.","status":"ACTIVE","region":"West","county_count":6,"committed_minor":2000000,"deployed_minor":1200000,"metrics":[{"label":"People reached","value":8400,"unit":"PEOPLE","verified_on":"2026-10-20"}],"spend":[{"category":"Water","amount_minor":1200000}],"updated_at":"2026-10-28T10:00:00Z"}]}"#)
         case (.get, "/donor/partner/spend"):
@@ -445,6 +500,13 @@ private final class StubTransport: ClientTransport, @unchecked Sendable {
             return reply(.ok, #"{"invited":true}"#)
         case (.post, _) where path.hasPrefix("/donor/partner/users/") && path.hasSuffix("/remove"):
             let id = path.dropFirst("/donor/partner/users/".count).dropLast("/remove".count)
+            // The server refuses to remove the signed-in user and the organization's last admin (409).
+            let refused = lock.withLock { () -> Bool in
+                let admins = partnerUsers.filter { $0.contains(#""role":"ADMIN""#) }
+                let target = partnerUsers.first { $0.contains(#""id":"\#(id)""#) }
+                return id == "u1" || (target?.contains(#""role":"ADMIN""#) == true && admins.count <= 1)
+            }
+            if refused { return reply(.conflict, "{}") }
             lock.withLock { partnerUsers.removeAll { $0.contains(#""id":"\#(id)""#) } }
             return reply(.ok, #"{"removed":true}"#)
         case (.post, "/donor/partner/profile"):

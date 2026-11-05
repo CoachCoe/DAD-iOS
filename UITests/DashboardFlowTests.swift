@@ -15,7 +15,7 @@ import XCTest
 
     func testSignedInDashboardRendersStubbedServerData() {
         let app = launch()
-        XCTAssertTrue(app.staticTexts["Welcome, Alex"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Hi, Alex"].waitForExistence(timeout: 15))
         XCTAssertTrue(text(app, "streak-count").waitForExistence(timeout: 10))
         XCTAssertEqual(text(app, "streak-count").label, "18-day streak")
         XCTAssertEqual(text(app, "streak-next").label, "12 days to your 30-day milestone")
@@ -44,7 +44,8 @@ import XCTest
 
         app.buttons["gift-row-0"].tap()
         XCTAssertTrue(app.otherElements["receipt-detail"].waitForExistence(timeout: 10))
-        app.buttons["history-close"].tap()
+        // Phase B: history is a push from Home; return with the navigation back button.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.buttons["open-history"].waitForExistence(timeout: 5))
     }
 

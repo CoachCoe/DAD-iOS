@@ -53,6 +53,13 @@ public extension CGFloat {
     static func dadRadius(_ name: String) -> CGFloat { CGFloat(DADTokens.radius[name] ?? 0) }
 }
 
+public extension Font {
+    /// Display face (SIL OFL Space Grotesk) for large titles, amounts and streak numbers; body stays SF.
+    static func dadDisplay(_ style: Font.TextStyle, size: CGFloat) -> Font {
+        .custom("SpaceGrotesk-Bold", size: size, relativeTo: style)
+    }
+}
+
 /// Theme-aware page background (paper in light, ink-deep in dark) paired with its text color.
 public struct DADBackground: ViewModifier {
     @Environment(\.colorScheme) private var scheme
@@ -70,7 +77,7 @@ public extension View {
 
 /// Primary call-to-action. 44pt minimum target, Dynamic Type, brand-on-wash with readable contrast.
 public struct DADButtonStyle: ButtonStyle {
-    public enum Kind { case primary, secondary }
+    public enum Kind { case primary, secondary, tertiary, destructive }
     private let kind: Kind
     private let fillsWidth: Bool
     @Environment(\.colorScheme) private var scheme
@@ -87,12 +94,21 @@ public struct DADButtonStyle: ButtonStyle {
         let foreground: Color
         switch kind {
         case .primary:
-            // `brand` (#ff4a22) under paper text is 3.19:1, below AA 4.5:1; `brand-ink` is 5.04:1.
-            background = .dad("brand-ink")
-            foreground = .dad("paper")
+            // Matches the web primary: `brand` (#ff4a22) fill under `ink` (#0e1e1e) label is
+            // 5.11:1, clearing AA 4.5:1. Not scheme-branched, so dark mode gets the same pairing.
+            background = .dad("brand")
+            foreground = .dad("ink")
         case .secondary:
             background = .dad(scheme == .dark ? "ink" : "card")
             foreground = .dad(scheme == .dark ? "paper" : "ink")
+        case .tertiary:
+            // Text-weight action: no pill fill, label reads against the page background.
+            background = .clear
+            foreground = .dad(scheme == .dark ? "paper" : "ink")
+        case .destructive:
+            // Text-weight like tertiary, but the `fail` token marks a destructive action.
+            background = .clear
+            foreground = .dad("fail")
         }
         return configuration.label
             .font(.body.weight(.semibold))
@@ -150,12 +166,12 @@ public struct DADStreakBar: View {
         HStack(spacing: 3) {
             ForEach(0..<total, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(index < filled ? Color.dad("brand") : Color.dad("line"))
+                    .fill(index < filled ? Color.dad("ok") : Color.dad("line"))
                     .frame(height: 10)
                     .overlay(
                         // Shape cue in addition to color for the filled segments.
                         index < filled
-                            ? RoundedRectangle(cornerRadius: 2).strokeBorder(Color.dad("brand-ink"), lineWidth: 0.5)
+                            ? RoundedRectangle(cornerRadius: 2).strokeBorder(Color.dad("ok-ink"), lineWidth: 0.5)
                             : nil
                     )
             }
@@ -163,5 +179,78 @@ public struct DADStreakBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Streak")
         .accessibilityValue("\(filled) of \(total) days")
+    }
+}
+
+/// The two ways a recurring gift is framed — a monthly total and its per-day equivalent —
+/// shown with EQUAL visual weight so neither reads as the "real" number, joined by a
+/// middle-dot. One accessibility label speaks the whole phrase.
+public struct DADGiftFraming: View {
+    private let monthly: String
+    private let daily: String
+    public init(monthly: String, daily: String) {
+        self.monthly = monthly
+        self.daily = daily
+    }
+    public var body: some View {
+        HStack(spacing: .dadSpace("2")) {
+            Text(monthly)
+            Text("·")
+            Text(daily)
+        }
+        .font(.body.weight(.semibold))
+        .foregroundStyle(Color.dad("ink"))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(monthly) · \(daily)")
+    }
+}
+
+/// A single labelled statistic. Renders the unknown placeholder "—" (never 0) when the
+/// server value is absent, matching the app's unknown-not-zero rule. Foreground is paired
+/// with a card background so it reads in light and dark.
+public struct DADStatTile: View {
+    @Environment(\.colorScheme) private var scheme
+    private let title: String
+    private let value: String?
+    private let caption: String?
+    public init(title: String, value: String?, caption: String?) {
+        self.title = title
+        self.value = value
+        self.caption = caption
+    }
+    public var body: some View {
+        VStack(alignment: .leading, spacing: .dadSpace("2")) {
+            Text(title).font(.caption).textCase(.uppercase)
+            // Unknown-not-zero: a missing server value is an em dash, never a numeric 0.
+            Text(value ?? "—").font(.title3.weight(.bold))
+            if let caption { Text(caption).font(.caption).foregroundStyle(.secondary) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.dadSpace("4"))
+        .background(Color.dad(scheme == .dark ? "ink" : "card"))
+        .foregroundStyle(Color.dad(scheme == .dark ? "paper" : "ink"))
+        .clipShape(RoundedRectangle(cornerRadius: .dadRadius("card"), style: .continuous))
+    }
+}
+
+/// A short guidance line with an optional trailing action, for empty or near-empty states.
+/// The action is a tertiary button so it reads as text-weight, not a competing call-to-action.
+public struct DADEmptyHint: View {
+    private let text: String
+    private let action: (label: String, perform: () -> Void)?
+    public init(text: String, action: (label: String, perform: () -> Void)? = nil) {
+        self.text = text
+        self.action = action
+    }
+    public var body: some View {
+        HStack(spacing: .dadSpace("3")) {
+            Text(text).font(.body).foregroundStyle(.secondary)
+            if let action {
+                Spacer(minLength: 0)
+                Button(action.label, action: action.perform)
+                    .buttonStyle(DADButtonStyle(.tertiary))
+            }
+        }
+        .frame(minHeight: 44)
     }
 }

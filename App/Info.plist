@@ -19,4 +19,5 @@
     <key>DADAppleSignInEnabled</key><string>$(DAD_APPLE_SIGNIN_ENABLED)</string>
     <key>DADGoogleClientID</key><string>$(DAD_GOOGLE_CLIENT_ID)</string>
     <key>DADPasskeyRelyingParty</key><string>$(DAD_PASSKEY_RP_ID)</string>
+    <key>UIAppFonts</key><array><string>SpaceGrotesk-Bold.ttf</string></array>
 </dict></plist>

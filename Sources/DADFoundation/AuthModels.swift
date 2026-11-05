@@ -15,7 +15,7 @@ public enum SignInMethod: String, Sendable, Equatable, CaseIterable, Identifiabl
     public var title: String {
         switch self {
         case .passkey: "Sign in with a passkey"
-        case .phone: "Sign in with your phone"
+        case .phone: "Continue with phone"
         case .emailLink: "Email me a sign-in link"
         case .apple: "Sign in with Apple"
         case .google: "Sign in with Google"

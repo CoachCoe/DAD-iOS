@@ -5,13 +5,23 @@ import DADFoundation
 // `GiftHistoryModel`; every state the server can produce has its own on-screen answer, and state is
 // always carried in text as well as colour.
 
-/// "2025-01-02" -> "Jan 2, 2025"; anything unparseable is shown as sent rather than dropped.
+/// "2025-01-02" -> "January 2, 2025"; anything unparseable is shown as sent rather than dropped.
+/// US long format (the brief's `April 22, 2027`) now that Phase C restyles this line.
 private func friendlyDate(_ value: String) -> String {
     let parser = DateFormatter()
     parser.locale = Locale(identifier: "en_US_POSIX")
     parser.dateFormat = "yyyy-MM-dd"
     guard let date = parser.date(from: value) else { return value }
-    return date.formatted(date: .abbreviated, time: .omitted)
+    return date.formatted(date: .long, time: .omitted)
+}
+
+/// The Home header's small date line, e.g. "Monday, November 2". Pinned to en_US_POSIX so the
+/// weekday/month words are stable regardless of host locale.
+private func homeHeaderDate(_ date: Date = Date()) -> String {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.setLocalizedDateFormatFromTemplate("EEEEMMMMd")
+    return f.string(from: date)
 }
 
 struct DonorHomeView: View {
@@ -22,35 +32,22 @@ struct DonorHomeView: View {
     private let events: (any EventsService)?
     private let engagement: (any EngagementService)?
     private let wallet: (any WalletPassService)?
-    @State private var showEngagement: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.arguments.contains("--stub-open-engagement")   // screenshot/UITest aid, DEBUG only
-        #else
-        false
-        #endif
-    }()
-    @State private var spendTarget: SpendTarget?
-    @State private var showEvents: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.arguments.contains("--stub-open-events")   // screenshot/UITest aid, DEBUG only
-        #else
-        false
-        #endif
-    }()
-    @State private var showHistory = false
-    @State private var showGift: Bool = {
-        #if DEBUG
-        ProcessInfo.processInfo.arguments.contains("--stub-open-gift")   // screenshot/UITest aid, DEBUG only
-        #else
-        false
-        #endif
-    }()
+    /// The donor's public name for the "Hi, …" greeting the home shows (nil → "Welcome back").
+    private let greeting: String?
+    private let preview: Bool
+    /// Switch the shell to the Giving tab (at-risk "Update payment" and the monthly-gift row).
+    private let onSwitchToGiving: () -> Void
+    /// Switch the shell to the Circle tab (the "Invite someone" primary; Circle owns ShareLink/QR).
+    private let onInvite: () -> Void
     @State private var giftModel: GivingModel?
-    /// A screen a tapped notification asked for; opened here and then cleared.
+    /// A screen a tapped notification asked for. Routing now lives in the shell (tab + push); the
+    /// binding stays so Home can be constructed with the same signature.
     @Binding private var destination: AccountDestination?
 
     init(service: any DashboardService, giving: GivingKit? = nil, events: (any EventsService)? = nil,
          engagement: (any EngagementService)? = nil, wallet: (any WalletPassService)? = nil,
+         greeting: String? = nil, preview: Bool = false,
+         onSwitchToGiving: @escaping () -> Void = {}, onInvite: @escaping () -> Void = {},
          destination: Binding<AccountDestination?> = .constant(nil), onSignedOut: @escaping () -> Void) {
         _destination = destination
         self.service = service
@@ -58,123 +55,114 @@ struct DonorHomeView: View {
         self.events = events
         self.engagement = engagement
         self.wallet = wallet
+        self.greeting = greeting
+        self.preview = preview
+        self.onSwitchToGiving = onSwitchToGiving
+        self.onInvite = onInvite
         self.onSignedOut = onSignedOut
         _model = State(initialValue: DashboardModel(service: service))
         _giftModel = State(initialValue: giving?.makeModel())
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if let notice = model.refreshNotice {
-                Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("dashboard-notice")
-            }
-            switch model.phase {
-            case .loading:
-                ProgressView("Loading your dashboard…").accessibilityIdentifier("dashboard-loading")
-            case .failed(let message):
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(message).accessibilityIdentifier("dashboard-error")
-                    Button("Try again") { Task { await model.load() } }
-                        .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("dashboard-retry")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                if let notice = model.refreshNotice {
+                    Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("dashboard-notice")
                 }
-            case .ready(.preparing):
-                DADCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Getting your dashboard ready").font(.headline)
-                        Text("Your numbers appear here once your first gift has been counted.").font(.footnote)
-                        Button("Refresh") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
+                switch model.phase {
+                case .loading:
+                    ProgressView("Loading your dashboard…").accessibilityIdentifier("dashboard-loading")
+                case .failed(let message):
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(message).accessibilityIdentifier("dashboard-error")
+                        Button("Try again") { Task { await model.load() } }
+                            .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("dashboard-retry")
                     }
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("dashboard-preparing")
-            case .ready(.ready(let dashboard)):
-                DashboardCards(dashboard: dashboard)
+                case .ready(.preparing):
+                    DADCard {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Getting your dashboard ready").font(.headline)
+                            Text("Your numbers appear here once your first gift has been counted.").font(.footnote)
+                            Button("Refresh") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
+                        }
+                    }.accessibilityElement(children: .contain).accessibilityIdentifier("dashboard-preparing")
+                case .ready(.ready(let dashboard)):
+                    DashboardCards(dashboard: dashboard, onUpdatePayment: onSwitchToGiving)
+                    // The lone primary on Home: Circle owns the share/QR affordances (Phase G).
+                    Button("Invite someone", action: onInvite)
+                        .buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("invite-someone")
+                }
+                // A-3: "Where the money went" is a push, not a sheet. The link carries the initiative's id.
+                InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } },
+                               spendRoute: engagement == nil ? nil : { id, title in SpendRoute(id: id, title: title) })
+                if let giftModel { GiftSummaryCard(model: giftModel, onOpen: onSwitchToGiving) }
+                // Gift history is a push from Home; the Giving tab reaches it too (shell deep-link).
+                NavigationLink(value: GiftRoute.history) { Text("Gift history") }
+                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-history")
             }
-            InitiativeCard(phase: model.initiative, onRetry: { Task { await model.load() } },
-                           onSpend: engagement == nil ? nil : { id, title in spendTarget = SpendTarget(id: id, title: title) })
-            if let giftModel { GiftSummaryCard(model: giftModel, onManage: { showGift = true }) }
-            if engagement != nil {
-                DADCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Badges, rankings & network").font(.headline).accessibilityAddTraits(.isHeader)
-                        Text("Your badges, standing, referral network and invite link.").font(.footnote)
-                        Button("See your impact") { showEngagement = true }
-                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-engagement")
-                    }
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("engagement-card")
-            }
-            if events != nil {
-                DADCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Events").font(.headline).accessibilityAddTraits(.isHeader)
-                        Text("Volunteer, meet other donors and check in.").font(.footnote)
-                        Button("Browse events") { showEvents = true }
-                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-events")
-                    }
-                }.accessibilityElement(children: .contain).accessibilityIdentifier("events-card")
-            }
-            Button("Gift history") { showHistory = true }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-history")
+            .frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
+            .accessibilityElement(children: .contain).accessibilityIdentifier("donor-home")
         }
-        .accessibilityElement(children: .contain).accessibilityIdentifier("donor-home")
+        .modifier(HistoryBackground())
         .task { await model.load() }
         .task { await giftModel?.load() }
-        .task(id: destination) {
-            switch destination {
-            case .gifts: showHistory = true
-            case .paymentMethod: showGift = giftModel != nil
-            default: return
-            }
-            destination = nil
-        }
         .refreshable { await model.load(); await giftModel?.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
-        .sheet(isPresented: $showGift) {
-            if let giftModel, let giving {
-                GiftSheet(model: giftModel, stubComplete: giving.stubComplete, onClose: { showGift = false },
-                          onSignedOut: { showGift = false; onSignedOut() })
-            }
+        // Phase F: warning haptic when the streak is at risk (payment needs attention).
+        .sensoryFeedback(.warning, trigger: streakAtRisk)
+    }
+
+    /// Whether the dashboard's streak is currently at risk — drives the warning haptic.
+    private var streakAtRisk: Bool {
+        if case .ready(.ready(let dashboard)) = model.phase { return dashboard.streak?.atRisk == true }
+        return false
+    }
+
+    /// Small date line over a large "Hi, {name}" title; "Welcome back" when there is no name.
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(homeHeaderDate()).font(.subheadline).foregroundStyle(.secondary)
+            Text(greeting.map { "Hi, \($0)" } ?? "Welcome back")
+                .font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
         }
-        .sheet(isPresented: $showEngagement) {
-            if let engagement {
-                EngagementHome(model: EngagementModel(service: engagement), wallet: wallet.map { WalletPassModel(service: $0) },
-                               onClose: { showEngagement = false },
-                               onSignedOut: { showEngagement = false; onSignedOut() })
-            }
-        }
-        .sheet(item: $spendTarget) { target in
-            if let engagement {
-                InitiativeSpendScreen(model: InitiativeSpendModel(service: engagement, initiativeID: target.id), title: target.title,
-                                      onClose: { spendTarget = nil }, onSignedOut: { spendTarget = nil; onSignedOut() })
-            }
-        }
-        .sheet(isPresented: $showEvents) {
-            if let events {
-                EventsScreen(model: EventsModel(service: events), service: events, onClose: { showEvents = false },
-                             onSignedOut: { showEvents = false; onSignedOut() })
-            }
-        }
-        .sheet(isPresented: $showHistory) {
-            GiftHistoryScreen(service: service, onClose: { showHistory = false }, onSignedOut: { showHistory = false; onSignedOut() })
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-private struct SpendTarget: Identifiable { let id: String; let title: String }
-
-/// The donor's monthly gift at a glance (G-7..G-9); "Manage gift" opens the full gift screen. It reads
-/// the same `GivingModel` as that screen, so a cancel or change shows here the moment it succeeds.
+/// The donor's monthly gift at a glance (G-7..G-9). It reads the same `GivingModel` as the Giving tab's
+/// gift screen, so a cancel or change shows here the moment it succeeds.
 private struct GiftSummaryCard: View {
     let model: GivingModel
-    let onManage: () -> Void
+    /// Tapping the row switches to the Giving tab (Phase C step 7).
+    var onOpen: () -> Void = {}
 
     var body: some View {
-        DADCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Your monthly gift").font(.headline).accessibilityAddTraits(.isHeader)
-                Text(summary).font(.footnote).accessibilityIdentifier("gift-summary")
-                Button("Manage gift", action: onManage)
-                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-gift")
+        Button(action: onOpen) {
+            DADCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Your monthly gift").font(.headline).accessibilityAddTraits(.isHeader)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    // Equal-weight framing when a gift exists (G-7..G-9); the server detail line keeps
+                    // the `gift-summary` id/text UITests assert.
+                    if let framing { DADGiftFraming(monthly: framing.monthly, daily: framing.daily) }
+                    Text(summary).font(.footnote).accessibilityIdentifier("gift-summary")
+                }
             }
-        }.accessibilityElement(children: .contain).accessibilityIdentifier("gift-summary-card")
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .contain).accessibilityIdentifier("gift-summary-card")
+    }
+
+    /// The monthly/daily pair shown with equal weight, when the active amount maps to the daily rule.
+    private var framing: (monthly: String, daily: String)? {
+        guard model.hasLoaded, let minor = model.recurring.amountMinor,
+              let amount = GiftAmount(monthlyMinor: minor) else { return nil }
+        return ("\(formatUSDMinor(minor))/month", "$\(amount.dailyDollars) a day")
     }
 
     private var summary: String {
@@ -182,7 +170,7 @@ private struct GiftSummaryCard: View {
             if case .failed = model.phase { return "Your gift isn’t available right now." }
             return "Loading your gift…"
         }
-        func date(_ d: Date) -> String { d.formatted(date: .abbreviated, time: .omitted) }
+        func date(_ d: Date) -> String { d.formatted(date: .long, time: .omitted) }
         switch model.recurring {
         case .none: return "No monthly gift yet."
         case .preparing: return "Getting your first gift ready."
@@ -194,10 +182,27 @@ private struct GiftSummaryCard: View {
 
 private struct DashboardCards: View {
     let dashboard: DonorDashboard
+    /// At-risk "Update payment" switches to the Giving tab.
+    var onUpdatePayment: () -> Void = {}
+    @ScaledMetric(relativeTo: .largeTitle) private var streakSize: CGFloat = 44
+    /// Phase F: the milestone last acknowledged on this device, so a newly crossed milestone shows the
+    /// inline card once (NOT a modal) and fires the success haptic only on first sight.
+    @AppStorage("dad.lastSeenMilestone") private var lastSeenMilestone = 0
+    @State private var milestoneDismissed = false
+
+    /// The milestone the streak has crossed but this device hasn't acknowledged yet, if any.
+    private var newMilestone: Int? {
+        guard let reached = dashboard.streak?.ladder?.lastMilestone, reached > 0, reached > lastSeenMilestone,
+              !milestoneDismissed else { return nil }
+        return reached
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if let streak = dashboard.streak, streak.atRisk { atRiskBanner(streak) }
+            if let reached = newMilestone { milestoneCard(reached) }
             streak
+            referralTiles
             impact
             if let network = dashboard.network {
                 DADCard {
@@ -217,42 +222,109 @@ private struct DashboardCards: View {
         }
     }
 
-    @ViewBuilder private var streak: some View {
-        DADCard {
-            VStack(alignment: .leading, spacing: 8) {
-                if dashboard.foundingDonor {
-                    Label("Founding donor", systemImage: "star.fill").font(.footnote.weight(.semibold))
-                        .accessibilityIdentifier("founding-donor")
-                }
-                if let streak = dashboard.streak {
-                    Text(streak.headline).font(.title.bold()).accessibilityIdentifier("streak-count")
-                    if let ladder = streak.ladder {
-                        let filled = ladder.bar.filter { $0 }.count
-                        DADStreakBar(filled: filled, total: max(ladder.bar.count, 1))
-                        if let next = ladder.nextLabel { Text(next).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("streak-next") }
-                    }
-                    if streak.atRisk {
-                        Label(streak.graceEndsAt.map { "A renewal didn’t go through. Update your payment by \($0.formatted(date: .abbreviated, time: .omitted)) to keep your streak." }
-                              ?? "A renewal didn’t go through. Update your payment to keep your streak.",
-                              systemImage: "exclamationmark.triangle.fill")
-                            .font(.footnote).accessibilityIdentifier("streak-at-risk")
-                    }
-                } else {
-                    // The server says the figure is not known: say so rather than show a zero streak.
-                    Text("Your streak isn’t available right now.").font(.headline).accessibilityIdentifier("streak-unknown")
-                }
-                rankLine
+    /// S-1 at-risk: a warn/warn-wash card with an SF Symbol (not emoji) and the Giving-tab action.
+    @ViewBuilder private func atRiskBanner(_ streak: StreakCard) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label {
+                Text(streak.graceEndsAt.map { "A renewal didn’t go through. Update your payment by \($0.formatted(date: .long, time: .omitted)) to keep your streak." }
+                     ?? "A renewal didn’t go through. Update your payment to keep your streak.")
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.dad("warn"))
             }
-        }.accessibilityElement(children: .contain).accessibilityIdentifier("streak-card")
+            .font(.footnote).accessibilityIdentifier("streak-at-risk")
+            Button("Update payment", action: onUpdatePayment)
+                .buttonStyle(DADButtonStyle(.secondary, fillsWidth: false)).accessibilityIdentifier("at-risk-update")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.dadSpace("5"))
+        .background(Color.dad("warn-wash"))
+        .foregroundStyle(Color.dad("ink"))
+        .clipShape(RoundedRectangle(cornerRadius: .dadRadius("card"), style: .continuous))
+        .accessibilityElement(children: .contain).accessibilityIdentifier("at-risk-banner")
+    }
+
+    /// Milestone-reached (streak crossed a milestone since last launch): a dismissible inline card with
+    /// a share action — NOT a modal. First sight also fires the success haptic.
+    @ViewBuilder private func milestoneCard(_ reached: Int) -> some View {
+        let message = "\(reached) days. That’s a month of aid, on the record."
+        DADCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top) {
+                    Label("Milestone reached", systemImage: "flag.checkered")
+                        .font(.footnote.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 0)
+                    Button {
+                        lastSeenMilestone = reached
+                        milestoneDismissed = true
+                    } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).accessibilityLabel("Dismiss")
+                }
+                Text(message).font(.headline)
+                ShareLink(item: message) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }.buttonStyle(DADButtonStyle(.secondary, fillsWidth: false))
+            }
+        }
+        .accessibilityElement(children: .contain).accessibilityIdentifier("milestone-card")
+        .sensoryFeedback(.success, trigger: reached)
+    }
+
+    /// Link | IRL referral counts, equal weight. Unknown stays unknown (nil → "—", never 0); a real 0
+    /// reads muted with the "show your code in person" hint.
+    @ViewBuilder private var referralTiles: some View {
+        let referrals = dashboard.referrals
+        HStack(alignment: .top, spacing: .dadSpace("3")) {
+            DADStatTile(title: "Link", value: referrals.map { "\($0.link)" },
+                        caption: referrals?.link == 0 ? "Share your invite link" : nil)
+            DADStatTile(title: "IRL", value: referrals.map { "\($0.irl)" },
+                        caption: referrals?.irl == 0 ? "Show your code in person" : nil)
+        }
+    }
+
+    /// The streak hero on ink: day count in the display face, teal 30-day bar, milestone + rank, and the
+    /// single Founding Donor mention on this screen.
+    @ViewBuilder private var streak: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Giving streak").font(.caption).textCase(.uppercase).foregroundStyle(Color.dad("dkmut"))
+            if let streak = dashboard.streak {
+                Text("\(streak.current)").font(.dadDisplay(.largeTitle, size: streakSize))
+                    .accessibilityIdentifier("streak-count").accessibilityLabel(streak.headline)
+                Text("\(streak.current == 1 ? "day" : "days")").font(.footnote).foregroundStyle(Color.dad("dkmut"))
+                if let ladder = streak.ladder {
+                    let filled = ladder.bar.filter { $0 }.count
+                    DADStreakBar(filled: filled, total: max(ladder.bar.count, 1))
+                    if let next = ladder.nextLabel {
+                        Text(next).font(.footnote).foregroundStyle(Color.dad("dkmut")).accessibilityIdentifier("streak-next")
+                    }
+                }
+            } else {
+                // The server says the figure is not known: say so rather than show a zero streak.
+                Text("Your streak isn’t available right now.").font(.headline).accessibilityIdentifier("streak-unknown")
+            }
+            rankLine
+            if dashboard.foundingDonor {
+                Label("Founding donor", systemImage: "star.fill").font(.footnote.weight(.semibold))
+                    .padding(.horizontal, .dadSpace("3")).padding(.vertical, .dadSpace("1"))
+                    .background(Color.dad("ok-ink"), in: Capsule())
+                    .foregroundStyle(Color.dad("paper"))
+                    .accessibilityIdentifier("founding-donor")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.dadSpace("5"))
+        .background(Color.dad("ink"))
+        .foregroundStyle(Color.dad("paper"))
+        .clipShape(RoundedRectangle(cornerRadius: .dadRadius("card"), style: .continuous))
+        .accessibilityElement(children: .contain).accessibilityIdentifier("streak-card")
     }
 
     @ViewBuilder private var rankLine: some View {
         switch dashboard.rank {
         case .ranked(let rank):
             Text(rank.nationalLabel).font(.subheadline.weight(.semibold)).accessibilityIdentifier("rank-national")
-            if let city = rank.cityLabel { Text(city).font(.footnote).foregroundStyle(.secondary) }
+            if let city = rank.cityLabel { Text(city).font(.footnote).foregroundStyle(Color.dad("dkmut")) }
         case .notRankedYet:
-            Text("Not ranked yet.").font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("rank-unranked")
+            Text("Not ranked yet.").font(.footnote).foregroundStyle(Color.dad("dkmut")).accessibilityIdentifier("rank-unranked")
         case .optedOut:
             EmptyView()   // S-4: a hidden donor shows no rank line at all
         }
@@ -273,8 +345,8 @@ private struct DashboardCards: View {
 private struct InitiativeCard: View {
     let phase: DashboardModel.InitiativePhase
     let onRetry: () -> Void
-    /// A-3: opens the initiative's spend by category; nil when the engagement service is not wired.
-    var onSpend: ((String, String) -> Void)?
+    /// A-3: builds the push route for the initiative's spend by category; nil when engagement is not wired.
+    var spendRoute: ((String, String) -> SpendRoute)?
 
     var body: some View {
         DADCard {
@@ -303,9 +375,11 @@ private struct InitiativeCard: View {
                     }
                     Text(TodayInitiative.attributionNote).font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("initiative-note")
-                    if let onSpend {
-                        Button("See every dollar this initiative has spent") { onSpend(initiative.id, initiative.title) }
-                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-spend")
+                    if let spendRoute {
+                        NavigationLink(value: spendRoute(initiative.id, initiative.title)) {
+                            Text("Where the money went ›")
+                        }
+                        .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-spend")
                     }
                 }
             }
@@ -316,12 +390,10 @@ private struct InitiativeCard: View {
 /// Gift history (paged) with an inline gift record per row and the calendar-year total on top.
 struct GiftHistoryScreen: View {
     @State private var model: GiftHistoryModel
-    let onClose: () -> Void
     let onSignedOut: () -> Void
     @Environment(\.colorScheme) private var scheme
 
-    init(service: any DashboardService, onClose: @escaping () -> Void, onSignedOut: @escaping () -> Void) {
-        self.onClose = onClose
+    init(service: any DashboardService, onSignedOut: @escaping () -> Void) {
         self.onSignedOut = onSignedOut
         _model = State(initialValue: GiftHistoryModel(service: service))
     }
@@ -329,7 +401,6 @@ struct GiftHistoryScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Button("Close", action: onClose).accessibilityIdentifier("history-close")
                 Text("Gift history").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 if let summary = model.summary {
                     DADCard {

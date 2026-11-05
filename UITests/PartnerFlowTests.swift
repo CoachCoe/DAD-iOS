@@ -78,8 +78,8 @@ import XCTest
         app.launchArguments = ["--stub-backend"]
         app.launch()
 
-        XCTAssertTrue(app.buttons["I’m a partner"].waitForExistence(timeout: 10))
-        app.buttons["I’m a partner"].tap()
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 10))
+        app.buttons["Partner organization? Sign in here"].tap()
         let email = app.textFields["partner-sign-in-email"]
         XCTAssertTrue(email.waitForExistence(timeout: 5))
         XCTAssertTrue(app.links["partner-apply"].exists || app.buttons["partner-apply"].exists, "a new partner is pointed to the application")
@@ -103,7 +103,7 @@ import XCTest
         let signOut = app.buttons["partner-sign-out"]
         for _ in 0..<6 where !signOut.isHittable { app.swipeUp() }
         signOut.tap()
-        XCTAssertTrue(app.buttons["I’m a partner"].waitForExistence(timeout: 5), "signing out returns to the start")
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 5), "signing out returns to the start")
     }
 
     func testRestoredPartnerManagesTheOrganization() {
@@ -134,6 +134,233 @@ import XCTest
         XCTAssertTrue(app.staticTexts["partner-action-error"].waitForExistence(timeout: 5), "an aged-out report says so")
     }
 
+    // MARK: - P6: the real partner conformers on the scripted backend
+
+    private func launchSignedInPartner(_ extra: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend", "--stub-partner-signed-in"] + extra
+        app.launch()
+        return app
+    }
+
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<8 where !element.isHittable { app.swipeUp() }
+    }
+
+    func testWiredAdminCannotRemoveSelfAndRemovesAnotherUserAfterConfirming() {
+        let app = launchSignedInPartner()
+        XCTAssertTrue(app.buttons["Organization"].waitForExistence(timeout: 10))
+        app.buttons["Organization"].tap()
+        let remove = app.buttons["partner-remove-u2"]
+        reveal(remove, in: app)
+        XCTAssertTrue(remove.exists)
+        XCTAssertFalse(app.buttons["partner-remove-u1"].exists, "the signed-in admin has no remove action for themselves")
+        remove.tap()
+        XCTAssertTrue(app.otherElements["partner-remove-prompt"].waitForExistence(timeout: 3))
+        app.buttons["partner-remove-cancel"].tap()
+        XCTAssertTrue(remove.exists, "cancelling keeps the user")
+        remove.tap()
+        app.buttons["partner-remove-confirm"].tap()
+        XCTAssertFalse(app.buttons["partner-remove-u2"].waitForExistence(timeout: 3), "the server removed the user")
+    }
+
+    func testWiredInviteRejectsAnInvalidAddressExplainsAConflictAndInvitesAValidOne() {
+        let app = launchSignedInPartner()
+        XCTAssertTrue(app.buttons["Organization"].waitForExistence(timeout: 10))
+        app.buttons["Organization"].tap()
+        let invite = app.buttons["partner-invite"]
+        let name = app.textFields["partner-invite-name"]
+        reveal(name, in: app)
+        name.tap()
+        name.typeText("Nell")
+        let email = app.textFields["partner-invite-email"]
+        email.tap()
+        email.typeText("not-an-email")
+        XCTAssertFalse(invite.isEnabled, "an invalid address cannot be sent")
+
+        email.clearAndType("taken@acme.com")
+        XCTAssertTrue(invite.isEnabled)
+        invite.tap()
+        let error = app.staticTexts["partner-action-error"]
+        for _ in 0..<8 where !error.exists { app.swipeDown() }
+        XCTAssertTrue(error.waitForExistence(timeout: 5), "the server's 409 is explained")
+        XCTAssertTrue(error.label.contains("another role or organization"))
+
+        reveal(email, in: app)
+        email.tap()
+        email.clearAndType("new@acme.com")
+        reveal(invite, in: app)
+        invite.tap()
+        XCTAssertTrue(app.staticTexts["Nell · Viewer"].waitForExistence(timeout: 5), "the invited user appears in the refreshed list")
+    }
+
+    func testWiredViewerSeesTheDataButNoAdminActions() {
+        let app = launchSignedInPartner(["--stub-partner-viewer"])
+        XCTAssertTrue(app.staticTexts["partner-committed"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Viewer"].exists)
+        app.buttons["Organization"].tap()
+        XCTAssertTrue(app.staticTexts["partner-readonly"].waitForExistence(timeout: 5))
+        for id in ["partner-invite", "partner-profile-save", "partner-workforce-save", "partner-logo-remove", "partner-export", "partner-remove-u1", "partner-remove-u2"] {
+            XCTAssertFalse(app.buttons[id].exists, "\(id) must not be offered to a viewer")
+        }
+        XCTAssertFalse(app.textFields["partner-profile-name"].exists)
+        XCTAssertTrue(app.buttons["partner-sign-out"].exists || app.buttons["partner-sign-out"].waitForExistence(timeout: 2))
+    }
+
+    func testWiredExportOffersTheReportToShareAndKeepsTheHistory() {
+        let app = launchSignedInPartner()
+        XCTAssertTrue(app.buttons["Organization"].waitForExistence(timeout: 10))
+        app.buttons["Organization"].tap()
+        let export = app.buttons["partner-export"]
+        reveal(export, in: app)
+        export.tap()
+        let share = app.buttons["partner-report-share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 5) || app.links["partner-report-share"].waitForExistence(timeout: 2),
+                      "the exported PDF is offered to the share sheet")
+        let latest = app.buttons["partner-export-r2"]
+        reveal(latest, in: app)
+        XCTAssertTrue(latest.exists, "the new export is listed and can be downloaded again")
+        latest.tap()
+        XCTAssertFalse(app.staticTexts["partner-action-error"].waitForExistence(timeout: 2), "a retained report downloads")
+    }
+
+    func testPendingApplicationIsShownAboveSignIn() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend", "--stub-application-pending"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 10))
+        app.buttons["Partner organization? Sign in here"].tap()
+        let card = app.otherElements["partner-application-status"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["partner-application-message"].label.contains("being reviewed"))
+        XCTAssertTrue(app.textFields["partner-sign-in-email"].exists, "sign-in is still available")
+    }
+
+    func testApprovedAndUnknownApplicationStatusesAreWordedHonestly() {
+        let approved = XCUIApplication()
+        approved.launchArguments = ["--stub-backend", "--stub-application-approved"]
+        approved.launch()
+        approved.buttons["Partner organization? Sign in here"].tap()
+        XCTAssertTrue(approved.staticTexts["partner-application-message"].waitForExistence(timeout: 5))
+        XCTAssertTrue(approved.staticTexts["partner-application-message"].label.contains("is approved"))
+        approved.terminate()
+
+        let unknown = XCUIApplication()
+        unknown.launchArguments = ["--stub-backend", "--stub-application-unknown"]
+        unknown.launch()
+        unknown.buttons["Partner organization? Sign in here"].tap()
+        XCTAssertTrue(unknown.staticTexts["partner-application-message"].waitForExistence(timeout: 5))
+        XCTAssertFalse(unknown.staticTexts["partner-application-message"].label.contains("approved"))
+    }
+
+    func testNoApplicationCardWithoutAReceipt() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 10))
+        app.buttons["Partner organization? Sign in here"].tap()
+        XCTAssertTrue(app.textFields["partner-sign-in-email"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["partner-application-status"].exists)
+    }
+
+    // MARK: - Contract 2.11: applying from the app
+
+    private func openApplication(_ extra: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--stub-backend"] + extra
+        app.launch()
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 10))
+        app.buttons["Partner organization? Sign in here"].tap()
+        let apply = app.buttons["partner-apply-in-app"]
+        XCTAssertTrue(apply.waitForExistence(timeout: 5), "a new partner can apply in the app")
+        reveal(apply, in: app)
+        apply.tap()
+        XCTAssertTrue(app.otherElements["partner-application-form"].waitForExistence(timeout: 5))
+        return app
+    }
+
+    private func fillApplication(in app: XCUIApplication) {
+        for (id, text) in [("partner-app-organization", "Acme Corp"), ("partner-app-website", "acme.example"), ("partner-app-workforce", "240"),
+                           ("partner-app-contact", "Ada Admin"), ("partner-app-title", "Director"), ("partner-app-email", "ada@acme.example"),
+                           ("partner-app-phone", "5550100")] {
+            let field = app.textFields[id]
+            reveal(field, in: app)
+            field.tap()
+            field.typeText(text)
+        }
+    }
+
+    private func submitApplication(in app: XCUIApplication) {
+        let submit = app.buttons["partner-app-submit"]
+        if app.keyboards.count > 0 { app.otherElements["partner-application-form"].staticTexts.firstMatch.tap() }
+        reveal(submit, in: app)
+        XCTAssertTrue(submit.isEnabled, "a complete application can be sent")
+        submit.tap()
+    }
+
+    func testSubmittingAnApplicationShowsItPendingFromTheStoredReceipt() {
+        let app = openApplication()
+        XCTAssertFalse(app.buttons["partner-app-submit"].isEnabled, "an empty application cannot be sent")
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let message = app.staticTexts["partner-application-message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 10), "the status card reads the receipt the submission kept")
+        XCTAssertTrue(message.label.contains("Acme Corp"))
+        XCTAssertTrue(message.label.contains("being reviewed"))
+        XCTAssertFalse(app.otherElements["partner-application-form"].exists)
+        XCTAssertFalse(app.buttons["partner-apply-in-app"].exists, "an install with an application under review is not offered another")
+        XCTAssertTrue(app.textFields["partner-sign-in-email"].exists, "sign-in is still available")
+    }
+
+    func testARefusedApplicationIsExplainedAndTheFormStaysEditable() {
+        let app = openApplication(["--stub-apply-invalid"])
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let error = app.staticTexts["partner-app-error"]
+        for _ in 0..<6 where !error.exists { app.swipeDown() }
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
+        XCTAssertTrue(error.label.contains("Check each field"))
+        XCTAssertTrue(app.textFields["partner-app-organization"].isEnabled, "a refused application can be corrected")
+        XCTAssertFalse(app.staticTexts["partner-application-message"].exists, "no status card without an accepted application")
+    }
+
+    func testAThrottledApplicationNamesTheWait() {
+        let app = openApplication(["--stub-apply-throttled"])
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let error = app.staticTexts["partner-app-error"]
+        for _ in 0..<6 where !error.exists { app.swipeDown() }
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
+        XCTAssertTrue(error.label.contains("30 seconds"), "the ingress Retry-After is shown even without a JSON body")
+    }
+
+    func testAnUnconfirmedApplicationRetriesTheSameSubmission() {
+        let app = openApplication(["--stub-apply-fails-first"])
+        fillApplication(in: app)
+        submitApplication(in: app)
+        let error = app.staticTexts["partner-app-error"]
+        for _ in 0..<6 where !error.exists { app.swipeDown() }
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
+        XCTAssertTrue(error.label.contains("couldn’t confirm"))
+        XCTAssertFalse(app.textFields["partner-app-organization"].isEnabled, "the sent form is locked so a retry repeats it")
+        let retry = app.buttons["partner-app-submit"]
+        reveal(retry, in: app)
+        XCTAssertEqual(retry.label, "Retry")
+        retry.tap()
+        XCTAssertTrue(app.staticTexts["partner-application-message"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["partner-application-message"].label.contains("being reviewed"))
+    }
+
+    func testWiredSignOutReturnsToTheRoleSelect() {
+        let app = launchSignedInPartner()
+        XCTAssertTrue(app.buttons["Organization"].waitForExistence(timeout: 10))
+        app.buttons["Organization"].tap()
+        let signOut = app.buttons["partner-sign-out"]
+        reveal(signOut, in: app)
+        signOut.tap()
+        XCTAssertTrue(app.buttons["Partner organization? Sign in here"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Organization"].exists)
+    }
 }
 
 private extension XCUIElement {

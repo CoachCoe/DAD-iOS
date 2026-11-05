@@ -181,7 +181,7 @@ struct SessionsSection: View {
             Spacer()
             if !session.current {
                 Button("Sign out") { Task { await model.revoke(session.id) } }
-                    .disabled(model.isBusy).accessibilityLabel("Sign out \(session.label)").accessibilityIdentifier("session-revoke-\(session.id)")
+                    .buttonStyle(DADButtonStyle(.destructive)).disabled(model.isBusy).accessibilityLabel("Sign out \(session.label)").accessibilityIdentifier("session-revoke-\(session.id)")
             }
         }
     }

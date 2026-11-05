@@ -21,10 +21,21 @@ struct PartnerSignInFlow: View {
     let onSignedIn: () -> Void
     /// The website's partner application (`<public origin>/apply`); nil when no public origin is configured.
     var applyURL: URL?
+    /// Where this install's partner application stands, when it holds a receipt for one; nil hides the card.
+    var applicationStatus: (any ApplicationStatusService)?
+    /// Submits a partner application from the app; nil falls back to the website's form.
+    var applicationSubmit: (any PartnerApplicationService)?
     @State private var pasted = ""
     @State private var sentTo: String?
+    @State private var applying = false
+    @State private var holdsApplication = false
+    @State private var statusReload = 0
 
     var body: some View {
+        ScrollView { signInContent }
+    }
+
+    private var signInContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Partner sign-in").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
             switch model.phase {
@@ -37,17 +48,12 @@ struct PartnerSignInFlow: View {
             case .accepting, .signedIn:
                 ProgressView("Signing you in…").accessibilityIdentifier("partner-signing-in")
             default:
-                Text("We’ll email you a link to sign in to your organization’s portal.")
-                TextField("Work email", text: $model.email)
-                    .textFieldStyle(.roundedBorder).keyboardType(.emailAddress).textContentType(.emailAddress)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .accessibilityIdentifier("partner-sign-in-email")
-                if case .failed(let message) = model.phase { failureText(message, id: "partner-sign-in-error") }
-                Button(model.phase == .submitting ? "Sending…" : "Email me a sign-in link") { Task { await model.submit() } }
-                    .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit)
-                    .accessibilityIdentifier("partner-sign-in-submit")
-                if let applyURL {
-                    Link("New partner? Apply on the website", destination: applyURL).accessibilityIdentifier("partner-apply")
+                if applying, let applicationSubmit {
+                    PartnerApplicationForm(model: PartnerApplicationModel(service: applicationSubmit),
+                                           onCancel: { applying = false },
+                                           onSubmitted: { applying = false; statusReload += 1 })
+                } else {
+                    signInFields
                 }
             }
             Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("partner-sign-in-back")
@@ -69,6 +75,34 @@ struct PartnerSignInFlow: View {
         }
     }
 
+    @ViewBuilder private var signInFields: some View {
+        Group {
+            if let applicationStatus {
+                ApplicationStatusCard(model: ApplicationStatusModel(service: applicationStatus), onHolds: { holdsApplication = $0 })
+                    .id(statusReload)
+            }
+            Group {
+                Text("We’ll email you a link to sign in to your organization’s portal.")
+                TextField("Work email", text: $model.email)
+                    .textFieldStyle(.roundedBorder).keyboardType(.emailAddress).textContentType(.emailAddress)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("partner-sign-in-email")
+                if case .failed(let message) = model.phase { failureText(message, id: "partner-sign-in-error") }
+                Button(model.phase == .submitting ? "Sending…" : "Email me a sign-in link") { Task { await model.submit() } }
+                    .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit)
+                    .accessibilityIdentifier("partner-sign-in-submit")
+                if applicationSubmit != nil, !holdsApplication {
+                    Button("New partner? Apply for your organization") { applying = true }
+                        .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("partner-apply-in-app")
+                }
+                if let applyURL {
+                    Link(applicationSubmit == nil ? "New partner? Apply on the website" : "Prefer the website? Apply there",
+                         destination: applyURL).accessibilityIdentifier("partner-apply")
+                }
+            }
+        }
+    }
+
     private func checkEmail(_ email: String, error: String?) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Check your email").font(.title2.bold()).accessibilityAddTraits(.isHeader)
@@ -85,6 +119,82 @@ struct PartnerSignInFlow: View {
                 .accessibilityIdentifier("partner-paste-submit")
             Button("Use a different email") { model.edit() }.buttonStyle(DADButtonStyle(.secondary))
         }
+    }
+}
+
+/// The applicant's status, shown above partner sign-in only when the server recognizes this install's receipt.
+private struct ApplicationStatusCard: View {
+    @State var model: ApplicationStatusModel
+    /// Whether this install holds an application that is still shown, so the sign-in screen can stop offering to apply.
+    var onHolds: (Bool) -> Void = { _ in }
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        // A container, not a bare Group: `.task` on the empty initial state would never run.
+        VStack(alignment: .leading, spacing: 0) {
+            switch model.phase {
+            case .loaded(let info):
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(info.title).font(.headline).accessibilityAddTraits(.isHeader)
+                    Text(info.message).accessibilityIdentifier("partner-application-message")
+                }
+                .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                .background(scheme == .dark ? Color.dad("ink") : Color.dad("line").opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityElement(children: .contain).accessibilityIdentifier("partner-application-status")
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(message).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("partner-application-error")
+                    Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.secondary))
+                }
+            case .loading, .none:
+                EmptyView()
+            }
+        }
+        .task { await model.load() }
+        .onChange(of: model.phase) { _, phase in
+            if case .loaded = phase { onHolds(true) }
+        }
+    }
+}
+
+/// The application form: the website's fields, submitted natively. After an unconfirmed attempt the form locks
+/// and a retry resends exactly what was sent.
+private struct PartnerApplicationForm: View {
+    @State var model: PartnerApplicationModel
+    let onCancel: () -> Void
+    let onSubmitted: () -> Void
+
+    private func field(_ title: String, text: Binding<String>, id: String, content: UITextContentType? = nil,
+                       keyboard: UIKeyboardType = .default, capitalization: TextInputAutocapitalization = .words) -> some View {
+        TextField(title, text: text)
+            .textFieldStyle(.roundedBorder).textContentType(content).keyboardType(keyboard)
+            .textInputAutocapitalization(capitalization).autocorrectionDisabled()
+            .disabled(model.isLocked).accessibilityIdentifier(id)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Apply as a partner").font(.title2.bold()).accessibilityAddTraits(.isHeader)
+            Text("Tell us about your organization. We’ll email you when it’s decided.").foregroundStyle(.secondary)
+            field("Organization", text: $model.organization, id: "partner-app-organization", content: .organizationName)
+            Picker("Organization type", selection: $model.type) {
+                ForEach(PartnerOrganizationType.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .disabled(model.isLocked).accessibilityIdentifier("partner-app-type")
+            field("Website", text: $model.website, id: "partner-app-website", content: .URL, keyboard: .URL, capitalization: .never)
+            field("Approximate workforce size", text: $model.workforce, id: "partner-app-workforce", keyboard: .numberPad, capitalization: .never)
+            field("Your name", text: $model.contactName, id: "partner-app-contact", content: .name)
+            field("Your title", text: $model.title, id: "partner-app-title", content: .jobTitle)
+            field("Work email", text: $model.workEmail, id: "partner-app-email", content: .emailAddress, keyboard: .emailAddress, capitalization: .never)
+            field("Phone", text: $model.phone, id: "partner-app-phone", content: .telephoneNumber, keyboard: .phonePad, capitalization: .never)
+            if case .failed(let message) = model.phase { failureText(message, id: "partner-app-error") }
+            Button(model.phase == .submitting ? "Sending…" : model.isLocked ? "Retry" : "Submit application") { Task { await model.submit() } }
+                .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit).accessibilityIdentifier("partner-app-submit")
+            Button("Cancel", action: onCancel).buttonStyle(DADButtonStyle(.secondary)).disabled(model.phase == .submitting)
+                .accessibilityIdentifier("partner-app-cancel")
+        }
+        .accessibilityElement(children: .contain).accessibilityIdentifier("partner-application-form")
+        .onChange(of: model.phase) { _, phase in if phase == .submitted { onSubmitted() } }
     }
 }
 

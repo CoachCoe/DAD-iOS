@@ -25,17 +25,17 @@ struct EngagementHome: View {
     @State var model: EngagementModel
     /// Adds the referral code to Apple Wallet; nil where Wallet is not wired (previews).
     @State var wallet: WalletPassModel? = nil
-    var onClose: (() -> Void)?
     var onSignedOut: () -> Void = {}
     @State private var showQR = false
     @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
     @State private var copied = false
     @State private var nameDraft = ""
+    /// Phase F: toggled when an invite is shared/copied, driving the success haptic.
+    @State private var inviteShared = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if let onClose { Button("Close", action: onClose).accessibilityIdentifier("engagement-close") }
                 Text("Your impact").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 switch model.phase {
                 case .loading:
@@ -64,6 +64,7 @@ struct EngagementHome: View {
         .modifier(EngagementBackground())
         .task { await model.load() }
         .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
+        .sensoryFeedback(.success, trigger: inviteShared)
         .sheet(isPresented: $showQR) {
             if let url = model.snapshot?.referral?.irlURL() { InviteQRSheet(url: url, onClose: { showQR = false }) }
         }
@@ -105,11 +106,17 @@ struct EngagementHome: View {
                     Text("You have invite-only event access.").font(.footnote).foregroundStyle(.secondary)
                         .accessibilityIdentifier("badge-invite-access")
                 }
-                ForEach(collection.badges) { badge in
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: badge.earned ? "checkmark.seal.fill" : "lock.fill")
-                            .foregroundStyle(badge.earned ? Color.dad("brand-ink") : .secondary)
-                        VStack(alignment: .leading, spacing: 2) {
+                // Phase G: a grid of SF Symbols. Earned/unearned differ by SHAPE + LABEL (not colour
+                // alone): earned shows a filled seal and "Earned"; unearned a lock and "Locked".
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12, alignment: .top)], alignment: .leading, spacing: 12) {
+                    ForEach(collection.badges) { badge in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Image(systemName: badge.earned ? "checkmark.seal.fill" : "lock.fill")
+                                    .foregroundStyle(badge.earned ? Color.dad("brand-ink") : .secondary)
+                                Text(badge.earned ? "Earned" : "Locked").font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
                             Text(badge.shownTitle).fontWeight(badge.earned ? .semibold : .regular)
                             Text(badge.earned ? earnedLine(badge) : badge.rule).font(.caption).foregroundStyle(.secondary)
                             if badge.hasPerk {
@@ -117,10 +124,13 @@ struct EngagementHome: View {
                                     .accessibilityIdentifier("badge-perk-\(badge.code)")
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.dadSpace("3"))
+                        .background(Color.dad("card-quiet"), in: RoundedRectangle(cornerRadius: .dadRadius("field"), style: .continuous))
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(badge.accessibilitySummary)
+                        .accessibilityIdentifier("badge-\(badge.code)")
                     }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(badge.accessibilitySummary)
-                    .accessibilityIdentifier("badge-\(badge.code)")
                 }
             } else {
                 Text("Badges").font(.headline).accessibilityAddTraits(.isHeader)
@@ -196,7 +206,20 @@ struct EngagementHome: View {
 
     // MARK: invite link + IRL code (R-1..R-4)
 
+    /// Phase G: a preview of what someone opening this donor's invite sees — the framing invitees get.
+    @ViewBuilder private func invitePreview() -> some View {
+        DADCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("This is what your invite shows", systemImage: "person.crop.circle.badge.plus")
+                    .font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                Text("You invited them to DAD").font(.headline)
+                DADGiftFraming(monthly: "$30/month", daily: "$1 a day")
+            }
+        }.accessibilityElement(children: .contain).accessibilityIdentifier("invite-preview")
+    }
+
     @ViewBuilder private func invite(_ snapshot: EngagementSnapshot) -> some View {
+        if snapshot.referral != nil { invitePreview() }
         DADCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Invite friends").font(.headline).accessibilityAddTraits(.isHeader)
@@ -213,10 +236,11 @@ struct EngagementHome: View {
                             ShareLink(item: link, message: Text(referral.shareMessage())) {
                                 Label("Share invite", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity)
                             }.buttonStyle(DADButtonStyle(.primary)).accessibilityIdentifier("share-invite")
-                                .simultaneousGesture(TapGesture().onEnded { analytics?.emit(.inviteShared, properties: ["channel": "share_sheet"]) })
+                                .simultaneousGesture(TapGesture().onEnded { inviteShared.toggle(); analytics?.emit(.inviteShared, properties: ["channel": "share_sheet"]) })
                             Button(copied ? "Copied" : "Copy link") {
                                 UIPasteboard.general.string = link.absoluteString
                                 copied = true
+                                inviteShared.toggle()
                                 analytics?.emit(.inviteShared, properties: ["channel": "copy"])
                             }.buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("copy-invite")
                             Button("Show QR") { showQR = true; analytics?.emit(.irlCodeShown) }
@@ -288,7 +312,7 @@ private struct WalletPassButton: View {
                     .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isPreparing).accessibilityIdentifier("wallet-add")
             } else if model.checkFailed {
                 Text("Wallet availability couldn’t be checked. Your on-screen code still works.").font(.footnote).foregroundStyle(.secondary)
-                Button("Check Wallet availability again") { Task { await model.check() } }.accessibilityIdentifier("wallet-recheck")
+                Button("Check Wallet availability again") { Task { await model.check() } }.buttonStyle(DADButtonStyle(.tertiary)).accessibilityIdentifier("wallet-recheck")
             }
             if let error = model.error {
                 Text(error).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("wallet-error")
@@ -321,21 +345,27 @@ private struct InviteQRSheet: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
-            Button("Close", action: onClose).frame(maxWidth: .infinity, alignment: .trailing).accessibilityIdentifier("qr-close")
-            Text("Show this code").font(.title.bold()).accessibilityAddTraits(.isHeader)
-            if let image = Self.qr(url.absoluteString) {
-                Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
-                    .frame(maxWidth: 320).padding(16).background(Color.white, in: RoundedRectangle(cornerRadius: 12))
-                    .accessibilityLabel("QR code for your invite link").accessibilityIdentifier("qr-code")
-            } else {
-                Text("The code couldn’t be drawn. Share your link instead.").accessibilityIdentifier("qr-failed")
+        NavigationStack {
+            VStack(spacing: 20) {
+                Text("Show this code").font(.title.bold()).accessibilityAddTraits(.isHeader)
+                if let image = Self.qr(url.absoluteString) {
+                    Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
+                        .frame(maxWidth: 320).padding(16).background(Color.white, in: RoundedRectangle(cornerRadius: 12))
+                        .accessibilityLabel("QR code for your invite link").accessibilityIdentifier("qr-code")
+                } else {
+                    Text("The code couldn’t be drawn. Share your link instead.").accessibilityIdentifier("qr-failed")
+                }
+                Text("A friend scans it with their phone camera to open your invite.").font(.footnote).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
             }
-            Text("A friend scans it with their phone camera to open your invite.").font(.footnote).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Spacer()
+            .padding(28).modifier(EngagementBackground()).accessibilityElement(children: .contain).accessibilityIdentifier("qr-sheet")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", action: onClose).accessibilityIdentifier("qr-close")
+                }
+            }
         }
-        .padding(28).modifier(EngagementBackground()).accessibilityElement(children: .contain).accessibilityIdentifier("qr-sheet")
     }
 
     private static func qr(_ text: String) -> UIImage? {
@@ -352,13 +382,11 @@ private struct InviteQRSheet: View {
 struct InitiativeSpendScreen: View {
     @State var model: InitiativeSpendModel
     let title: String
-    let onClose: () -> Void
     var onSignedOut: () -> Void = {}
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Button("Close", action: onClose).accessibilityIdentifier("spend-close")
                 Text("Where the money went").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 Text(title).font(.headline)
                 switch model.phase {

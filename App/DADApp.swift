@@ -14,7 +14,7 @@ private func launchFlag(_ name: String) -> Bool {
     #endif
 }
 
-private func tokenColor(_ name: String) -> Color { Color.dad(name) }
+func tokenColor(_ name: String) -> Color { Color.dad(name) }
 
 struct AppBackground: ViewModifier {
     @Environment(\.colorScheme) private var scheme
@@ -50,7 +50,7 @@ private actor PreviewAPI: AccountAPI {
 #endif
 
 @MainActor @Observable
-private final class AccountModel {
+final class AccountModel {
     enum State: Equatable { case loading, ready(AccountProfile), unavailable, signedOut }
     var state = State.loading
     let session: AccountSession?
@@ -75,6 +75,10 @@ private final class AccountModel {
     /// The partner portal under its own 12-hour session; nil when this build cannot reach DAD.
     private(set) var partnerService: (any PartnerService)?
     private(set) var partnerSignIn: (any PartnerSignInService)?
+    /// The partner application's status, read with a stored receipt; nil in previews.
+    private(set) var applicationStatus: (any ApplicationStatusService)?
+    /// Submits a partner application and keeps its receipt; nil in previews, which fall back to the website.
+    private(set) var applicationSubmit: (any PartnerApplicationService)?
     private var partnerSession: PartnerSession?
     /// The public site, for links the app hands out (the partner's company sign-up link).
     private(set) var publicOrigin: URL?
@@ -154,6 +158,12 @@ private final class AccountModel {
                                                     events: eventScenario, engagement: engagementScenario,
                                                     signedIn: launchFlag("--stub-signed-in"),
                                                     partnerSignedIn: launchFlag("--stub-partner-signed-in"),
+                                                    partnerViewer: launchFlag("--stub-partner-viewer"),
+                                                    application: ["pending": "PENDING", "approved": "APPROVED", "rejected": "REJECTED",
+                                                                  "unknown": "UNDER_REVIEW"].first { launchFlag("--stub-application-\($0.key)") }?.value,
+                                                    applicationSubmit: launchFlag("--stub-apply-invalid") ? .invalid
+                                                        : launchFlag("--stub-apply-throttled") ? .throttled
+                                                        : launchFlag("--stub-apply-fails-first") ? .failsFirst : .accepts,
                                                     onLocalWipe: { Self.wipeAttribution(linkTokens: StubBackend.linkTokensKey) })
                 session = services.session
                 kit = SignInKit(phone: services.signIn, signup: services.credentialAuth, link: services.credentialAuth,
@@ -168,6 +178,8 @@ private final class AccountModel {
                 walletService = services.wallet
                 partnerService = services.partner
                 partnerSignIn = services.partnerAuth
+                applicationStatus = services.applicationStatus
+                applicationSubmit = services.applicationSubmit
                 partnerSession = services.partnerSession
                 givingKit = GivingKit(service: services.giving, stubComplete: services.completeHandoff, pollDelay: .milliseconds(200))
                 donorPush = services.push
@@ -234,6 +246,10 @@ private final class AccountModel {
                 walletService = try WireWalletPass(origin: origin, session: built)
                 let partner = try PartnerSession(store: KeychainStore(service: service, account: "partner-session"))
                 partnerSignIn = try WirePartnerAuth(origin: origin, session: partner)
+                // One Keychain item holds the application receipt: the submission writes it, the status read uses it.
+                let receipt = KeychainStore(service: service, account: "partner-application-receipt")
+                applicationStatus = try WireApplicationStatus(origin: origin, receipt: receipt)
+                applicationSubmit = try WirePartnerApplication(origin: origin, receipt: receipt)
                 partnerService = try WirePartner(origin: origin, session: partner)
                 partnerSession = partner
                 donorPush = try WireDonorPush(origin: origin, session: built)
@@ -378,129 +394,12 @@ private struct WebFallback: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 }
 
-/// The signed-in donor landing. Carries the exact copy the app has shown since the
-/// preview shell, so the role-aware root is a structural change, not a visible one.
-private struct DonorLanding: View {
-    let state: AccountModel.State
-    let preview: Bool
-    let onRetry: () -> Void
-    var onSettings: (() -> Void)?
-    /// The real donor-home reads; nil in the synthetic preview, which keeps its placeholder line.
-    var dashboard: (any DashboardService)?
-    var giving: GivingKit?
-    var events: (any EventsService)?
-    var engagement: (any EngagementService)?
-    var wallet: (any WalletPassService)?
-    @Binding var destination: AccountDestination?
-    var onSignedOut: () -> Void = {}
-    var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
-            Group {
-                switch state {
-                case .loading:
-                    ProgressView("Loading your account…")
-                case .ready(let profile):
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Welcome, \(profile.publicName ?? "friend")").font(.title2.bold())
-                        if dashboard == nil { Text("Your account has a home here.") }
-                    }
-                case .unavailable:
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Your account is unavailable right now.").font(.headline)
-                        Text("Please try again in a moment.")
-                        Button("Try again", action: onRetry).buttonStyle(.borderedProminent)
-                    }
-                case .signedOut:
-                    Text("You’re signed out. Use your DAD sign-in link to continue.")
-                }
-            }.accessibilityElement(children: .contain).accessibilityIdentifier("account-state")
-            // Settings hosts sign-out and the store-mandated in-app account deletion, so it is
-            // reachable whenever the donor is signed in, including while the profile read is retrying.
-            if let onSettings {
-                Button("Settings", action: onSettings)
-                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("open-settings")
-            }
-            if case .ready = state, let dashboard { DonorHomeView(service: dashboard, giving: giving, events: events, engagement: engagement, wallet: wallet,
-                                                                           destination: $destination, onSignedOut: onSignedOut) }
-            if preview { Text("Preview · Sample account").font(.footnote).foregroundStyle(.secondary) }
-        }.frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-    }
-}
-
-/// Unauthenticated splash — pick a journey before signing in. The preview store starts
-/// signed-in, so this path is exercised only when there is no session.
-private struct RoleSelect: View {
-    let notice: String?
-    var invitation: String?
-    let onSelect: (AppRole) -> Void
-    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
-    var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("DAD").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            Text("Good things start together.").font(.title).accessibilityAddTraits(.isHeader)
-            if let notice {
-                Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("auth-notice")
-            }
-            if let invitation { Text(invitation).font(.body).accessibilityIdentifier("auth-invitation") }
-            VStack(spacing: 12) {
-                Button("I’m a donor") { analytics?.emit(.roleSelected); onSelect(.donor) }.buttonStyle(DADButtonStyle(.primary))
-                Button("I’m a partner") { analytics?.emit(.roleSelected); onSelect(.partner) }.buttonStyle(DADButtonStyle(.secondary))
-            }
-            if let analytics, analytics.choice == nil { AnalyticsChoice(analytics: analytics) }
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("role-select")
-    }
-}
-
-/// Asks iOS for notification permission only when the donor chooses to, never at launch; once allowed the app
-/// registers for a device token (see `PushAppDelegate`).
-private struct NotificationPermissionRow: View {
-    @State private var status: UNAuthorizationStatus?
-    var body: some View {
-        Group {
-            switch status {
-            case .notDetermined:
-                Button("Turn on notifications") {
-                    Task {
-                        let granted = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
-                        if granted { UIApplication.shared.registerForRemoteNotifications() }
-                        status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
-                    }
-                }.buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("notifications-allow")
-            case .denied:
-                Text("Notifications are off for DAD in iOS Settings.").font(.footnote).accessibilityIdentifier("notifications-denied")
-            default:
-                EmptyView()
-            }
-        }
-        .task { status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus }
-    }
-}
-
-/// The first-launch analytics question, worded as on the website; the answer can be changed in Settings.
-private struct AnalyticsChoice: View {
-    let analytics: AnalyticsController
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Allow first-party usage analytics? DAD uses a temporary journey ID to measure signup, sharing and giving. "
-                 + "No names, email addresses or payment details are sent. Observations are kept for 13 months. "
-                 + "You can change this choice in Settings.").font(.footnote)
-            Button("Allow usage analytics") { analytics.choose(true) }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("analytics-allow")
-            Button("Decline usage analytics") { analytics.choose(false) }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("analytics-decline")
-        }.accessibilityElement(children: .contain).accessibilityIdentifier("analytics-choice")
-    }
-}
-
 #if DEBUG
 /// Preview sign-in transport — returns a handle and preview credentials so the auth journey
 /// runs in the simulator with no backend. The wire implementation replaces this once the
 /// phone/OIDC endpoints are consumed; the screens bind to the protocol, not this type.
-private actor PreviewSignIn: SignInService, SignupService, SignInLinkService, PasswordSignInService {
+// Internal (not file-private) so SignInKit.preview in the extracted App/Welcome.swift can see it.
+actor PreviewSignIn: SignInService, SignupService, SignInLinkService, PasswordSignInService {
     func requestSignup(_ form: SignupForm) async throws { try await Task.sleep(for: .milliseconds(150)) }
     func requestSignInLink(email: String) async throws { try await Task.sleep(for: .milliseconds(150)) }
     func signIn(email: String, password: String) async throws -> Credentials {
@@ -773,557 +672,6 @@ private struct PreviewSessionSettings: AccountSettingsService {
 }
 #endif
 
-/// Account & settings (PRD §6.11/§6.12): profile header, notification + privacy toggles, sign
-/// out, and the store-mandated delete-account flow with a typed-word confirm gate — all inline.
-/// Bound to `AccountSettingsModel`.
-private struct AccountSettingsScreen: View {
-    @State var model: AccountSettingsModel
-    /// Set/change password; nil where there is no real account to change (previews).
-    var passwords: (any PasswordSettingsService)?
-    var management: (any AccountManagementService)?
-    /// The real cancel-gift flow, offered when the server refuses deletion because a gift is still renewing.
-    var giving: GivingKit?
-    var onSignedOut: (() -> Void)?
-    @State private var giftModel: GivingModel?
-    @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
-    @State private var confirmingDelete = false
-    @State private var deleteTyped = ""
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Settings").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            if model.signedOut {
-                Text("You're signed out.").accessibilityIdentifier("settings-signed-out")
-            } else {
-                switch model.phase {
-                case .loading:
-                    ProgressView().accessibilityIdentifier("settings-loading")
-                case .failed(let message):
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(message).accessibilityIdentifier("settings-error")
-                        Button("Try again") { Task { await model.load() } }.buttonStyle(DADButtonStyle(.primary))
-                    }
-                case .ready:
-                    if let snapshot = model.snapshot {
-                        settingsBody(snapshot)
-                    }
-                }
-            }
-            if let error = model.actionError {
-                Text(error).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("settings-action-error")
-            }
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("settings-screen")
-        .task { await model.load() }
-        .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut?() } }
-        .sheet(isPresented: Binding(get: { giftModel != nil }, set: { if !$0 { giftModel = nil } })) {
-            if let giftModel, let giving {
-                GiftSheet(model: giftModel, stubComplete: giving.stubComplete, onClose: { self.giftModel = nil },
-                          onSignedOut: { self.giftModel = nil; onSignedOut?() })
-            }
-        }
-    }
-
-    @ViewBuilder private func settingsBody(_ snapshot: AccountSettingsSnapshot) -> some View {
-        Text(snapshot.profile.email).font(.headline).accessibilityIdentifier("settings-email")
-        if let management {
-            EmailChangeSection(current: snapshot.profile.email, service: management)
-            ProfileDetailsSection(profile: snapshot.profile, service: management)
-        } else {
-            Text("ZIP: \(snapshot.profile.zipLabel)").font(.footnote)
-        }
-
-        // Notification toggles (§6.11) — payment-failure email is absent by design.
-        NotificationPermissionRow()
-        ForEach(snapshot.preferences.pushToggles, id: \.key) { toggle in
-            Toggle(toggle.label, isOn: Binding(
-                get: { toggle.value },
-                set: { newValue in Task { await model.toggle(toggle.key, newValue) } }
-            )).disabled(model.isBusy).accessibilityIdentifier("pref-\(toggle.key)")
-        }
-        // Privacy: "Show my ranking" inverts rankings_opted_out.
-        Toggle("Show my ranking", isOn: Binding(
-            get: { snapshot.preferences.showRanking },
-            set: { newValue in Task { await model.toggle("rankings_opted_out", !newValue) } }
-        )).disabled(model.isBusy).accessibilityIdentifier("ranking-toggle")
-        Toggle("Show me in my network", isOn: Binding(
-            get: { snapshot.preferences.networkVisible },
-            set: { newValue in Task { await model.toggle("network_visible", newValue) } }
-        )).disabled(model.isBusy).accessibilityIdentifier("pref-network_visible")
-        Toggle("I’d like to volunteer", isOn: Binding(
-            get: { snapshot.preferences.volunteer },
-            set: { newValue in Task { await model.toggle("volunteer", newValue) } }
-        )).disabled(model.isBusy).accessibilityIdentifier("pref-volunteer")
-        if let analytics {
-            Toggle("Usage analytics", isOn: Binding(get: { analytics.choice == true }, set: { analytics.choose($0) }))
-                .accessibilityIdentifier("analytics-toggle")
-            Text("First-party only: a temporary journey ID measures signup, sharing and giving. No names, email addresses "
-                 + "or payment details are sent.").font(.footnote).foregroundStyle(.secondary)
-        }
-        ForEach(snapshot.preferences.emailToggles, id: \.key) { toggle in
-            Toggle(toggle.label, isOn: Binding(
-                get: { toggle.value },
-                set: { newValue in Task { await model.toggle(toggle.key, newValue) } }
-            )).disabled(model.isBusy).accessibilityIdentifier("pref-\(toggle.key)")
-        }
-
-        if let passwords {
-            PasswordSection(service: passwords, onSignedOut: { onSignedOut?() })
-        }
-        if let management {
-            EmployerSection(service: management)
-            SessionsSection(service: management, onSignedOut: { onSignedOut?() })
-        }
-
-        Button("Sign out") { Task { await model.signOut() } }
-            .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isBusy).accessibilityIdentifier("settings-signout")
-
-        // Delete account (store-mandated, §6.12): typed-word confirm gate, inline.
-        if !confirmingDelete {
-            Button("Delete my account") { confirmingDelete = true }
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("delete-start")
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(DeleteAccountGate(typed: deleteTyped).helpText).font(.footnote)
-                TextField("Type \(DeleteAccountGate.confirmWord)", text: $deleteTyped)
-                    .textFieldStyle(.roundedBorder).textInputAutocapitalization(.characters).autocorrectionDisabled()
-                    .accessibilityIdentifier("delete-input")
-                Button("Permanently delete") { Task { await model.deleteAccount(DeleteAccountGate(typed: deleteTyped)) } }
-                    .buttonStyle(DADButtonStyle(.primary))
-                    .disabled(!DeleteAccountGate(typed: deleteTyped).isConfirmed || model.isBusy)
-                    .accessibilityIdentifier("delete-confirm")
-                Button("Keep my account") { confirmingDelete = false; deleteTyped = "" }
-                    .buttonStyle(DADButtonStyle(.secondary))
-                if model.deletionBlocked, let giving {
-                    // The server refused because a monthly gift is still set to renew (or a checkout is open):
-                    // offer the real cancel flow rather than a dead end, then the donor tries deleting again.
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Cancel your monthly gift, then delete your account again.").font(.footnote)
-                        Button("Cancel my monthly gift") { giftModel = giving.makeModel() }
-                            .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("delete-cancel-gift")
-                    }.accessibilityElement(children: .contain).accessibilityIdentifier("delete-blocked-block")
-                }
-            }.accessibilityElement(children: .contain).accessibilityIdentifier("delete-confirm-block")
-        }
-    }
-}
-/// Set or change the sign-in password, inline in Settings. Collapsed until asked for. The current
-/// password is optional: right after a fresh sign-in the server accepts the recent authentication.
-private struct PasswordSection: View {
-    @State private var model: PasswordChangeModel
-    @State private var expanded = false
-    let onSignedOut: () -> Void
-
-    init(service: any PasswordSettingsService, onSignedOut: @escaping () -> Void) {
-        _model = State(initialValue: PasswordChangeModel(service: service))
-        self.onSignedOut = onSignedOut
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !expanded {
-                Button("Set or change password") { expanded = true }
-                    .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("password-start")
-            } else {
-                Text("Password").font(.headline)
-                SecureField("Current password (if you have one)", text: $model.currentPassword)
-                    .textFieldStyle(.roundedBorder).textContentType(.password).accessibilityIdentifier("password-current")
-                SecureField("New password", text: $model.newPassword)
-                    .textFieldStyle(.roundedBorder).textContentType(.newPassword).accessibilityIdentifier("password-new")
-                SecureField("Confirm new password", text: $model.confirmPassword)
-                    .textFieldStyle(.roundedBorder).textContentType(.newPassword).accessibilityIdentifier("password-confirm")
-                Text(model.newPasswordHint ?? "Use 12 to 72 characters.").font(.footnote).foregroundStyle(.secondary)
-                if model.confirmMismatch {
-                    Text("The two passwords don’t match.").font(.footnote).foregroundStyle(Color.dad("fail"))
-                }
-                switch model.phase {
-                case .failed(let message):
-                    Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("password-error")
-                case .saved:
-                    Text("Password saved.").font(.footnote).accessibilityIdentifier("password-saved")
-                default: EmptyView()
-                }
-                Button("Save password") { Task { await model.save() } }
-                    .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSave).accessibilityIdentifier("password-save")
-                Button("Cancel") { model.edit(); expanded = false }.buttonStyle(DADButtonStyle(.secondary))
-            }
-        }
-        .accessibilityElement(children: .contain).accessibilityIdentifier("password-section")
-        .onChange(of: model.signedOut) { _, signedOut in if signedOut { onSignedOut() } }
-    }
-}
-
-/// Sign-in method picker (PRD §5.1). Phone and email + password are always wired; Apple, Google and
-/// passkeys light up only when their build configuration is present (`SignInCapabilities`) and are
-/// otherwise visibly disabled with a plain-text reason. "Create an account" starts email signup (D-2).
-private struct SignInMethods: View {
-    let capabilities: SignInCapabilities
-    let onSelect: (SignInMethod) -> Void
-    let onCreateAccount: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Sign in").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-            VStack(spacing: 12) {
-                ForEach(SignInMethod.allCases) { method in
-                    let available = capabilities.isAvailable(method)
-                    Button(method.title) { onSelect(method) }
-                        .buttonStyle(DADButtonStyle(method == .phone ? .primary : .secondary))
-                        .disabled(!available)
-                        .accessibilityHint(available ? "" : "Not available yet")
-                }
-            }
-            if capabilities.hasUnavailableMethod {
-                Text("Apple, Google and passkey sign-in aren’t available in this build yet.")
-                    .font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("methods-unavailable-note")
-            }
-            Divider()
-            Text("New to DAD?").font(.headline)
-            Button("Create an account", action: onCreateAccount)
-                .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("create-account")
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("sign-in-methods")
-    }
-}
-
-/// Phone + SMS one-time-code journey, bound to `PhoneSignInModel`.
-private struct PhoneSignIn: View {
-    @State var model: PhoneSignInModel
-    let onSignedIn: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Sign in with your phone").font(.title.bold()).accessibilityAddTraits(.isHeader)
-            if model.isAwaitingCode {
-                TextField("Verification code", text: $model.code)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.oneTimeCode)
-                    .keyboardType(.numberPad)
-                    .accessibilityLabel("Verification code")
-                failure
-                Button("Verify") { Task { await model.verify() } }
-                    .buttonStyle(DADButtonStyle(.primary))
-                    .disabled(!model.canVerify)
-            } else if case .signedIn = model.phase {
-                Text("You’re signed in.").font(.headline)
-            } else {
-                TextField("Phone number", text: $model.phone)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.telephoneNumber)
-                    .keyboardType(.phonePad)
-                    .accessibilityLabel("Phone number")
-                failure
-                Button("Send code") { Task { await model.requestCode() } }
-                    .buttonStyle(DADButtonStyle(.primary))
-                    .disabled(!model.canRequestCode)
-            }
-            if model.phase == .requestingCode || isVerifying { ProgressView() }
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityIdentifier("phone-sign-in")
-        .onChange(of: model.phase) { _, phase in if case .signedIn = phase { onSignedIn() } }
-    }
-
-    private var isVerifying: Bool {
-        if case .verifying = model.phase { true } else { false }
-    }
-
-    @ViewBuilder private var failure: some View {
-        if case .failed(let message) = model.phase {
-            Text(message).font(.footnote).foregroundStyle(Color.dad("fail"))
-        }
-    }
-}
-
-/// New-donor signup (D-2): name, email, ZIP, city. The server emails a single-use sign-in link
-/// (it never reveals whether the address exists); the link signs the donor in and lands in the donor
-/// shell. A pasted link works when the email was opened on another device.
-private struct SignupView: View {
-    @State var model: SignupModel
-    let notice: String?
-    let onBack: () -> Void
-    let onPasteLink: (String) -> Bool
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Create your account").font(.title.bold()).accessibilityAddTraits(.isHeader)
-            if case .sent(let email) = model.phase {
-                CheckEmailView(
-                    message: "We sent a sign-in link to \(email). Open it on this device to finish creating your account. The link works once and expires in 15 minutes.",
-                    notice: notice, onPasteLink: onPasteLink, onEdit: { model.edit() })
-            } else {
-                formBody
-            }
-            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("signup-back")
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("signup")
-    }
-
-    @ViewBuilder private var formBody: some View {
-        TextField("Full name", text: $model.name)
-            .textFieldStyle(.roundedBorder).textContentType(.name).textInputAutocapitalization(.words)
-            .accessibilityLabel("Full name")
-        TextField("Email", text: $model.email)
-            .textFieldStyle(.roundedBorder).textContentType(.emailAddress).keyboardType(.emailAddress)
-            .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
-        TextField("ZIP code", text: $model.zip)
-            .textFieldStyle(.roundedBorder).textContentType(.postalCode).keyboardType(.numberPad)
-            .accessibilityLabel("ZIP code")
-        TextField("City", text: $model.city)
-            .textFieldStyle(.roundedBorder).textContentType(.addressCity).textInputAutocapitalization(.words)
-            .accessibilityLabel("City")
-        if case .failed(let message) = model.phase {
-            Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("signup-error")
-        }
-        Button("Create account") { Task { await model.submit() } }
-            .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit)
-        if model.phase == .submitting { ProgressView() }
-    }
-}
-
-/// "Check your email" after a link was requested (signup or sign-in): the emailed link opens the app,
-/// and a link opened on another device can be pasted here instead.
-private struct CheckEmailView: View {
-    let message: String
-    let notice: String?
-    let onPasteLink: (String) -> Bool
-    let onEdit: () -> Void
-    @State private var pasted = ""
-    @State private var pasteFailed = false
-    var body: some View {
-        Text("Check your email").font(.headline).accessibilityIdentifier("signup-sent")
-        Text(message)
-        if let notice {
-            Text(notice).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("signup-link-error")
-        }
-        Text("Opened the email somewhere else? Paste the link here.").font(.footnote)
-        TextField("Paste your sign-in link", text: $pasted)
-            .textFieldStyle(.roundedBorder).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-            .accessibilityLabel("Paste your sign-in link")
-        if pasteFailed {
-            Text("That doesn’t look like a DAD sign-in link.").font(.footnote).foregroundStyle(Color.dad("fail"))
-                .accessibilityIdentifier("signup-paste-error")
-        }
-        Button("Continue") { pasteFailed = !onPasteLink(pasted) }
-            .buttonStyle(DADButtonStyle(.primary)).disabled(pasted.isEmpty).accessibilityIdentifier("signup-continue")
-        Button("Use a different email", action: onEdit).buttonStyle(DADButtonStyle(.secondary))
-    }
-}
-
-/// An existing donor asks for a single-use sign-in link by email (`login`). The server never says
-/// whether the address has an account, so the same "check your email" step follows either way.
-private struct EmailLinkSignIn: View {
-    @State var model: SignInLinkModel
-    let notice: String?
-    let onBack: () -> Void
-    let onPasteLink: (String) -> Bool
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Sign in with an email link").font(.title.bold()).accessibilityAddTraits(.isHeader)
-            if case .sent(let email) = model.phase {
-                CheckEmailView(
-                    message: "If \(email) belongs to a DAD account, we sent it a sign-in link. Open it on this device to sign in. The link works once and expires in 15 minutes.",
-                    notice: notice, onPasteLink: onPasteLink, onEdit: { model.edit() })
-            } else {
-                TextField("Email", text: $model.email)
-                    .textFieldStyle(.roundedBorder).textContentType(.emailAddress).keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
-                if case .failed(let message) = model.phase {
-                    Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("email-link-error")
-                }
-                Button("Email me a link") { Task { await model.submit() } }
-                    .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit).accessibilityIdentifier("email-link-submit")
-                if model.phase == .submitting { ProgressView() }
-            }
-            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("email-link-sign-in")
-    }
-}
-
-/// Email + password sign-in, bound to `PasswordSignInModel`. The password field is a secure entry
-/// field that offers saved credentials; the model clears the secret as soon as it is sent.
-private struct PasswordSignIn: View {
-    @State var model: PasswordSignInModel
-    let onBack: () -> Void
-    let onSignedIn: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Sign in with email & password").font(.title.bold()).accessibilityAddTraits(.isHeader)
-            TextField("Email", text: $model.email)
-                .textFieldStyle(.roundedBorder).textContentType(.username).keyboardType(.emailAddress)
-                .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityLabel("Email")
-            SecureField("Password", text: $model.password)
-                .textFieldStyle(.roundedBorder).textContentType(.password).accessibilityLabel("Password")
-            if case .failed(let message) = model.phase {
-                Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("password-sign-in-error")
-            }
-            Button("Sign in") { Task { await model.submit() } }
-                .buttonStyle(DADButtonStyle(.primary)).disabled(!model.canSubmit).accessibilityIdentifier("password-sign-in-submit")
-            if model.phase == .submitting { ProgressView() }
-            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("password-sign-in")
-        .onChange(of: model.phase) { _, phase in if case .signedIn = phase { onSignedIn() } }
-    }
-}
-
-/// One in-flight Apple / Google / passkey attempt: the platform sheet runs on appear.
-@MainActor private struct ExternalRun {
-    let title: String
-    let phase: () -> ExternalSignInPhase
-    let start: () async -> Void
-}
-
-private struct ExternalSignInView: View {
-    let run: ExternalRun
-    let onBack: () -> Void
-    let onSignedIn: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(run.title).font(.title.bold()).accessibilityAddTraits(.isHeader)
-            switch run.phase() {
-            case .working: ProgressView()
-            case .failed(let message):
-                Text(message).font(.footnote).foregroundStyle(Color.dad("fail")).accessibilityIdentifier("external-sign-in-error")
-                Button("Try again") { Task { await run.start() } }.buttonStyle(DADButtonStyle(.primary))
-            case .idle:
-                Button("Try again") { Task { await run.start() } }.buttonStyle(DADButtonStyle(.primary))
-            case .signedIn:
-                Text("You’re signed in.").font(.headline)
-            }
-            Button("Back", action: onBack).buttonStyle(DADButtonStyle(.secondary))
-        }
-        .frame(maxWidth: 520, alignment: .leading).padding(28).frame(maxWidth: .infinity)
-        .accessibilityElement(children: .contain).accessibilityIdentifier("external-sign-in")
-        .task { await run.start() }
-        .onChange(of: run.phase()) { _, phase in if case .signedIn = phase { onSignedIn() } }
-    }
-}
-
-/// Used when no API origin is configured (Release): sign-in fails clearly instead of inheriting a preview double.
-private struct UnconfiguredSignIn: SignInService, SignupService, SignInLinkService, PasswordSignInService {
-    func requestPhoneCode(phone: String) async throws -> String { throw AccountError.invalidConfiguration }
-    func verifyPhone(handle: String, code: String) async throws -> Credentials { throw AccountError.invalidConfiguration }
-    func requestSignup(_ form: SignupForm) async throws { throw AccountError.invalidConfiguration }
-    func requestSignInLink(email: String) async throws { throw AccountError.invalidConfiguration }
-    func signIn(email: String, password: String) async throws -> Credentials { throw AccountError.invalidConfiguration }
-}
-
-/// Every sign-in transport the unauthenticated stack can use, plus which optional methods are on.
-private struct SignInKit {
-    let phone: any SignInService
-    let signup: any SignupService
-    let link: any SignInLinkService
-    let password: any PasswordSignInService
-    let oidc: (any OIDCSignInService)?
-    let passkey: (any PasskeySignInService)?
-    let capabilities: SignInCapabilities
-    var passkeyRelyingParty = ""
-
-    static let unconfigured = SignInKit(phone: UnconfiguredSignIn(), signup: UnconfiguredSignIn(), link: UnconfiguredSignIn(),
-                                        password: UnconfiguredSignIn(),
-                                        oidc: nil, passkey: nil, capabilities: .none)
-    #if DEBUG
-    static let preview = SignInKit(phone: PreviewSignIn(), signup: PreviewSignIn(), link: PreviewSignIn(), password: PreviewSignIn(),
-                                   oidc: nil, passkey: nil, capabilities: .none)
-    #endif
-}
-
-/// The unauthenticated stack: role select → sign-in methods → the chosen method's flow. Verification
-/// runs through `establish` so the session (not this view) owns the network await and its epoch guard.
-private struct UnauthenticatedStack: View {
-    let kit: SignInKit
-    let establish: PhoneSignInModel.Establish
-    let notice: String?
-    var invitation: String?
-    let onPasteLink: (String) -> Bool
-    var partnerSignIn: (any PartnerSignInService)?
-    var partnerToken: String?
-    var onPartnerTokenConsumed: () -> Void = {}
-    var onPartnerSignedIn: () -> Void = {}
-    var publicOrigin: URL?
-    let onSignedIn: () -> Void
-    @State private var step: Step = .roleSelect
-    @State private var external: ExternalRun?
-    private enum Step: Equatable { case roleSelect, methods, phone, emailLink, password, signup, external, partner }
-
-    var body: some View {
-        content.onChange(of: partnerToken, initial: true) { _, token in if token != nil { step = .partner } }
-    }
-
-    @ViewBuilder private var content: some View {
-        switch step {
-        case .roleSelect:
-            RoleSelect(notice: notice, invitation: invitation) { role in step = role == .donor ? .methods : .partner }
-        case .methods:
-            SignInMethods(capabilities: kit.capabilities, onSelect: select, onCreateAccount: { step = .signup })
-        case .phone:
-            PhoneSignIn(model: PhoneSignInModel(service: kit.phone, establish: establish), onSignedIn: onSignedIn)
-        case .password:
-            PasswordSignIn(model: PasswordSignInModel(service: kit.password, establish: establish),
-                           onBack: { step = .methods }, onSignedIn: onSignedIn)
-        case .emailLink:
-            EmailLinkSignIn(model: SignInLinkModel(service: kit.link), notice: notice, onBack: { step = .methods }, onPasteLink: onPasteLink)
-        case .signup:
-            SignupView(model: SignupModel(service: kit.signup), notice: notice, onBack: { step = .methods }, onPasteLink: onPasteLink)
-        case .external:
-            if let external {
-                ExternalSignInView(run: external, onBack: { step = .methods; self.external = nil }, onSignedIn: onSignedIn)
-            }
-        case .partner:
-            if let partnerSignIn {
-                PartnerSignInFlow(model: PartnerSignInModel(service: partnerSignIn), incomingToken: partnerToken,
-                                  onTokenConsumed: onPartnerTokenConsumed, onBack: { step = .roleSelect }, onSignedIn: onPartnerSignedIn,
-                                  applyURL: publicOrigin?.appending(path: "apply"))
-            }
-        }
-    }
-
-    private func select(_ method: SignInMethod) {
-        switch method {
-        case .phone: step = .phone
-        case .emailLink: step = .emailLink
-        case .password: step = .password
-        case .apple, .google:
-            guard let oidc = kit.oidc else { return }
-            let provider: OIDCProvider = method == .apple ? .apple : .google
-            let tokens: any IDTokenProvider = method == .apple ? AppleIDTokenProvider() : UnavailableIDTokenProvider()
-            let model = OIDCSignInModel(provider: provider, tokens: tokens, service: oidc, establish: establish)
-            external = ExternalRun(title: method.title, phase: { model.phase }, start: { await model.start() })
-            step = .external
-        case .passkey:
-            guard let passkey = kit.passkey else { return }
-            let model = PasskeySignInModel(authenticator: PlatformPasskeyAuthenticator(fallbackRelyingParty: kit.passkeyRelyingParty),
-                                           service: passkey, establish: establish)
-            external = ExternalRun(title: method.title, phase: { model.phase }, start: { await model.start() })
-            step = .external
-        }
-    }
-}
-
-/// Settings presented from the donor shell: sign-out and deletion run against the real session, and
-/// leaving the signed-in state dismisses the sheet so the root can route to sign-in.
-private struct SettingsSheet: View {
-    let service: any AccountSettingsService
-    let passwords: (any PasswordSettingsService)?
-    var management: (any AccountManagementService)?
-    var giving: GivingKit?
-    let onClose: () -> Void
-    let onSignedOut: () -> Void
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                Button("Close", action: onClose).padding(.horizontal, 28).padding(.top, 20)
-                    .accessibilityIdentifier("settings-close")
-                AccountSettingsScreen(model: AccountSettingsModel(service: service), passwords: passwords, management: management,
-                                      giving: giving, onSignedOut: onSignedOut)
-            }
-        }.modifier(AppBackground()).tint(tokenColor("brand-ink"))
-    }
-}
-
 /// UIKit's push callbacks, surfaced to SwiftUI: the device token once APNs issues one, and the latest tapped
 /// notification. Without the Push Notifications entitlement (it needs the signing team) APNs issues no token.
 @MainActor @Observable
@@ -1377,7 +725,6 @@ struct DADApp: App {
     @State private var model = AccountModel()
     @State private var router = RoleRouter()
     @State private var web: WebDestination?
-    @State private var showSettings = false
 
     @ViewBuilder private var donorRoot: some View {
         #if DEBUG
@@ -1399,12 +746,7 @@ struct DADApp: App {
     }
 
     private var donorLanding: some View {
-        DonorLanding(state: model.state, preview: model.preview, onRetry: { Task { await model.load() } },
-                     onSettings: model.makeSettings() == nil ? nil : { showSettings = true },
-                     dashboard: model.dashboardService, giving: model.givingKit, events: model.eventsService,
-                     engagement: model.engagementService, wallet: model.walletService,
-                     destination: Binding(get: { model.destination }, set: { model.destination = $0 }),
-                     onSignedOut: { Task { await model.load() } })
+        DonorShell(model: model, destination: Binding(get: { model.destination }, set: { model.destination = $0 }))
     }
 
     @ViewBuilder private var partnerRoot: some View {
@@ -1423,45 +765,64 @@ struct DADApp: App {
         }
     }
 
+    /// Whether the signed-in donor shows the full-window `TabView` shell (not a DEBUG single-screen
+    /// preview, which keeps the scrolling root the standalone screens expect).
+    private var showsDonorTabs: Bool {
+        guard showsDonorShell else { return false }
+        #if DEBUG
+        return !["--preview-giving", "--preview-engagement", "--preview-events", "--preview-settings"].contains(where: launchFlag)
+        #else
+        return true
+        #endif
+    }
+
+    @ViewBuilder private var rootContent: some View {
+        if showsDonorShell {
+            // ONE branch for both "restoring with a stored session" and "signed in as donor":
+            // the restore -> signed-in transition must not change view identity, or the donor
+            // home is rebuilt a frame after it mounted, cancelling its in-flight dashboard
+            // read (result discarded) and starting a second one.
+            donorRoot
+        } else {
+            switch router.root {
+            case .authenticated(.donor):
+                donorRoot   // unreachable: handled by `showsDonorShell`
+            case .restoring:
+                // A session-less launch waits on a neutral progress view so it never flashes
+                // the signed-in screen (a restorable session is the donor shell above).
+                ProgressView().accessibilityIdentifier("restoring")
+            case .authenticated(.partner):
+                partnerRoot
+            case .unauthenticated:
+                UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
+                                     invitation: model.invitation,
+                                     onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
+                                     applicationStatus: model.applicationStatus, applicationSubmit: model.applicationSubmit,
+                                     partnerToken: model.pendingPartnerToken,
+                                     onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
+                                     onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) },
+                                     publicOrigin: model.publicOrigin) {
+                    // The session already holds the established credentials; read the profile
+                    // through it, then enter the donor shell (which owns load/recovery states).
+                    Task {
+                        await model.load()
+                        router.selectRole(.donor)
+                        router.signedIn(as: .donor)
+                        _ = router.flushPendingDestination()
+                    }
+                }
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
-            ScrollView {
-                Group {
-                    if showsDonorShell {
-                        // ONE branch for both "restoring with a stored session" and "signed in as donor":
-                        // the restore -> signed-in transition must not change view identity, or the donor
-                        // home is rebuilt a frame after it mounted, cancelling its in-flight dashboard
-                        // read (result discarded) and starting a second one.
-                        donorRoot
-                    } else {
-                    switch router.root {
-                    case .authenticated(.donor):
-                        donorRoot   // unreachable: handled by `showsDonorShell`
-                    case .restoring:
-                        // A session-less launch waits on a neutral progress view so it never flashes
-                        // the signed-in screen (a restorable session is the donor shell above).
-                        ProgressView().accessibilityIdentifier("restoring")
-                    case .authenticated(.partner):
-                        partnerRoot
-                    case .unauthenticated:
-                        UnauthenticatedStack(kit: model.kit, establish: model.establish(), notice: model.notice,
-                                             invitation: model.invitation,
-                                             onPasteLink: { model.openPastedLink($0) }, partnerSignIn: model.partnerSignIn,
-                                             partnerToken: model.pendingPartnerToken,
-                                             onPartnerTokenConsumed: { model.pendingPartnerToken = nil },
-                                             onPartnerSignedIn: { router.selectRole(.partner); router.signedIn(as: .partner) },
-                                             publicOrigin: model.publicOrigin) {
-                            // The session already holds the established credentials; read the profile
-                            // through it, then enter the donor shell (which owns load/recovery states).
-                            Task {
-                                await model.load()
-                                router.selectRole(.donor)
-                                router.signedIn(as: .donor)
-                                _ = router.flushPendingDestination()
-                            }
-                        }
-                    }
-                    }
+            Group {
+                if showsDonorTabs {
+                    // The TabView owns the full window; it must not sit inside a ScrollView.
+                    rootContent
+                } else {
+                    ScrollView { rootContent }
                 }
             }
             .modifier(AppBackground())
@@ -1503,25 +864,13 @@ struct DADApp: App {
                 model.openNotification(tap)
             }
             .task(id: PushRegistrationKey(token: push.token, ready: model.isReady)) { await model.registerPush(push.token) }
-            .onChange(of: model.destination) { _, destination in
-                if destination == .profile, model.makeSettings() != nil { model.destination = nil; showSettings = true }
-                if destination == .dashboard { model.destination = nil }
-            }
             .onChange(of: model.state) { _, state in
                 switch state {
                 case .ready where router.currentRole == nil:
                     router.signedIn(as: .donor)   // a claim link signed the person in from the sign-in screen
                 case .signedOut where router.currentRole == .donor:
                     router.signedOut()            // sign-out, deletion, or a revoked session
-                    showSettings = false
                 default: break
-                }
-            }
-            .sheet(isPresented: $showSettings) {
-                if let service = model.makeSettings() {
-                    SettingsSheet(service: service, passwords: model.passwordSettings, management: model.management, giving: model.givingKit, onClose: { showSettings = false },
-                                  onSignedOut: { showSettings = false; Task { await model.load() } })
-                    .environment(model.analytics)
                 }
             }
             .onOpenURL { if let url = model.receive($0, role: router.currentRole) { web = WebDestination(url: url) } }
