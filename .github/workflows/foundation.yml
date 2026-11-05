@@ -53,7 +53,7 @@ jobs:
           tar -xzf "$tarball" gitleaks
           ./gitleaks version
       - name: Scan full git history for secrets
-        run: ./gitleaks detect --source . --redact --no-banner
+        run: ./gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
   ios:
     runs-on: [self-hosted, dad, macos]
     timeout-minutes: 25
