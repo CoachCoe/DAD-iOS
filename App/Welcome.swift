@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 import DADFoundation
 
 // Welcome + sign-in (unauthenticated stack), extracted from DADApp.swift (Phase D) so the
