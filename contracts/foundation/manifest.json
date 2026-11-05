@@ -1,6 +1,6 @@
 {
   "version": "2.11.0",
-  "source_repository": "CoachCoe/DAD-Main",
+  "source_repository": "pre-dad/DAD-Main",
   "source_revision": "2047d6a4f2d3cc8297e6c102fc8f7a30e45143ee",
   "files": {
     "openapi.json": "6b86038010f539e2c53ecacb4799bee6974a37ad6caf53f2e85bb60d27266006",

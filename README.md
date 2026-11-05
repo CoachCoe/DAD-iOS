@@ -119,7 +119,7 @@ compatibility tests when adding operations. Go continues to compute account figu
 
 ## Contract updates
 
-Download an explicit `mobile-foundation-vX.Y.Z` release from `CoachCoe/DAD-Main`, review
+Download an explicit `mobile-foundation-vX.Y.Z` release from `pre-dad/DAD-Main`, review
 its source and changes, then replace the vendored snapshot and lock together. Never
 fetch a moving branch during builds. `node scripts/check-foundation.mjs` verifies every
 file hash, source revision, and version; its tests demonstrate tamper detection.

@@ -9,7 +9,7 @@ const files = ["DADNullValue.swift", "DADTokens.kt", "DADTokens.swift", "links.j
 export async function verifyFoundation(root) {
   const lock = JSON.parse(await readFile(resolve(root, "foundation.lock.json"), "utf8"));
   if (!/^\d+\.\d+\.\d+$/.test(lock.version) || lock.release_tag !== `mobile-foundation-v${lock.version}` ||
-      lock.source_repository !== "CoachCoe/DAD-Main" || !/^[a-f0-9]{40}$/.test(lock.source_revision)) throw new Error("Invalid foundation lock");
+      lock.source_repository !== "pre-dad/DAD-Main" || !/^[a-f0-9]{40}$/.test(lock.source_revision)) throw new Error("Invalid foundation lock");
   const directory = resolve(root, "contracts/foundation");
   const raw = await readFile(resolve(directory, "manifest.json"));
   if (hash(raw) !== lock.manifest_sha256) throw new Error("Foundation manifest differs from the pinned release");
