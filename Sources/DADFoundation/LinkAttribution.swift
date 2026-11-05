@@ -124,7 +124,13 @@ public final class LinkAttribution: @unchecked Sendable {
     }
 
     public func captureCompany(code: String) async {
-        guard let token = try? await service.captureCompany(code: code, token: store.load().company) else { return }
+        // A thrown error is a transient failure: keep whatever token was stored. A successful call that
+        // returns nil means the visit kept no company window, so the stored token must be discarded —
+        // mirroring `captureReferral`. `try?` would flatten the `String??` and lose that distinction
+        // (binding a non-optional `String`, so a returned-nil would wrongly keep the stale token).
+        let token: String?
+        do { token = try await service.captureCompany(code: code, token: store.load().company) }
+        catch { return }
         update { $0.company = token }
         if token != nil { captured("company") }
     }
