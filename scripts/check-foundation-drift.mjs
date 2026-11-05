@@ -16,7 +16,7 @@ import { promisify } from "node:util";
 //   - behind by a MAJOR                   -> FAIL, exit 1 (a breaking contract change is unadopted)
 //   - remote tags unreachable / no tags   -> WARN, exit 0 (advisory; a network blip must not break CI)
 
-const SOURCE = "CoachCoe/DAD-Main";
+const SOURCE = "pre-dad/DAD-Main";
 const run = promisify(execFile);
 
 const parse = (v) => {

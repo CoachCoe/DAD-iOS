@@ -2,12 +2,13 @@
 
 CI for this repository runs on a self-hosted runner. The two jobs split by label:
 
-- `contract` → `self-hosted, dad, linux` (Node foundation checks).
-- `ios` → `self-hosted, dad, macos` (Xcode / Swift via `scripts/check-ios.sh`).
+- `contract` → `self-hosted, dad, macOS` (Node foundation checks).
+- `ios` → `self-hosted, dad, macOS` (Xcode / Swift via `scripts/check-ios.sh`).
 
-A single Apple Silicon Mac can serve both: GitHub label matching is
-case-insensitive, so the runner's auto-added `macOS` label satisfies `macos`,
-and the `linux` label is added explicitly at registration.
+A single Apple Silicon Mac serves both. GitHub adds `self-hosted`, `macOS` and
+`ARM64` automatically from what the host reports; `dad` is the custom label we add
+at registration. (The runner was originally registered with a `linux` label too,
+which was a misnomer for a macOS host and has been removed — do not re-add it.)
 
 ## Runner prerequisites
 
@@ -17,14 +18,14 @@ and the `linux` label is added explicitly at registration.
 
 ## Registration
 
-`CoachCoe` is a GitHub user account, so the runner is registered per-repository.
-Register from **Settings → Actions → Runners → New self-hosted runner** with both
-labels:
+`pre-dad` is a GitHub organization, so the runner is registered per-repository.
+Register from **Settings → Actions → Runners → New self-hosted runner** with the
+`dad` label (the `macOS`/`ARM64`/`self-hosted` labels are auto-added by the host):
 
 ```sh
-./config.sh --url https://github.com/CoachCoe/DAD-iOS \
+./config.sh --url https://github.com/pre-dad/DAD-iOS \
   --token <TOKEN_FROM_THE_RUNNERS_PAGE> \
-  --labels dad,linux,macos --name dad-ios-1
+  --labels dad --name dad-ios-1
 ./svc.sh install && ./svc.sh start
 ```
 
