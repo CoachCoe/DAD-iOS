@@ -8,7 +8,7 @@ permissions:
   contents: read
 jobs:
   contract:
-    runs-on: [self-hosted, dad, linux]
+    runs-on: [self-hosted, dad, macOS]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -20,7 +20,7 @@ jobs:
         run: node scripts/check-foundation-drift.mjs
       - run: node --test scripts/check-foundation-drift.test.mjs
   secret-scan:
-    runs-on: [self-hosted, dad, linux]
+    runs-on: [self-hosted, dad, macOS]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -55,7 +55,7 @@ jobs:
       - name: Scan full git history for secrets
         run: ./gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
   ios:
-    runs-on: [self-hosted, dad, macos]
+    runs-on: [self-hosted, dad, macOS]
     timeout-minutes: 25
     # One iOS job at a time shares the CI build caches.
     concurrency:
