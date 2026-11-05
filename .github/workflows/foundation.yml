@@ -8,7 +8,7 @@ permissions:
   contents: read
 jobs:
   contract:
-    runs-on: [self-hosted, dad, macOS]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -20,13 +20,13 @@ jobs:
         run: node scripts/check-foundation-drift.mjs
       - run: node --test scripts/check-foundation-drift.test.mjs
   secret-scan:
-    runs-on: [self-hosted, dad, macOS]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       # Pinned gitleaks binary (version + sha256) rather than a floating action tag, matching the
-      # repo's self-hosted, no-surprises posture. --redact keeps any match out of the logs.
+      # repo's no-surprises posture. --redact keeps any match out of the logs.
       - name: Install gitleaks (pinned)
         run: |
           set -euo pipefail
@@ -55,20 +55,18 @@ jobs:
       - name: Scan full git history for secrets
         run: ./gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
   ios:
-    runs-on: [self-hosted, dad, macOS]
-    timeout-minutes: 25
-    # One iOS job at a time shares the CI build caches.
-    concurrency:
-      group: dad-ios-macos
-      cancel-in-progress: false
+    # `xcode-27` is GitHub's hosted macOS image carrying Xcode 27 and the iOS 27 simulator runtime
+    # (the README toolchain floor); macos-latest/macos-26 stop at Xcode 26.
+    runs-on: xcode-27
+    # Hosted macOS runs cold: no warm build caches, simulator boot and a full xcodebuild test.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '24'
-      # The self-hosted Mac is also a development machine: the job keeps its own build caches (apart
-      # from the /tmp/dad-ios-* defaults a local run uses) and tests on a simulator it creates, so a
-      # local run can neither feed it stale build products nor kill its app mid-test.
+      - name: Select Xcode 27.2
+        run: sudo xcode-select -s /Applications/Xcode_27.2.app
       - name: Create this job's simulator
         run: echo "DAD_SIMULATOR_ID=$(node scripts/simulator.mjs --create "DAD CI $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT")" >> "$GITHUB_ENV"
       - run: bash scripts/check-ios.sh
