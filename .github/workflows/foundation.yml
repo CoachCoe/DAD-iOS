@@ -19,6 +19,26 @@ jobs:
       - name: Foundation drift (advisory)
         run: node scripts/check-foundation-drift.mjs
       - run: node --test scripts/check-foundation-drift.test.mjs
+  secret-scan:
+    runs-on: [self-hosted, dad, linux]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      # Pinned gitleaks binary (version + sha256) rather than a floating action tag, matching the
+      # repo's self-hosted, no-surprises posture. --redact keeps any match out of the logs.
+      - name: Install gitleaks (pinned)
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION=8.30.0
+          GITLEAKS_SHA256=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" gitleaks
+          ./gitleaks version
+      - name: Scan full git history for secrets
+        run: ./gitleaks detect --source . --redact --no-banner
   ios:
     runs-on: [self-hosted, dad, macos]
     timeout-minutes: 25
