@@ -69,6 +69,9 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_27.2.app
       - name: Create this job's simulator
         run: echo "DAD_SIMULATOR_ID=$(node scripts/simulator.mjs --create "DAD CI $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT")" >> "$GITHUB_ENV"
+      # A cold hosted simulator otherwise times out handing the UI test runner its background assertion.
+      - name: Boot this job's simulator
+        run: xcrun simctl bootstatus "$DAD_SIMULATOR_ID" -b
       - run: bash scripts/check-ios.sh
         env:
           DAD_SWIFT_BUILD: /tmp/dad-ci-ios-swift
