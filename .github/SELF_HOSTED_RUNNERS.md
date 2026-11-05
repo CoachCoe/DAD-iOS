@@ -18,12 +18,12 @@ which was a misnomer for a macOS host and has been removed — do not re-add it.
 
 ## Registration
 
-`CoachCoe` is a GitHub user account, so the runner is registered per-repository.
+`pre-dad` is a GitHub organization, so the runner is registered per-repository.
 Register from **Settings → Actions → Runners → New self-hosted runner** with the
 `dad` label (the `macOS`/`ARM64`/`self-hosted` labels are auto-added by the host):
 
 ```sh
-./config.sh --url https://github.com/CoachCoe/DAD-iOS \
+./config.sh --url https://github.com/pre-dad/DAD-iOS \
   --token <TOKEN_FROM_THE_RUNNERS_PAGE> \
   --labels dad --name dad-ios-1
 ./svc.sh install && ./svc.sh start
