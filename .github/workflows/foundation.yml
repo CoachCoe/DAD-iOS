@@ -67,8 +67,13 @@ jobs:
           node-version: '24'
       - name: Select Xcode 27.2
         run: sudo xcode-select -s /Applications/Xcode_27.2.app
+      # Pinned rather than scripts/simulator.mjs's "first iPhone on the newest runtime": on this image
+      # that is iOS 27.1's only iPhone, the iPhone Duo, whose TabView exposes no tab bar to UI tests.
       - name: Create this job's simulator
-        run: echo "DAD_SIMULATOR_ID=$(node scripts/simulator.mjs --create "DAD CI $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT")" >> "$GITHUB_ENV"
+        run: |
+          udid=$(xcrun simctl create "DAD CI $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "iPhone 18 Pro" com.apple.CoreSimulator.SimRuntime.iOS-27-0)
+          echo "DAD_SIMULATOR_ID=$udid" >> "$GITHUB_ENV"
       # A cold hosted simulator otherwise times out handing the UI test runner its background assertion.
       - name: Boot this job's simulator
         run: xcrun simctl bootstatus "$DAD_SIMULATOR_ID" -b
