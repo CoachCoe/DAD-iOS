@@ -336,7 +336,7 @@ struct GiftScreen: View {
                         Button {
                             Task { await model.updatePayment() }
                         } label: {
-                            HStack { Text("Update payment method"); Spacer(minLength: 0); Image(systemName: "chevron.right").font(.footnote) }
+                            HStack { Text("Update payment method"); Spacer(minLength: 0); Image(systemName: "chevron.right").font(.footnote).accessibilityHidden(true) }
                         }
                         .buttonStyle(DADButtonStyle(.secondary)).disabled(model.isBusy).accessibilityIdentifier("update-payment")
                     }
@@ -344,7 +344,7 @@ struct GiftScreen: View {
             }.accessibilityElement(children: .contain).accessibilityIdentifier("payment-card")
             // Gift history is a push on the Giving tab's NavigationStack (registered in Shell.swift).
             NavigationLink(value: GiftRoute.history) {
-                HStack { Text("Gift history"); Spacer(minLength: 0); Image(systemName: "chevron.right").font(.footnote) }
+                HStack { Text("Gift history"); Spacer(minLength: 0); Image(systemName: "chevron.right").font(.footnote).accessibilityHidden(true) }
             }
             .buttonStyle(DADButtonStyle(.secondary)).accessibilityIdentifier("giving-history")
         }
