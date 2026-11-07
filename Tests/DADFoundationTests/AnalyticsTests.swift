@@ -132,4 +132,63 @@ final class AnalyticsRecorderTests: XCTestCase {
         let pending = await recorder.pending
         XCTAssertEqual(pending, 0)
     }
+
+    private final class Clock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var date = Date(timeIntervalSince1970: 1_000)
+        var now: Date { lock.withLock { date } }
+        func advance(_ seconds: TimeInterval) { lock.withLock { date.addTimeInterval(seconds) } }
+    }
+
+    func testFlushWhenDueBacksOffAfterFailure() async throws {
+        let sink = SpySink()
+        await sink.setFailUntil(1)
+        let clock = Clock()
+        let recorder = AnalyticsRecorder(sink: sink, now: { clock.now })
+        try await recorder.record(.appOpened)
+        do { try await recorder.flushWhenDue(); XCTFail("expected throw") } catch {}
+        try await recorder.record(.giftStarted)
+        try await recorder.flushWhenDue() // still backing off: nothing is sent
+        var pending = await recorder.pending
+        XCTAssertEqual(pending, 2)
+        clock.advance(31)
+        try await recorder.flushWhenDue()
+        pending = await recorder.pending
+        XCTAssertEqual(pending, 0)
+        let count = await sink.flattened.count
+        XCTAssertEqual(count, 2)
+    }
+
+    func testBufferIsBoundedAndDropsOldest() async throws {
+        let recorder = AnalyticsRecorder(sink: SpySink())
+        let all = try (0..<(AnalyticsRecorder.maxBuffered + 5)).map { _ in try AnalyticsRecord(.appOpened) }
+        for record in all { await recorder.record(record) }
+        let pending = await recorder.pending
+        XCTAssertEqual(pending, AnalyticsRecorder.maxBuffered)
+    }
+
+    func testRecordsAddedDuringFlushAreNotLost() async throws {
+        actor Gate: AnalyticsSink {
+            var release: CheckedContinuation<Void, Never>?
+            var sent = 0
+            func send(_ batch: AnalyticsBatch) async throws {
+                if sent == 0 { await withCheckedContinuation { release = $0 } }
+                sent += batch.events.count
+            }
+            func open() { release?.resume(); release = nil }
+            var waiting: Bool { release != nil }
+        }
+        let gate = Gate()
+        let recorder = AnalyticsRecorder(sink: gate)
+        try await recorder.record(.appOpened)
+        let first = Task { try await recorder.flush() }
+        while await !gate.waiting { await Task.yield() }
+        try await recorder.record(.giftStarted) // arrives while the first batch is in flight
+        await gate.open()
+        try await first.value
+        let pending = await recorder.pending
+        XCTAssertEqual(pending, 0)
+        let sent = await gate.sent
+        XCTAssertEqual(sent, 2)
+    }
 }

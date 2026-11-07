@@ -145,7 +145,7 @@ private struct GiftSummaryCard: View {
                     HStack {
                         Text("Your monthly gift").font(.headline).accessibilityAddTraits(.isHeader)
                         Spacer(minLength: 0)
-                        Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary)
+                        Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary).accessibilityHidden(true)
                     }
                     // Equal-weight framing when a gift exists (G-7..G-9); the server detail line keeps
                     // the `gift-summary` id/text UITests assert.
@@ -229,7 +229,7 @@ private struct DashboardCards: View {
                 Text(streak.graceEndsAt.map { "A renewal didn’t go through. Update your payment by \($0.formatted(date: .long, time: .omitted)) to keep your streak." }
                      ?? "A renewal didn’t go through. Update your payment to keep your streak.")
             } icon: {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.dad("warn"))
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.dad("warn")).accessibilityHidden(true)
             }
             .font(.footnote).accessibilityIdentifier("streak-at-risk")
             Button("Update payment", action: onUpdatePayment)

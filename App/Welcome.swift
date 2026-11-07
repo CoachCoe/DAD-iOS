@@ -45,10 +45,11 @@ struct WelcomeScreen: View {
     /// Tertiary "Partner organization? Sign in here" → partner sign-in.
     let onPartner: () -> Void
     @Environment(AnalyticsController.self) private var analytics: AnalyticsController?
+    @ScaledMetric(relativeTo: .largeTitle) private var logoSize: CGFloat = 44
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Image(systemName: "heart.circle.fill").font(.system(size: 44))
+            Image(systemName: "heart.circle.fill").font(.system(size: logoSize))
                 .foregroundStyle(Color.dad("brand")).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Aid, delivered.").font(.caption).textCase(.uppercase).foregroundStyle(Color.dad("dkmut"))
